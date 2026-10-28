@@ -972,6 +972,8 @@ git commit -m "feat: gate-train.sh — batch gate, one full check run per train"
 Append before the final summary line:
 
 ```bash
+git checkout -q main
+
 # --- fake-gh + open-pr.sh -----------------------------------------------------
 out=$(bash "$plugin/scripts/open-pr.sh" 2>&1)
 expect "open-pr with no branch is a usage error" "2" "$?"
@@ -1110,7 +1112,7 @@ git commit -m "feat: open-pr.sh + fake-gh (offline PR stand-in with real squash 
 - Create: `scripts/merge-train.sh`
 - Modify: `tests/smoke.sh` (append sections before the final summary)
 
-- [ ] **Step 1: Add the failing tests**
+- [x] **Step 1: Add the failing tests**
 
 Append before the final summary line:
 
@@ -1160,8 +1162,9 @@ printf 'feat: seven (#7)\n\nCloses #7\n' >"$("$plugin/scripts/paths.sh" notes fe
 bash "$plugin/scripts/gate-train.sh" feat/7-moved >/dev/null 2>&1
 git checkout -q feat/7-moved && echo more >>seven.txt && git commit -q -am "feat: more (Refs #7)" && git push -q origin feat/7-moved
 out=$(bash "$plugin/scripts/merge-train.sh" feat/7-moved 2>&1)
+rc=$?
 echo "$out"
-expect "merge-train refuses a branch that changed since the gate" "6" "$?"
+expect "merge-train refuses a branch that changed since the gate" "6" "$rc"
 
 # The base moved after the gate (no conflict) -> tree differs -> re-gate.
 git checkout -q -B feat/8-ok origin/main
@@ -1172,8 +1175,9 @@ expect "feat/8-ok gates green" "0" "$?"
 git checkout -q -B side origin/main
 echo moved >moved.txt && git add moved.txt && git commit -q -m "chore: main moved" && git push -q origin side:main
 out=$(bash "$plugin/scripts/merge-train.sh" feat/8-ok 2>&1)
+rc=$?
 echo "$out"
-expect "merge-train refuses when the tree differs from the gated one" "4" "$?"
+expect "merge-train refuses when the tree differs from the gated one" "4" "$rc"
 
 # The base moved AND conflicts -> replay conflict.
 git checkout -q -B feat/9-clash origin/main
@@ -1183,16 +1187,17 @@ bash "$plugin/scripts/gate-train.sh" feat/9-clash >/dev/null 2>&1
 git checkout -q -B side2 origin/main
 echo other-clash >clash.txt && git add clash.txt && git commit -q -m "chore: clash on main" && git push -q origin side2:main
 out=$(bash "$plugin/scripts/merge-train.sh" feat/9-clash 2>&1)
+rc=$?
 echo "$out"
-expect "merge-train refuses a replay conflict" "3" "$?"
+expect "merge-train refuses a replay conflict" "3" "$rc"
 ```
 
-- [ ] **Step 2: Run and verify it fails**
+- [x] **Step 2: Run and verify it fails**
 
 Run: `bash tests/smoke.sh`
 Expected: all new merge assertions FAIL (missing script); 33 previous PASS.
 
-- [ ] **Step 3: Write `scripts/merge-train.sh`**
+- [x] **Step 3: Write `scripts/merge-train.sh`**
 
 Port of the reference with identity mode removed (no `as-role.sh`, no status posting, no approval gate, no exit 9):
 
@@ -1314,12 +1319,12 @@ rm -f "$train_file"
 echo "notes kept in $(dl_notes_dir)"
 ```
 
-- [ ] **Step 4: Run and verify it passes**
+- [x] **Step 4: Run and verify it passes**
 
 Run: `bash tests/smoke.sh`
-Expected: all merge assertions PASS (refusal 8, subset 8, in-order double squash with correct subjects, branch deletion, record consumed, main ff, PR MERGED, notes 5, changed 6, tree 4, replay conflict 3). Total `50 passed, 0 failed`. Suite runtime ~25s.
+Expected: all merge assertions PASS (refusal 8, subset 8, in-order double squash with correct subjects, branch deletion, record consumed, main ff, PR MERGED, notes 5, changed 6, tree 4, replay conflict 3). Total `52 passed, 0 failed`. Suite runtime ~30s.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/merge-train.sh tests/smoke.sh

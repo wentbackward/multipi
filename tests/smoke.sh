@@ -157,6 +157,8 @@ echo "$out"
 expect "gate-train stops on a conflict and names the branch" "3 TRAIN rebase conflict at feat/5-conflict" \
   "$rc $(echo "$out" | tail -1)"
 
+git checkout -q main
+
 # --- fake-gh + open-pr.sh -----------------------------------------------------
 out=$(bash "$plugin/scripts/open-pr.sh" 2>&1)
 expect "open-pr with no branch is a usage error" "2" "$?"
@@ -172,6 +174,80 @@ grep -q "Closes #1" "$FAKE_GH_DIR/feat_1-first.body" && pass "PR body is the res
   fail "PR body missing Closes #1"
 expect "open-pr is idempotent when the PR exists" "0" \
   "$(bash "$plugin/scripts/open-pr.sh" feat/1-first >/dev/null 2>&1; echo $?)"
+
+# --- merge-train.sh -----------------------------------------------------------
+out=$(bash "$plugin/scripts/merge-train.sh" feat/1-first feat/2-second 2>&1)
+expect "merge-train refuses a train that was not gated green" "8" "$?"
+# The record from the Task 5 green gate was consumed by the red/conflict gates above,
+# so re-gate the good pair before merging.
+out=$(bash "$plugin/scripts/gate-train.sh" feat/1-first feat/2-second 2>&1)
+rc=$?
+expect "re-gate of the good pair is green" "0" "$rc"
+out=$(bash "$plugin/scripts/merge-train.sh" feat/2-second 2>&1)
+expect "merge-train refuses a subset of the pending train" "8" "$?"
+echo "$out" | grep -q "still to merge" && pass "subset refusal names the pending train" ||
+  fail "subset refusal has no pending-train message"
+
+out=$(bash "$plugin/scripts/merge-train.sh" feat/1-first feat/2-second 2>&1)
+rc=$?
+echo "$out"
+expect "merge-train merges the green train in order" "0" "$rc"
+git fetch -q origin
+expect "origin main has both squash commits, in order" "feat: other file (#2)|feat: second line (#1)" \
+  "$(git log --format=%s -2 origin/main | paste -sd'|')"
+git ls-remote --exit-code origin feat/1-first >/dev/null 2>&1 && fail "merged branch not deleted" ||
+  pass "merged branches are deleted on origin"
+git ls-remote --exit-code origin feat/2-second >/dev/null 2>&1 && fail "merged branch 2 not deleted" ||
+  pass "merged branch 2 deleted on origin"
+[ ! -f "$work/home/project/train-green.txt" ] && pass "the green record is consumed" ||
+  fail "green record still present after merge"
+[ "$(git rev-parse main)" = "$(git rev-parse origin/main)" ] && pass "main checkout fast-forwarded" ||
+  fail "main checkout not fast-forwarded"
+expect "fake gh reports the PR MERGED" "MERGED" "$(cat "$FAKE_GH_DIR/feat_1-first.state")"
+
+# Missing notes file (and no PR) for a fresh gated branch.
+git checkout -q -B feat/6-no-notes origin/main
+echo six >six.txt && git add six.txt && git commit -q -m "feat: six (Refs #6)" && git push -q -u origin feat/6-no-notes
+bash "$plugin/scripts/gate-train.sh" feat/6-no-notes >/dev/null 2>&1
+expect "fresh branch gates green" "0" "$?"
+out=$(bash "$plugin/scripts/merge-train.sh" feat/6-no-notes 2>&1)
+expect "merge-train exits 5 on a missing notes file" "5" "$?"
+
+# The branch changed after the gate.
+git checkout -q -B feat/7-moved origin/main
+echo seven >seven.txt && git add seven.txt && git commit -q -m "feat: seven (Refs #7)" && git push -q -u origin feat/7-moved
+printf 'feat: seven (#7)\n\nCloses #7\n' >"$("$plugin/scripts/paths.sh" notes feat/7-moved)"
+bash "$plugin/scripts/gate-train.sh" feat/7-moved >/dev/null 2>&1
+git checkout -q feat/7-moved && echo more >>seven.txt && git commit -q -am "feat: more (Refs #7)" && git push -q origin feat/7-moved
+out=$(bash "$plugin/scripts/merge-train.sh" feat/7-moved 2>&1)
+rc=$?
+echo "$out"
+expect "merge-train refuses a branch that changed since the gate" "6" "$rc"
+
+# The base moved after the gate (no conflict) -> tree differs -> re-gate.
+git checkout -q -B feat/8-ok origin/main
+echo ok >ok.txt && git add ok.txt && git commit -q -m "feat: ok (Refs #8)" && git push -q -u origin feat/8-ok
+printf 'feat: ok (#8)\n\nCloses #8\n' >"$("$plugin/scripts/paths.sh" notes feat/8-ok)"
+bash "$plugin/scripts/gate-train.sh" feat/8-ok >/dev/null 2>&1
+expect "feat/8-ok gates green" "0" "$?"
+git checkout -q -B side origin/main
+echo moved >moved.txt && git add moved.txt && git commit -q -m "chore: main moved" && git push -q origin side:main
+out=$(bash "$plugin/scripts/merge-train.sh" feat/8-ok 2>&1)
+rc=$?
+echo "$out"
+expect "merge-train refuses when the tree differs from the gated one" "4" "$rc"
+
+# The base moved AND conflicts -> replay conflict.
+git checkout -q -B feat/9-clash origin/main
+echo clash >clash.txt && git add clash.txt && git commit -q -m "feat: clash (Refs #9)" && git push -q -u origin feat/9-clash
+printf 'feat: clash (#9)\n\nCloses #9\n' >"$("$plugin/scripts/paths.sh" notes feat/9-clash)"
+bash "$plugin/scripts/gate-train.sh" feat/9-clash >/dev/null 2>&1
+git checkout -q -B side2 origin/main
+echo other-clash >clash.txt && git add clash.txt && git commit -q -m "chore: clash on main" && git push -q origin side2:main
+out=$(bash "$plugin/scripts/merge-train.sh" feat/9-clash 2>&1)
+rc=$?
+echo "$out"
+expect "merge-train refuses a replay conflict" "3" "$rc"
 
 echo "smoke: $passed passed, $failed failed (work dir $work)"
 [ "$failed" -eq 0 ]
