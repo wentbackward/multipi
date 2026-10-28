@@ -80,5 +80,31 @@ expect "paths.sh notes creates the notes dir and prints the file path" \
   fail "paths.sh notes did not create the notes directory"
 expect "paths.sh rejects a bad subcommand" "2" "$(paths_run_rc paths.sh bogus)"
 
+# --- heavy.sh -----------------------------------------------------------------
+expect "heavy.sh exports the slot port (base + slot*step)" "9110" \
+  "$(bash "$plugin/scripts/heavy.sh" bash -c 'echo $SMOKE_PORT' 2>/dev/null)"
+expect "heavy.sh passes through a zero exit" "0" \
+  "$(bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
+expect "heavy.sh passes through a non-zero exit" "1" \
+  "$(bash "$plugin/scripts/heavy.sh" false >/dev/null 2>&1; echo $?)"
+
+# Three 3-second jobs on two slots: the third must wait for a slot to free.
+start=$(date +%s)
+for n in 1 2 3; do
+  bash "$plugin/scripts/heavy.sh" bash -c "echo start $n \$(date +%s) slot \$MULTIPI_SLOT; sleep 3; echo end $n \$(date +%s)" \
+    >"$work/heavy-$n.out" 2>"$work/heavy-$n.err" &
+  sleep 0.3
+done
+wait
+cat "$work"/heavy-*.out
+grep -q "all 2 slots busy" "$work/heavy-3.err" && pass "third heavy job reports that it waits" ||
+  fail "third heavy job did not wait"
+third_start=$(awk '/^start 3/ {print $3}' "$work/heavy-3.out")
+first_end=$(awk '/^end 1/ {print $3}' "$work/heavy-1.out")
+[ -n "$third_start" ] && [ "$third_start" -ge "$first_end" ] &&
+  pass "third heavy job starts only after a slot frees" ||
+  fail "third heavy job started at ${third_start:-?} before the first ended at ${first_end:-?}"
+echo "heavy: 3x3s jobs on 2 slots took $(($(date +%s) - start))s"
+
 echo "smoke: $passed passed, $failed failed (work dir $work)"
 [ "$failed" -eq 0 ]

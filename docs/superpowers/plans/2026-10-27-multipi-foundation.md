@@ -558,7 +558,7 @@ git commit -m "feat: paths.sh — resolved path printing for prompts and notes"
 - Create: `scripts/heavy.sh`
 - Modify: `tests/smoke.sh` (append a section before the final summary)
 
-- [ ] **Step 1: Add the failing tests**
+- [x] **Step 1: Add the failing tests**
 
 Append before the final summary line:
 
@@ -590,12 +590,12 @@ first_end=$(awk '/^end 1/ {print $3}' "$work/heavy-1.out")
 echo "heavy: 3x3s jobs on 2 slots took $(($(date +%s) - start))s"
 ```
 
-- [ ] **Step 2: Run and verify it fails**
+- [x] **Step 2: Run and verify it fails**
 
 Run: `bash tests/smoke.sh`
 Expected: the 5 new heavy assertions FAIL (missing script); 14 previous PASS.
 
-- [ ] **Step 3: Write `scripts/heavy.sh`**
+- [x] **Step 3: Write `scripts/heavy.sh`**
 
 Port of the reference with the renaming table applied (`multipi-heavy-slots` lock dir, `MULTIPI_*` env, `MULTIPI_SLOT`):
 
@@ -741,12 +741,12 @@ while true; do
 done
 ```
 
-- [ ] **Step 4: Run and verify it passes**
+- [x] **Step 4: Run and verify it passes**
 
 Run: `bash tests/smoke.sh`
-Expected: the heavy assertions PASS; `smoke: 19 passed, 0 failed`. The heavy section takes ~7s (3×3s on 2 slots + polls).
+Expected: the heavy assertions PASS; `smoke: 18 passed, 0 failed`. The heavy section takes ~7s (3×3s on 2 slots + polls).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/heavy.sh tests/smoke.sh
