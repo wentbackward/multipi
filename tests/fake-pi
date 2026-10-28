@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Stand-in for: pi -p --no-session --mode json [--append-system-prompt F] [--tools ...] [--model M] TASK...
+# FAKE_PI_MODE: ok (default) | fail | slow. Streams the NDJSON events the real pi emits in JSON mode.
+set -u
+mode=${FAKE_PI_MODE:-ok}
+sleep_s=${FAKE_PI_SLEEP:-0.1}
+task=""
+for a in "$@"; do task="$task $a"; done
+emit() { printf '%s\n' "$1"; }
+if [ "$mode" = slow ]; then
+  trap 'exit 143' TERM
+  sleep "$sleep_s" &
+  wait $! || exit 143
+fi
+if [ "$mode" = fail ]; then
+  echo "fake-pi: model blew up" >&2
+  exit 3
+fi
+emit "{\"type\":\"tool_result_end\",\"message\":{\"role\":\"toolResult\",\"toolName\":\"bash\",\"content\":[{\"type\":\"text\",\"text\":\"ls\"}],\"details\":null}}"
+emit "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Ran the task. Tests pass.\\n\\nSTATUS: DONE\"}],\"model\":\"fake/model\",\"stopReason\":\"end\",\"usage\":{\"input\":10,\"output\":20,\"cacheRead\":0,\"cacheWrite\":0,\"cost\":{\"total\":0.001},\"totalTokens\":30}}}"
+if [ -n "${FAKE_PI_ECHO_TASK:-}" ]; then
+  task=${task#?}
+  esc=${task//\"/\\\"}
+  emit "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"TASK WAS: $esc\"}],\"model\":\"fake/model\",\"stopReason\":\"end\",\"usage\":{\"input\":1,\"output\":1,\"cacheRead\":0,\"cacheWrite\":0,\"cost\":{\"total\":0},\"totalTokens\":2}}}"
+fi
+exit 0
