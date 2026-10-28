@@ -304,6 +304,12 @@ echo "$out"
   fail "expected exactly one MISSING line"
 echo "$out" | grep -q "^MISSING @earendil-works/pi-coding-agent" &&
   pass "doctor names the one missing package" || fail "the missing package was not named"
+echo "$out" | grep -q "cannot be loaded from .pi/extensions/multipi-devloop" &&
+  pass "missing package line carries the load wording" ||
+  fail "missing package line lacks the load wording (want: 'cannot be loaded')"
+echo "$out" | grep -q "cannot be resolved" &&
+  fail "stale resolution wording in the missing package line" ||
+  pass "no stale resolution wording in the missing package line"
 echo "$out" | grep -q "npm i -D typebox @earendil-works/pi-coding-agent" &&
   pass "doctor offers the npm remedy" || fail "no npm remedy"
 
@@ -339,6 +345,33 @@ echo "$out" | grep -q '^ok      extension runtime' &&
 echo "$out" | grep -q '^MISSING extension runtime' &&
   pass "crashed probe is reported as a MISSING line" ||
   fail "crashed probe was not reported as MISSING"
+
+# A package that RESOLVES but throws at evaluation: the probe's import rejects,
+# so the package is named — with the LOAD wording (resolution was not what failed).
+mkdir -p node_modules/typebox
+printf '{"name":"typebox","version":"0.0.0","main":"index.js"}' >node_modules/typebox/package.json
+echo 'throw new Error("evaluation failed"); ' >node_modules/typebox/index.js
+stub_pkg /@earendil-works/pi-coding-agent
+out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
+rc=$?
+echo "$out"
+[ "$rc" -ne 0 ] && pass "doctor fails when a package throws at evaluation" ||
+  fail "doctor passed although a package threw at evaluation"
+[ "$(echo "$out" | grep -c '^MISSING')" = 1 ] &&
+  pass "eval-time throw flags exactly one problem" ||
+  fail "expected exactly one MISSING line for the eval-time throw"
+echo "$out" | grep -q "^MISSING typebox" &&
+  pass "eval-time throw names the throwing package" ||
+  fail "eval-time throw did not name the package"
+echo "$out" | grep -q "cannot be loaded from .pi/extensions/multipi-devloop" &&
+  pass "eval-time failure carries the load wording" ||
+  fail "eval-time failure missing the load wording (want: 'cannot be loaded')"
+echo "$out" | grep -q "cannot be resolved" &&
+  fail "stale resolution wording remains beside the eval-time throw" ||
+  pass "no stale resolution wording beside the eval-time throw"
+echo "$out" | grep -q '^ok      extension runtime' &&
+  fail "false ok line when a package throws at evaluation" ||
+  pass "no false ok line for the eval-time throw"
 
 # A dependency that prints noise but resolves must stay healthy: doctor reads only its own
 # verdict lines, not the imported package's side effects.
@@ -394,19 +427,24 @@ echo "$out" | grep -q '^ok      extension runtime' &&
 # node not on PATH: named, and the run fails even with the packages present.
 stub_pkg /typebox
 stub_pkg /@earendil-works/pi-coding-agent
-node_dirs=$(
-  for d in ${PATH//:/ }; do [ -x "$d/node" ] && printf '%s ' "$d"; done
-)
-[ -n "$node_dirs" ] || { echo "smoke: no node on PATH; cannot test the node-missing case"; exit 1; }
-path_nonode=$(printf '%s\n' "${PATH//:/ }" | while IFS= read -r d; do printf '%s\n' "$node_dirs" | tr ' ' '\n' | grep -Fxq "$d" || printf '%s\n' "$d"; done | paste -sd: -)
+# Split PATH into dirs (quoted); collect the ones that put node on PATH.
+IFS=: read -ra path_dirs <<<"$PATH"
+node_dirs=()
+for d in "${path_dirs[@]}"; do [ -x "$d/node" ] && node_dirs+=("$d"); done
+[ "${#node_dirs[@]}" -gt 0 ] || { echo "smoke: no node on PATH; cannot test the node-missing case"; exit 1; }
+# path_nonode: the same dirs minus the node-bearing ones.
+path_nonode=""
+for d in "${path_dirs[@]}"; do
+  skip=0
+  for nd in "${node_dirs[@]}"; do [ "$d" = "$nd" ] && skip=1; done
+  [ "$skip" -ne 1 ] && path_nonode+="${path_nonode:+:}$d"
+done
 mkdir -p "$work/bin-nonode"
-# Re-provide everything the filtered PATH loses (bash, coreutils, git, jq...) except node itself:
-for f in /usr/bin/* /bin/* /usr/local/bin/*; do
-  name=$(basename "$f")
-  [ "$name" = node ] && continue
-  [ -e "$f" ] || continue
-  [ -L "$work/bin-nonode/$name" ] && continue # dedupe: /bin -> /usr/bin symlinks overlap
-  ln -s "$f" "$work/bin-nonode/$name"
+# Re-provide what doctor.sh, common.sh and fake-gh need under the filtered PATH, deriving
+# each location from `command -v` (no hardcoded bin dirs); node itself is left out:
+for tool in env bash sh git jq python3 cut dirname basename realpath mkdir; do
+  d=$(command -v "$tool" 2>/dev/null) || continue
+  ln -sf "$d" "$work/bin-nonode/$tool"
 done
 ln -sf "$work/bin/gh" "$work/bin-nonode/gh"
 out=$(PATH="$work/bin-nonode:$path_nonode" bash "$plugin/scripts/doctor.sh" 2>&1)
@@ -420,7 +458,25 @@ echo "$out" | grep -q "extension runtime" &&
   fail "doctor printed the runtime ok line without node" ||
   pass "no false ok line without node"
 
-rm -rf "$EXT" node_modules "$work/bin-nonode"
+# A node on PATH that is itself broken (#!/bin/sh, exit 1): the probe cannot run,
+# so no ok line, the probe problem line is present (reporting the node exit),
+# and the run fails.
+mkdir -p "$work/bin-badnode"
+printf '#!/bin/sh\nexit 1\n' >"$work/bin-badnode/node"
+chmod +x "$work/bin-badnode/node"
+out=$(PATH="$work/bin-badnode:$PATH" bash "$plugin/scripts/doctor.sh" 2>&1)
+rc=$?
+echo "$out"
+[ "$rc" -ne 0 ] && pass "doctor fails when node on PATH is broken" ||
+  fail "doctor passed with a broken node on PATH"
+echo "$out" | grep -q '^ok      extension runtime' &&
+  fail "false ok line from a broken node" ||
+  pass "no false ok line when node on PATH is broken"
+echo "$out" | grep -q '^MISSING extension runtime probe (import check did not run cleanly; node exit 1)' &&
+  pass "broken node yields the probe problem line" ||
+  fail "broken node missing the probe problem line (want: MISSING extension runtime probe ... node exit 1)"
+
+rm -rf "$EXT" node_modules "$work/bin-nonode" "$work/bin-badnode"
 
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
 MULTIPI_PLUGIN_DIR="$plugin" node --input-type=module -e '
