@@ -1,0 +1,9 @@
+{
+  "base_branch": "main",
+  "remote": "origin",
+  "fast_check": "",
+  "checks": [],
+  "heavy": { "slots": 2 },
+  "stop_gate": { "require_clean_tree": true, "max_blocks": 5 },
+  "merge": { "method": "squash", "delete_branch": true }
+}
