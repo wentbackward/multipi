@@ -55,7 +55,7 @@ Conventions: every script starts with `set -u` and sources `lib/common.sh` via i
 **Files:**
 - Create: `Makefile`, `.gitignore`, `README.md`, `templates/devloop.json`, `templates/AGENTS.md`, `templates/DECISIONS.md`
 
-- [ ] **Step 1: Create the files**
+- [x] **Step 1: Create the files**
 
 `Makefile`:
 
@@ -193,12 +193,12 @@ Decisions the dev loop made where the spec was silent. Newest last.
 One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
 ```
 
-- [ ] **Step 2: Verify**
+- [x] **Step 2: Verify**
 
 Run: `cd /home/code/hacking/multipi && ls Makefile .gitignore README.md templates/`
 Expected: all five paths listed. `make check` will fail here (no `tests/smoke.sh` yet) — expected, not a stop.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add Makefile .gitignore README.md templates/
@@ -212,7 +212,7 @@ git commit -m "chore: repository skeleton (Makefile, templates, README)"
 **Files:**
 - Create: `scripts/lib/common.sh`, `tests/smoke.sh`
 
-- [ ] **Step 1: Write the failing tests (smoke harness + config tests)**
+- [x] **Step 1: Write the failing tests (smoke harness + config tests)**
 
 `tests/smoke.sh`:
 
@@ -278,7 +278,7 @@ expect "cfg falls back to the default" "fallback" "$(cfg_out 'cfg no.such.key fa
 expect "cfg_len counts the checks array" "2" "$(cfg_out 'cfg_len checks')"
 expect "json_get walks into an array object" "unit" "$(cfg_out 'json_get checks.0.name <"$DL_CONFIG"')"
 expect "dl_note_file maps slashes to underscores" \
-  "$work/home/notes/pr-feat_1-first.md" "$(cfg_out 'dl_note_file feat/1-first')"
+  "$work/home/project/notes/pr-feat_1-first.md" "$(cfg_out 'dl_note_file feat/1-first')"
 expect "dl_gate_dir resolves the default relative to the main root" \
   "$work/project-gate" "$(cfg_out 'dl_gate_dir')"
 expect "dl_state is under MULTIPI_HOME/<repo>" \
@@ -290,12 +290,12 @@ echo "smoke: $passed passed, $failed failed (work dir $work)"
 [ "$failed" -eq 0 ]
 ```
 
-- [ ] **Step 2: Run and verify it fails**
+- [x] **Step 2: Run and verify it fails**
 
 Run: `bash tests/smoke.sh`
 Expected: FAIL lines for the config assertions; the first failure looks like `FAIL cfg reads a plain value (expected 'main', got '')` (sourcing a missing file errors). The suite still exits non-zero.
 
-- [ ] **Step 3: Write `scripts/lib/common.sh`**
+- [x] **Step 3: Write `scripts/lib/common.sh`**
 
 Near-verbatim port of the reference with the renaming table applied:
 
@@ -459,12 +459,14 @@ dl_ensure_gate_worktree() {
 }
 ```
 
-- [ ] **Step 4: Run and verify it passes**
+- [x] **Step 4: Run and verify it passes**
 
 Run: `bash tests/smoke.sh`
-Expected: all 9 `PASS` lines, final `smoke: 9 passed, 0 failed`, exit 0. (The `AGENTS.md` fixture file is committed with the config; later tasks' doctor test relies on it.)
+Expected: all 8 `PASS` lines, final `smoke: 8 passed, 0 failed`, exit 0. (The `AGENTS.md` fixture file is committed with the config; later tasks' doctor test relies on it.)
 
-- [ ] **Step 5: Commit**
+Execution note (2026-10-27): the notes-path expectation above was corrected during execution — the state dir is `~/.multipi/<repo>/notes` (repo-scoped), and `dl_notes_dir`/`dl_logs_dir`/`dl_gate_dir` canonicalize configured/default paths via `realpath -m` (a deliberate improvement over the reference, whose `../repo-gate` path was uncanonicalized).
+
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/lib/common.sh tests/smoke.sh
@@ -492,8 +494,8 @@ expect "paths.sh root prints the main root" "$work/project" \
 expect "paths.sh config prints the config path" "$work/project/.devloop.json" \
   "$(paths_run 'paths.sh config')"
 expect "paths.sh notes creates the notes dir and prints the file path" \
-  "$work/home/notes/pr-feat_9-x.md" "$(paths_run 'paths.sh notes feat/9-x')"
-[ -d "$work/home/notes" ] && pass "paths.sh notes created the notes directory" ||
+  "$work/home/project/notes/pr-feat_9-x.md" "$(paths_run 'paths.sh notes feat/9-x')"
+[ -d "$work/home/project/notes" ] && pass "paths.sh notes created the notes directory" ||
   fail "paths.sh notes did not create the notes directory"
 expect "paths.sh rejects a bad subcommand" "2" "$(paths_run_rc 'paths.sh bogus')"
 ```
