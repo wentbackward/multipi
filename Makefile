@@ -9,7 +9,7 @@ ts:
 
 shellcheck:
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck $(SCRIPTS) tests/fake-gh; \
+		shellcheck $(SCRIPTS) tests/fake-gh tests/fake-pi; \
 	else \
 		echo "WARNING: shellcheck not installed — skipping. Install it; the loop must not silently skip."; \
 	fi

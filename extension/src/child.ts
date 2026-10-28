@@ -34,6 +34,8 @@ export interface SpawnOpts {
 	cwd: string;
 	env?: NodeJS.ProcessEnv;
 	signal?: AbortSignal;
+	/** Called once the process has started, with its (possibly undefined) pid. */
+	onSpawn?: (pid: number | undefined) => void;
 	onUpdate?: (partial: { finalText: string; toolCalls: string[] }) => void;
 }
 
@@ -144,6 +146,7 @@ export function spawnPi(opts: SpawnOpts): Promise<ChildResult> {
 		proc.stderr.on("data", (d: Buffer) => {
 			res.stderr += d.toString();
 		});
+		opts.onSpawn?.(proc.pid);
 		let killed = false;
 		const onAbort = () => {
 			if (killed) return;

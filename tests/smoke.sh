@@ -264,5 +264,18 @@ echo "$out" | grep -q "MISSING .*\.devloop.json" && pass "doctor names the missi
   fail "doctor did not name the missing config"
 mv .devloop.json.bak .devloop.json
 
+# --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
+MULTIPI_PLUGIN_DIR="$plugin" node --input-type=module -e '
+const pi = { registered: [], handlers: {}, registerTool(t) { this.registered.push(t.name); }, on(ev, h) { this.handlers[ev] = h; } };
+const mod = await import(process.env.MULTIPI_PLUGIN_DIR + "/extension/index.ts");
+if (typeof mod.default !== "function") { console.error("extension default export is not a factory"); process.exit(1); }
+mod.default(pi);
+const want = ["devloop.dispatch", "devloop.cancel", "devloop.gate", "devloop.merge", "devloop.status"].join(",");
+if (pi.registered.join(",") !== want) { console.error("registered tools:", pi.registered.join(",")); process.exit(1); }
+for (const ev of ["agent_before_settle", "tool_result"]) {
+  if (typeof pi.handlers[ev] !== "function") { console.error("missing hook:", ev); process.exit(1); }
+}
+' >/dev/null 2>&1 && pass "extension registers the five devloop tools and both hooks" || fail "extension registration probe"
+
 echo "smoke: $passed passed, $failed failed (work dir $work)"
 [ "$failed" -eq 0 ]

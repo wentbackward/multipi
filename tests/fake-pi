@@ -16,6 +16,20 @@ if [ "$mode" = fail ]; then
   echo "fake-pi: model blew up" >&2
   exit 3
 fi
+# Simulate an honest implementer: if the brief carries a notes-file instruction, write the notes file.
+note=$(printf '%s' "$task" | grep -oE 'Notes file \(outside git, do NOT commit\): [^ ]+' | head -1 | sed 's/.*: //')
+if [ -n "$note" ]; then
+  mkdir -p "$(dirname "$note")"
+  tno=$(printf '%s' "$task" | grep -oE 'Implement ticket #[0-9]+' | head -1 | grep -oE '[0-9]+')
+  printf 'fake: implemented ticket #%s\n\n## Summary\nFake implementer did the work (offline test).\n\nCloses #%s\n\n## Test evidence\nfake: none\n' "${tno:-?}" "${tno:-?}" >"$note"
+  # The child's cwd IS its worktree: produce one real commit and push the branch.
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "fake: work" >"fake-evidence.txt"
+    git add -A
+    git commit -qm "fake: implement (Refs #${tno:-0})" || true
+    git push -qu origin HEAD >/dev/null 2>&1 || true
+  fi
+fi
 emit "{\"type\":\"tool_result_end\",\"message\":{\"role\":\"toolResult\",\"toolName\":\"bash\",\"content\":[{\"type\":\"text\",\"text\":\"ls\"}],\"details\":null}}"
 emit "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Ran the task. Tests pass.\\n\\nSTATUS: DONE\"}],\"model\":\"fake/model\",\"stopReason\":\"end\",\"usage\":{\"input\":10,\"output\":20,\"cacheRead\":0,\"cacheWrite\":0,\"cost\":{\"total\":0.001},\"totalTokens\":30}}}"
 if [ -n "${FAKE_PI_ECHO_TASK:-}" ]; then

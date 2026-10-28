@@ -1,12 +1,34 @@
 #!/usr/bin/env bash
-# A stand-in for the GitHub CLI, for the smoke tests: PRs live in $FAKE_GH_DIR as flat files, a
-# squash merge is a real squash commit pushed to the local bare origin. Every call is logged.
-# Supports only what the multipi scripts call: auth status, pr create, pr view, pr merge.
+# A stand-in for the GitHub CLI, for the smoke tests. Offline, no network.
+#
+# PRs live in $FAKE_GH_DIR as flat files: <head-slug>.title / .body / .state
+# (slug: branch name with "/" replaced by "_"). A squash merge is a real
+# `git merge --squash` into a fresh clone of the bare origin, honouring
+# --match-head-commit when given. Every call is appended to calls.log.
+#
+# Issues live in $FAKE_GH_DIR/issues (open) and issues-closed, one file per
+# number (line 1 title, line 2 body); labels in labels/<n>.
+#
+# Supported surface (everything the multipi scripts and extension call):
+#   auth status
+#   pr view <branch> [--json state]        0 open, 1 none
+#   pr create --head B --title T [--body-file F]
+#   pr merge|squash-merge <branch> [--match-head-commit SHA]
+#   issue create <title> [body]            prints issue URL
+#   issue list --state open|closed --json <fields>
+#   issue view <n> --json <fields>
+#   issue edit <n> --add-label <l>
+#   issue close <n> [--comment <c>]
+#
+# JSON strings escape backslash, double quote and newline only — smoke bodies
+# are single-line without quotes (a deliberate, documented limit of the fake).
 set -u
 dir=${FAKE_GH_DIR:?FAKE_GH_DIR not set}
-mkdir -p "$dir"
+mkdir -p "$dir" "$dir/issues" "$dir/issues-closed" "$dir/labels"
 echo "gh $*" >>"$dir/calls.log"
 key() { printf '%s' "${1//\//_}"; }
+jesc() { printf '%s' "${1:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+
 case "${1:-} ${2:-}" in
   "auth status")
     exit 0
@@ -30,10 +52,10 @@ case "${1:-} ${2:-}" in
       esac
     done
     printf '%s\n' "$title" >"$dir/$(key "$head").title"
-    cp "$body_file" "$dir/$(key "$head").body"
+    [ -f "$body_file" ] && cp "$body_file" "$dir/$(key "$head").body"
     echo OPEN >"$dir/$(key "$head").state"
     ;;
-  "pr merge")
+  "pr merge"|"pr squash-merge")
     branch=$3
     origin=$(git remote get-url origin)
     expected=""
@@ -51,6 +73,78 @@ case "${1:-} ${2:-}" in
     ) || { rm -rf "$work"; exit 1; }
     rm -rf "$work"
     echo MERGED >"$dir/$(key "$branch").state"
+    ;;
+  "issue create")
+    title=$3
+    body=${4:-}
+    n=1
+    for d in "$dir/issues" "$dir/issues-closed"; do
+      for f in "$d"/*; do
+        [ -e "$f" ] || continue
+        cand=$((10#$(basename "$f")))
+        [ "$cand" -ge "$n" ] && n=$((cand + 1))
+      done
+    done
+    printf '%s\n%s\n' "$title" "$body" >"$dir/issues/$n"
+    echo "https://github.com/fake/repo/issues/$n"
+    ;;
+  "issue list")
+    state=open json=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --state) state=$2; shift 2 ;;
+        --json) json=$2; shift 2 ;;
+        --limit) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    src=$dir/issues
+    [ "$state" = closed ] && src=$dir/issues-closed
+    found=0
+    for f in $(ls "$src" 2>/dev/null | sort -n); do
+      found=1
+      if [ -n "$json" ]; then
+        if [ "$state" = closed ]; then
+          printf '{"number":%s}\n' "$f"
+        else
+          title=$(sed -n 1p "$src/$f")
+          body=$(sed -n 2p "$src/$f")
+          labs="[]"
+          if [ -f "$dir/labels/$f" ]; then
+            labs=$(awk '{printf "%s{\"name\":\"%s\"}", (NR>1?",":""), $0}' "$dir/labels/$f")
+            labs="[$labs]"
+          fi
+          printf '{"number":%s,"title":"%s","labels":%s,"body":"%s"}\n' \
+            "$f" "$(jesc "$title")" "$labs" "$(jesc "$body")"
+        fi
+      else
+        echo "#$f $(sed -n 1p "$src/$f")"
+      fi
+    done
+    [ "$found" = 1 ] || exit 0
+    ;;
+  "issue view")
+    n=$3
+    title=$(sed -n 1p "$dir/issues/$n" 2>/dev/null)
+    [ -n "$title" ] || title=$(sed -n 1p "$dir/issues-closed/$n" 2>/dev/null)
+    [ -n "$title" ] || exit 1
+    printf '{"title":"%s"}\n' "$(jesc "$title")"
+    ;;
+  "issue edit")
+    n=$3
+    shift 3
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --add-label) echo "$2" >>"$dir/labels/$n"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    ;;
+  "issue close")
+    n=$3
+    [ -f "$dir/issues/$n" ] || exit 1
+    mv "$dir/issues/$n" "$dir/issues-closed/$n"
+    echo "closed #$n"
     ;;
   *) echo "fake gh: unsupported: $*" >&2; exit 1 ;;
 esac
