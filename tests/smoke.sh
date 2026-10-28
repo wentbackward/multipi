@@ -324,6 +324,22 @@ echo "$out" | grep -q "^MISSING @earendil-works/pi-coding-agent" &&
 echo "$out" | grep -q "doctor: 2 problem(s)" && pass "problem tally counts the missing packages" ||
   fail "problem tally does not count the missing packages"
 
+# A dependency that crashes the probe must not yield a false ok line: nothing was verified.
+mkdir -p node_modules/typebox
+printf '{"name":"typebox","version":"0.0.0","main":"index.js"}' >node_modules/typebox/package.json
+echo 'process.exit(1); ' >node_modules/typebox/index.js
+out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
+rc=$?
+echo "$out"
+[ "$rc" -ne 0 ] && pass "doctor fails when a dependency crashes the runtime probe" ||
+  fail "doctor passed although a dependency crashed the probe"
+echo "$out" | grep -q '^ok      extension runtime' &&
+  fail "false ok line from a crashed probe" ||
+  pass "no false ok line when the probe crashes"
+echo "$out" | grep -q '^MISSING extension runtime' &&
+  pass "crashed probe is reported as a MISSING line" ||
+  fail "crashed probe was not reported as MISSING"
+
 # node not on PATH: named, and the run fails even with the packages present.
 stub_pkg /typebox
 stub_pkg /@earendil-works/pi-coding-agent
