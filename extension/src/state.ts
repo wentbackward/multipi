@@ -9,6 +9,10 @@ export interface DispatchEntry {
 	startedAt: number;
 	status: "running" | "interrupted" | "crashed" | "done" | "blocked";
 	report?: string;
+	/** Transport-level stop reason of the child's final message (diagnostics for "crashed" entries). */
+	stopReason?: string;
+	/** The child's error message, when pi reported one (persisted for post-mortem). */
+	error?: string;
 }
 export type DispatchState = Record<string, DispatchEntry>;
 
