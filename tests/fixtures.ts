@@ -29,6 +29,9 @@ export function makeFixture(configJson: string): Fixture {
 	sh(repo, "push", "-q", "-u", "origin", "HEAD:main");
 	const cfgPath = path.join(repo, ".devloop.json");
 	writeFileSync(cfgPath, configJson);
+	sh(repo, "add", ".devloop.json");
+	sh(repo, "commit", "-qm", "chore: devloop config");
+	sh(repo, "push", "-q", "origin", "main");
 	return {
 		dir,
 		repo,
