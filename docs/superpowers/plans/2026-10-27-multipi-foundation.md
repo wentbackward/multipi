@@ -1339,7 +1339,7 @@ git commit -m "feat: merge-train.sh — ordered squash merges with tree-equality
 - Create: `scripts/doctor.sh`
 - Modify: `tests/smoke.sh` (append a section before the final summary)
 
-- [ ] **Step 1: Add the failing tests**
+- [x] **Step 1: Add the failing tests**
 
 Append before the final summary line:
 
@@ -1360,12 +1360,12 @@ echo "$out" | grep -q "MISSING .*\.devloop.json" && pass "doctor names the missi
 mv .devloop.json.bak .devloop.json
 ```
 
-- [ ] **Step 2: Run and verify it fails**
+- [x] **Step 2: Run and verify it fails**
 
 Run: `bash tests/smoke.sh`
 Expected: the 4 doctor assertions FAIL (missing script); 54 previous PASS.
 
-- [ ] **Step 3: Write `scripts/doctor.sh`**
+- [x] **Step 3: Write `scripts/doctor.sh`**
 
 Port with `AGENTS.md` replacing `CLAUDE.md`:
 
@@ -1419,12 +1419,12 @@ fi
 [ "$problems" -eq 0 ]
 ```
 
-- [ ] **Step 4: Run the FULL suite via make**
+- [x] **Step 4: Run the FULL suite via make**
 
 Run: `make check`
-Expected: shellcheck section (PASS clean if shellcheck is installed, or the documented WARNING if not), then `smoke: 58 passed, 0 failed`, exit 0.
+Expected: shellcheck section (PASS clean if shellcheck is installed, or the documented WARNING if not), then `smoke: 56 passed, 0 failed` (actual count: the plan estimated 58; two expected-values merged during execution), exit 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/doctor.sh tests/smoke.sh
@@ -1435,7 +1435,23 @@ git commit -m "feat: doctor.sh — prerequisites and resolved-config report; mak
 
 ## Plan completion criteria
 
-- `make check` green (58 smoke assertions, no network).
+- `make check` green (56 smoke assertions, no network).
 - Every script passes shellcheck when the binary is present (Makefile warns loudly when absent).
 - The green-train record is the single coupling point between gate and merge, and every refusal path (5, 6, 7, 8) is asserted by a test.
 - Parts 2 (pi extension) and 3 (roles, skills, dogfood) build on this core unchanged; their plans reference these exact scripts and exit codes.
+
+---
+
+## Execution log (2026-10-27, inline execution per owner instruction)
+
+All 8 tasks executed TDD (failing test → run → implement → run → commit). Defects the tests caught and that were fixed in-repo (plan text corrected where it differed):
+
+1. **State path**: notes/logs live at `~/.multipi/<repo>/notes|logs` (repo-scoped); a plan expectation had dropped the repo segment.
+2. **Uncanonicalized paths**: `dl_gate_dir`/`dl_notes_dir`/`dl_logs_dir` now run through `realpath -m` (deliberate improvement over the reference, whose `../repo-gate` leaked into prompts).
+3. **Test-helper quoting** (paths section): the plan's double-shelled helper passed the whole command as one filename; corrected to direct invocation.
+4. **Missing exec bits**: scripts must commit 755 — gate-train invokes heavy.sh directly (proved by a real rc 126 `Permission denied`).
+5. **`$?` sequencing**: three plan test blocks read `$?` after an intervening `echo`; all now capture `rc=$?` immediately after the command.
+6. **Fixture checkout state**: the merge section requires the main checkout to be on the base branch for the fast-forward assertion (the script's skip-on-wrong-branch behaviour is by design).
+7. **Assertion count**: 56, not 58 (two plan expectations merged).
+
+shellcheck is not installed on the build machine (snap needs sudo); `make check` shows the loud WARNING per spec. Owner action: `sudo snap install shellcheck`.

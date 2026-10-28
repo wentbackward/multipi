@@ -249,5 +249,20 @@ rc=$?
 echo "$out"
 expect "merge-train refuses a replay conflict" "3" "$rc"
 
+# --- doctor.sh ----------------------------------------------------------------
+out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
+rc=$?
+echo "$out"
+expect "doctor is ready in a healthy fixture" "0" "$rc"
+echo "$out" | grep -q "doctor: ready" && pass "doctor prints ready" || fail "doctor did not print ready"
+mv .devloop.json .devloop.json.bak
+out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
+rc=$?
+echo "$out"
+[ "$rc" -ne 0 ] && pass "doctor fails without config" || fail "doctor passed without config"
+echo "$out" | grep -q "MISSING .*\.devloop.json" && pass "doctor names the missing config" ||
+  fail "doctor did not name the missing config"
+mv .devloop.json.bak .devloop.json
+
 echo "smoke: $passed passed, $failed failed (work dir $work)"
 [ "$failed" -eq 0 ]
