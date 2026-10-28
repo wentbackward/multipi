@@ -8,23 +8,34 @@ export interface Issue {
 }
 
 /**
- * Run a `gh ... --json` command and parse its NDJSON output
- * (gh --json prints one JSON object per line, not a JSON array).
+ * Parse the output of `gh ... --json`. Observed gh variants emit either a single JSON array
+ * (compact, one line) or NDJSON (one object per line); accept both. Pure: unit-tested directly.
  */
-function ghNdJson(args: string[]): unknown[] {
+export function parseGhOutput(out: string): unknown[] {
+	const trimmed = out.trim();
+	if (!trimmed) return [];
+	try {
+		const v = JSON.parse(trimmed);
+		return Array.isArray(v) ? v : [v];
+	} catch {
+		return trimmed
+			.split("\n")
+			.filter((l) => l.trim())
+			.map((l) => JSON.parse(l));
+	}
+}
+
+function ghJson(args: string[]): unknown[] {
 	const out = execFileSync("gh", args, {
 		env: process.env,
 		stdio: ["ignore", "pipe", "pipe"],
 		maxBuffer: 32 * 1024 * 1024,
 	}).toString();
-	return out
-		.split("\n")
-		.filter((l) => l.trim())
-		.map((l) => JSON.parse(l));
+	return parseGhOutput(out);
 }
 
 export function listOpenIssues(): Issue[] {
-	const rows = ghNdJson(["issue", "list", "--state", "open", "--limit", "200", "--json", "number,title,labels,body"]) as {
+	const rows = ghJson(["issue", "list", "--state", "open", "--limit", "200", "--json", "number,title,labels,body"]) as {
 		number: number;
 		title: string;
 		labels: { name: string }[];
@@ -34,20 +45,34 @@ export function listOpenIssues(): Issue[] {
 }
 
 export function listClosedIssueNumbers(): number[] {
-	const rows = ghNdJson(["issue", "list", "--state", "closed", "--limit", "200", "--json", "number"]) as { number: number }[];
+	const rows = ghJson(["issue", "list", "--state", "closed", "--limit", "200", "--json", "number"]) as { number: number }[];
 	return rows.map((r) => r.number);
 }
 
 export function issueTitle(number: number): string {
-	const rows = ghNdJson(["issue", "view", String(number), "--json", "title"]) as { title: string }[];
+	const rows = ghJson(["issue", "view", String(number), "--json", "title"]) as { title: string }[];
 	return rows[0]?.title ?? "";
 }
 
 export function addLabel(number: number, label: string): void {
-	execFileSync("gh", ["issue", "edit", String(number), "--add-label", label], {
-		env: process.env,
-		stdio: ["ignore", "pipe", "pipe"],
-	});
+	try {
+		execFileSync("gh", ["issue", "edit", String(number), "--add-label", label], {
+			env: process.env,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+	} catch (e) {
+		const msg = (e as { stderr?: NodeJS.ArrayBufferView }).stderr?.toString() ?? String(e);
+		if (/not found|no matching/i.test(msg)) {
+			// First use of a label in this repo: create it, then retry once.
+			execFileSync("gh", ["label", "create", label, "--force"], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+			execFileSync("gh", ["issue", "edit", String(number), "--add-label", label], {
+				env: process.env,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+			return;
+		}
+		throw e;
+	}
 }
 
 export function closeIssue(number: number, comment: string): void {

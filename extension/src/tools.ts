@@ -66,7 +66,7 @@ export function buildContext(cwd: string): ToolContext {
 /** Per-invocation context resolution: tools act on the repo the agent is standing in. */
 async function runGuarded<T>(toolCtx: { cwd: string }, fn: (ctx: ToolContext) => Promise<AgentToolResult<T>>): Promise<AgentToolResult<T>> {
 	try {
-		return fn(buildContext(toolCtx.cwd));
+		return await fn(buildContext(toolCtx.cwd));
 	} catch (e) {
 		// Confined cast: the error result intentionally carries no details payload.
 		return { ...text(`devloop unavailable here: ${(e as Error).message}`), details: undefined, isError: true } as AgentToolResult<T>;
@@ -202,7 +202,12 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 	}
 
 	const issues = listOpenIssues();
-	const issue = issues.find((i) => i.number === ticket);
+	let issue = issues.find((i) => i.number === ticket);
+	if (!issue) {
+		// GitHub's list endpoint briefly lags a just-created issue; one bounded retry, then refuse.
+		await new Promise((r) => setTimeout(r, 1500));
+		issue = listOpenIssues().find((i) => i.number === ticket);
+	}
 	if (!issue) return { ...text(`ticket #${ticket} not found among open issues (already merged/closed?)`), isError: true };
 	const slug = branchSlug(issue.title);
 	const branch = prev?.branch ?? (slug ? `feat/${ticket}-${slug}` : `feat/${ticket}`);

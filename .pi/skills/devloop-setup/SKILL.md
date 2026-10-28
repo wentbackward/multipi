@@ -53,6 +53,9 @@ command string). Defaults worth knowing: gate worktree `../<repo>-gate`, notes/l
 `~/.multipi/<repo>/`, `heavy.slots=2`, `stop_gate.{require_clean_tree=true,max_blocks=5}`,
 `merge.method=squash`.
 
+Label note: the `dl/*` labels (`dl/in-progress`, `dl/in-review`, `dl/approved`, `dl/gated`,
+`dl/merged`, `dl/blocked`) are created automatically on first use — no manual pre-creation needed.
+
 ## 5. Wire the repo docs
 
 - AGENTS.md: add a short "Dev loop" section pointing at `.devloop.json` and the `devloop` skill
