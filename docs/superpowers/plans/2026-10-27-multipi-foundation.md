@@ -481,31 +481,31 @@ git commit -m "feat: config layer (common.sh) and smoke harness"
 - Create: `scripts/paths.sh`
 - Modify: `tests/smoke.sh` (append a section before the final summary — see Step 1)
 
-- [ ] **Step 1: Add the failing tests**
+- [x] **Step 1: Add the failing tests**
 
 Append to `tests/smoke.sh`, immediately before the `echo "smoke: $passed passed..."` line:
 
 ```bash
 # --- paths.sh -----------------------------------------------------------------
-paths_run() { bash -c "cd '$work/project' && bash '$plugin/scripts/$*'"; }
-paths_run_rc() { bash -c "cd '$work/project' && bash '$plugin/scripts/$*' >/dev/null 2>&1; echo \$?"; }
+paths_run() { (cd "$work/project" && bash "$plugin/scripts/$@"); }
+paths_run_rc() { (cd "$work/project" && bash "$plugin/scripts/$@" >/dev/null 2>&1); echo $?; }
 expect "paths.sh root prints the main root" "$work/project" \
-  "$(paths_run 'paths.sh root')"
+  "$(paths_run paths.sh root)"
 expect "paths.sh config prints the config path" "$work/project/.devloop.json" \
-  "$(paths_run 'paths.sh config')"
+  "$(paths_run paths.sh config)"
 expect "paths.sh notes creates the notes dir and prints the file path" \
-  "$work/home/project/notes/pr-feat_9-x.md" "$(paths_run 'paths.sh notes feat/9-x')"
+  "$work/home/project/notes/pr-feat_9-x.md" "$(paths_run paths.sh notes feat/9-x)"
 [ -d "$work/home/project/notes" ] && pass "paths.sh notes created the notes directory" ||
   fail "paths.sh notes did not create the notes directory"
-expect "paths.sh rejects a bad subcommand" "2" "$(paths_run_rc 'paths.sh bogus')"
+expect "paths.sh rejects a bad subcommand" "2" "$(paths_run_rc paths.sh bogus)"
 ```
 
-- [ ] **Step 2: Run and verify it fails**
+- [x] **Step 2: Run and verify it fails**
 
 Run: `bash tests/smoke.sh`
 Expected: the 5 new assertions FAIL with `bash: .../scripts/paths.sh: No such file or directory` captured in the empty/`2` actuals; previous 9 still PASS.
 
-- [ ] **Step 3: Write `scripts/paths.sh`**
+- [x] **Step 3: Write `scripts/paths.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -536,12 +536,14 @@ case "${1:-}" in
 esac
 ```
 
-- [ ] **Step 4: Run and verify it passes**
+- [x] **Step 4: Run and verify it passes**
 
 Run: `bash tests/smoke.sh`
-Expected: `smoke: 14 passed, 0 failed`, exit 0.
+Expected: `smoke: 13 passed, 0 failed`, exit 0.
 
-- [ ] **Step 5: Commit**
+Execution note (2026-10-27): the plan's original `paths_run` helpers double-shelled the whole command as one filename; the failing run exposed it and the helpers were corrected to direct `bash "$plugin/scripts/$@"` invocation.
+
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/paths.sh tests/smoke.sh

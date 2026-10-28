@@ -67,5 +67,18 @@ expect "dl_state is under MULTIPI_HOME/<repo>" \
 cfg_out 'dl_die boom' >/dev/null 2>&1
 expect "dl_die exits 2 with a message" "2" "$?"
 
+# --- paths.sh -----------------------------------------------------------------
+paths_run() { (cd "$work/project" && bash "$plugin/scripts/$@"); }
+paths_run_rc() { (cd "$work/project" && bash "$plugin/scripts/$@" >/dev/null 2>&1); echo $?; }
+expect "paths.sh root prints the main root" "$work/project" \
+  "$(paths_run paths.sh root)"
+expect "paths.sh config prints the config path" "$work/project/.devloop.json" \
+  "$(paths_run paths.sh config)"
+expect "paths.sh notes creates the notes dir and prints the file path" \
+  "$work/home/project/notes/pr-feat_9-x.md" "$(paths_run paths.sh notes feat/9-x)"
+[ -d "$work/home/project/notes" ] && pass "paths.sh notes created the notes directory" ||
+  fail "paths.sh notes did not create the notes directory"
+expect "paths.sh rejects a bad subcommand" "2" "$(paths_run_rc paths.sh bogus)"
+
 echo "smoke: $passed passed, $failed failed (work dir $work)"
 [ "$failed" -eq 0 ]
