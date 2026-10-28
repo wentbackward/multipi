@@ -43,5 +43,53 @@ else
   if [ -f "$DL_ROOT/AGENTS.md" ]; then ok "AGENTS.md"; else missing "AGENTS.md (run the devloop setup skill)"; fi
   if [ -f "$DL_ROOT/docs/DECISIONS.md" ]; then ok "docs/DECISIONS.md"; else optional "no docs/DECISIONS.md"; fi
 fi
+
+# Extension runtime: the installed extension imports typebox and the pi package at load time;
+# a repo missing either dies inside pi with an inscrutable load error, so doctor catches it here.
+# Resolution is probed with Node's own resolver FROM THE EXTENSION DIRECTORY — the same lookup
+# pi performs when it loads the extension. The probe silences stdout while a package is imported
+# (so dependency side-effects cannot masquerade as verdicts) and prints exactly one verdict line
+# per genuinely unresolvable known package.
+if [ -n "$DL_ROOT" ] && [ -d "$DL_ROOT/.pi/extensions/multipi-devloop" ]; then
+  if ! command -v node >/dev/null 2>&1; then
+    missing "node (the devloop extension cannot run; install Node.js)"
+  else
+    probe_out=$(
+      cd "$DL_ROOT/.pi/extensions/multipi-devloop" && node --input-type=module -e '
+const say = process.stdout.write.bind(process.stdout);
+for (const pkg of ["typebox", "@earendil-works/pi-coding-agent"]) {
+  process.stdout.write = () => true; // swallow import-time side effects of a dependency
+  let missed = false;
+  try { await import(pkg); } catch { missed = true; } finally { process.stdout.write = say; }
+  if (missed) say(pkg + "\n");
+}
+' 2>/dev/null
+    )
+    probe_rc=$?
+    # Only verdict lines for the two known packages count as missing-package names; any other
+    # line (or a non-zero probe exit) means the probe itself did not run cleanly — nothing
+    # beyond the extracted names was verified, so it is reported as its own MISSING line.
+    known_missing=''
+    probe_bad=0
+    while IFS= read -r line; do
+      case "$line" in
+        typebox | @earendil-works/pi-coding-agent) known_missing+="$line"$'\n' ;;
+        '') ;;
+        *) probe_bad=1 ;;
+      esac
+    done <<<"$probe_out"
+    if [ -n "$known_missing" ]; then
+      while IFS= read -r pkg; do
+        [ -n "$pkg" ] || continue # herestring: skip the trailing empty line
+        missing "$pkg (cannot be resolved from .pi/extensions/multipi-devloop; npm i -D typebox @earendil-works/pi-coding-agent)"
+      done <<<"$known_missing"
+    fi
+    if [ "$probe_bad" -ne 0 ] || [ "$probe_rc" -ne 0 ]; then
+      missing "extension runtime probe (import check did not run cleanly; node exit $probe_rc)"
+    elif [ -z "$known_missing" ]; then
+      ok "extension runtime (node $(node --version), typebox, pi-coding-agent)"
+    fi
+  fi
+fi
 [ "$problems" -eq 0 ] && echo "doctor: ready" || echo "doctor: $problems problem(s)"
 [ "$problems" -eq 0 ]

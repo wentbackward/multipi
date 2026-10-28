@@ -255,6 +255,9 @@ rc=$?
 echo "$out"
 expect "doctor is ready in a healthy fixture" "0" "$rc"
 echo "$out" | grep -q "doctor: ready" && pass "doctor prints ready" || fail "doctor did not print ready"
+echo "$out" | grep -q "extension runtime" &&
+  fail "doctor probed the extension runtime without an installed extension" ||
+  pass "doctor silently skips the extension runtime check"
 mv .devloop.json .devloop.json.bak
 out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
 rc=$?
@@ -263,6 +266,161 @@ echo "$out"
 echo "$out" | grep -q "MISSING .*\.devloop.json" && pass "doctor names the missing config" ||
   fail "doctor did not name the missing config"
 mv .devloop.json.bak .devloop.json
+
+# --- doctor.sh: extension runtime -------------------------------------------
+# Stub the installed extension and a stub node_modules (offline stand-ins for the
+# real packages; doctor must only see that they resolve).
+EXT=.pi/extensions/multipi-devloop
+mkdir -p "$EXT" node_modules
+echo 'export default function () {}; ' >"$EXT/index.ts"
+stub_pkg() { # stub_pkg DIR: a minimal importable package
+  local dir="node_modules$1"
+  mkdir -p "$dir"
+  printf '{"name":"%s","version":"0.0.0","main":"index.js"}' "$1" >"$dir/package.json"
+  echo 'module.exports = {}; ' >"$dir/index.js"
+}
+
+# All present: one ok line (with the node version) and the run stays healthy.
+stub_pkg /typebox
+stub_pkg /@earendil-works/pi-coding-agent
+out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
+rc=$?
+echo "$out"
+expect "doctor stays ready when the extension runtime is complete" "0" "$rc"
+echo "$out" | grep -q "doctor: ready" && pass "extension runtime adds no problems" ||
+  fail "doctor not ready with the extension runtime complete"
+echo "$out" | grep -Eq "ok      extension runtime \(node v[^,]+, typebox, pi-coding-agent\)" &&
+  pass "doctor prints the extension runtime ok line" ||
+  fail "no extension runtime ok line (want: ok  extension runtime (node v..., typebox, pi-coding-agent))"
+
+# One package missing: exactly that one is named, with the npm remedy, exit non-zero.
+rm -rf node_modules/@earendil-works
+out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
+rc=$?
+echo "$out"
+[ "$rc" -ne 0 ] && pass "doctor fails with one extension package missing" ||
+  fail "doctor passed with one extension package missing"
+[ "$(echo "$out" | grep -c '^MISSING')" = 1 ] && pass "only the missing package is flagged" ||
+  fail "expected exactly one MISSING line"
+echo "$out" | grep -q "^MISSING @earendil-works/pi-coding-agent" &&
+  pass "doctor names the one missing package" || fail "the missing package was not named"
+echo "$out" | grep -q "npm i -D typebox @earendil-works/pi-coding-agent" &&
+  pass "doctor offers the npm remedy" || fail "no npm remedy"
+
+# Both packages missing: each gets its own MISSING line.
+rm -rf node_modules
+out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
+rc=$?
+echo "$out"
+[ "$rc" -ne 0 ] && pass "doctor fails when both extension packages are missing" ||
+  fail "doctor passed with both extension packages missing"
+[ "$(echo "$out" | grep -c '^MISSING')" = 2 ] && pass "each missing package gets its own MISSING line" ||
+  fail "expected two MISSING lines"
+echo "$out" | grep -q "^MISSING typebox" && pass "doctor names typebox (both missing)" ||
+  fail "typebox not named (both missing)"
+echo "$out" | grep -q "^MISSING @earendil-works/pi-coding-agent" &&
+  pass "doctor names pi-coding-agent (both missing)" ||
+  fail "pi-coding-agent not named (both missing)"
+echo "$out" | grep -q "doctor: 2 problem(s)" && pass "problem tally counts the missing packages" ||
+  fail "problem tally does not count the missing packages"
+
+# A dependency that crashes the probe must not yield a false ok line: nothing was verified.
+mkdir -p node_modules/typebox
+printf '{"name":"typebox","version":"0.0.0","main":"index.js"}' >node_modules/typebox/package.json
+echo 'process.exit(1); ' >node_modules/typebox/index.js
+out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
+rc=$?
+echo "$out"
+[ "$rc" -ne 0 ] && pass "doctor fails when a dependency crashes the runtime probe" ||
+  fail "doctor passed although a dependency crashed the probe"
+echo "$out" | grep -q '^ok      extension runtime' &&
+  fail "false ok line from a crashed probe" ||
+  pass "no false ok line when the probe crashes"
+echo "$out" | grep -q '^MISSING extension runtime' &&
+  pass "crashed probe is reported as a MISSING line" ||
+  fail "crashed probe was not reported as MISSING"
+
+# A dependency that prints noise but resolves must stay healthy: doctor reads only its own
+# verdict lines, not the imported package's side effects.
+mkdir -p node_modules/typebox
+printf '{"name":"typebox","version":"0.0.0","main":"index.js"}' >node_modules/typebox/package.json
+echo 'console.log("hello"); module.exports = {}; ' >node_modules/typebox/index.js
+stub_pkg /@earendil-works/pi-coding-agent
+out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
+rc=$?
+echo "$out"
+expect "doctor stays ready when a dependency prints during import" "0" "$rc"
+echo "$out" | grep -q "doctor: ready" && pass "noisy-but-resolving import adds no problems" ||
+  fail "noisy-but-resolving import broke the run"
+echo "$out" | grep -Eq "ok      extension runtime \(node v[^,]+, typebox, pi-coding-agent\)" &&
+  pass "noisy-but-resolving import still yields the ok line" ||
+  fail "no ok line although the import succeeded"
+echo "$out" | grep -q '^MISSING' &&
+  fail "noise from a successful import was flagged as MISSING" ||
+  pass "no MISSING line from a noisy import"
+echo "$out" | grep -q 'hello' &&
+  fail "dependency noise leaked into doctor output" ||
+  pass "dependency noise does not leak into doctor output"
+
+# A dependency that prints then hard-crashes (unreachable even by try/catch) plus a genuinely
+# missing package: doctor must name the real miss AND flag the probe, and must not mistake
+# the crashed dependency's output for a missing package name.
+rm -rf node_modules
+mkdir -p node_modules/@earendil-works/pi-coding-agent
+printf '{"name":"@earendil-works/pi-coding-agent","version":"0.0.0","main":"index.js"}' \
+  >node_modules/@earendil-works/pi-coding-agent/package.json
+echo 'console.log("boom"); process.exit(1); ' >node_modules/@earendil-works/pi-coding-agent/index.js
+out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
+rc=$?
+echo "$out"
+[ "$rc" -ne 0 ] && pass "doctor fails when a dependency prints then hard-crashes" ||
+  fail "doctor passed although a dependency crashed the probe mid-run"
+echo "$out" | grep -q '^MISSING typebox' &&
+  pass "genuinely missing package is still named beside the crashed probe" ||
+  fail "genuinely missing package was lost when the probe crashed"
+echo "$out" | grep -q '^MISSING extension runtime' &&
+  pass "mid-run crash is reported as a probe MISSING line" ||
+  fail "mid-run crash was not reported as a probe MISSING line"
+echo "$out" | grep -q '^MISSING boom' &&
+  fail "dependency output was mistaken for a missing package" ||
+  pass "dependency output is not mistaken for a missing package"
+echo "$out" | grep -q '^ok      extension runtime' &&
+  fail "false ok line from a mid-run crashed probe" ||
+  pass "no false ok line when the probe crashes mid-run"
+[ "$(echo "$out" | grep -c '^MISSING')" = 2 ] &&
+  pass "exactly two problems: the real miss and the probe" ||
+  fail "expected exactly two MISSING lines (package + probe)"
+
+# node not on PATH: named, and the run fails even with the packages present.
+stub_pkg /typebox
+stub_pkg /@earendil-works/pi-coding-agent
+node_dirs=$(
+  for d in ${PATH//:/ }; do [ -x "$d/node" ] && printf '%s ' "$d"; done
+)
+[ -n "$node_dirs" ] || { echo "smoke: no node on PATH; cannot test the node-missing case"; exit 1; }
+path_nonode=$(printf '%s\n' "${PATH//:/ }" | while IFS= read -r d; do printf '%s\n' "$node_dirs" | tr ' ' '\n' | grep -Fxq "$d" || printf '%s\n' "$d"; done | paste -sd: -)
+mkdir -p "$work/bin-nonode"
+# Re-provide everything the filtered PATH loses (bash, coreutils, git, jq...) except node itself:
+for f in /usr/bin/* /bin/* /usr/local/bin/*; do
+  name=$(basename "$f")
+  [ "$name" = node ] && continue
+  [ -e "$f" ] || continue
+  [ -L "$work/bin-nonode/$name" ] && continue # dedupe: /bin -> /usr/bin symlinks overlap
+  ln -s "$f" "$work/bin-nonode/$name"
+done
+ln -sf "$work/bin/gh" "$work/bin-nonode/gh"
+out=$(PATH="$work/bin-nonode:$path_nonode" bash "$plugin/scripts/doctor.sh" 2>&1)
+rc=$?
+echo "$out"
+[ "$rc" -ne 0 ] && pass "doctor fails when node is not on PATH" ||
+  fail "doctor passed without node on PATH"
+echo "$out" | grep -q "^MISSING node" && pass "doctor names the missing node" ||
+  fail "node not named"
+echo "$out" | grep -q "extension runtime" &&
+  fail "doctor printed the runtime ok line without node" ||
+  pass "no false ok line without node"
+
+rm -rf "$EXT" node_modules "$work/bin-nonode"
 
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
 MULTIPI_PLUGIN_DIR="$plugin" node --input-type=module -e '
