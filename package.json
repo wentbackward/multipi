@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "tsc --noEmit && node --test tests/unit/"
+    "check": "tsc --noEmit && node --test tests/unit/*.test.ts"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.4.0",
