@@ -89,6 +89,19 @@ make check    # tsc --noEmit + node unit tests + shellcheck (loud warning if abs
 Fully offline. A live end-to-end pass needs API access: open a pi session in a managed
 repo and run `devloop.status`, then dispatch a trivial ticket.
 
+## Field record (this repo runs its own loop)
+
+- **#1** "doctor verifies the extension runtime" — dispatched implementer → independent reviewer
+  found 2 real defects across 3 review rounds (each reproduced with fixtures) → implementer
+  re-dispatched into the same worktree both times → batch gate → squash-merged (5b5aad8).
+- **#3** "shellcheck 0.11.0 hygiene" — ran **in parallel** with #1 (slots=2, independent worktrees);
+  root-caused a CWD-relative source-follow quirk of shellcheck 0.11.0 → reviewed → gated →
+  squash-merged (ee09284).
+- Defects the loop itself caught and fixed while running: gh output format drift, a state-file
+  write race between concurrent dispatches, review findings never reaching the implementer
+  (briefs now carry the latest ticket comment), gate worktree dependency staleness (`gate_setup`).
+- Remaining: #5 (two parked doctor wording/test nit-picks).
+
 ## Project config (`.devloop.json`, committed)
 
 `base_branch`, `remote`, `fast_check`, `format`/`format_extensions`, `checks[]`
