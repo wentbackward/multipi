@@ -49,6 +49,19 @@ export function listClosedIssueNumbers(): number[] {
 	return rows.map((r) => r.number);
 }
 
+/** Latest issue comment (review findings ride here), or "". Truncated to maxChars. */
+export function latestComment(number: number, maxChars = 6000): string {
+	let rows: { comments?: { body: string }[] }[];
+	try {
+		rows = ghJson(["issue", "view", String(number), "--json", "title,comments"]) as { comments?: { body: string }[] }[];
+	} catch {
+		return "";
+	}
+	const comments = rows[0]?.comments ?? [];
+	if (!comments.length) return "";
+	return (comments[comments.length - 1].body ?? "").slice(0, maxChars);
+}
+
 export function issueTitle(number: number): string {
 	const rows = ghJson(["issue", "view", String(number), "--json", "title"]) as { title: string }[];
 	return rows[0]?.title ?? "";

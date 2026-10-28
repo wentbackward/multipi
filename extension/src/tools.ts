@@ -17,7 +17,7 @@ import {
 } from "./brief.ts";
 import { spawnPi, type ChildResult } from "./child.ts";
 import { discoverRoles, findRole } from "./roles.ts";
-import { listOpenIssues, listClosedIssueNumbers, addLabel } from "./issues.ts";
+import { listOpenIssues, listClosedIssueNumbers, addLabel, latestComment } from "./issues.ts";
 import {
 	evaluateStopGate,
 	runFastCheck,
@@ -225,6 +225,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 		status: "running",
 	};
 	const idx = runningImplementers.length; // this child's port slice position
+	const reviewNote = latestComment(ticket);
 	const brief = assembleImplementerBrief({
 		ticket,
 		title: issue.title,
@@ -237,6 +238,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 		baseBranch: ctx.cfg.baseBranch,
 		portRange: portRange(ctx.cfg.heavy, idx),
 		resumed: !!prev,
+		reviewNote,
 	});
 	persistEntry(ctx, key, entry);
 	const ac = spawnAndTrack(ctx, key, role, { task: brief, worktree, signal, onUpdate });

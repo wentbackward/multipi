@@ -65,6 +65,30 @@ test("implementer brief notes in-progress work on resume", () => {
 	});
 	assert.ok(/work in progress/i.test(resumed));
 });
+test("implementer brief carries the latest ticket comment verbatim", () => {
+	const brief = assembleImplementerBrief({
+		ticket: 7,
+		title: "T",
+		worktree: "/w",
+		branch: "b",
+		notes: "/n.md",
+		fastCheck: "true",
+		heavy: "/h",
+		remote: "origin",
+		baseBranch: "main",
+		portRange: [9000, 9009],
+		reviewNote: "MUST FIX 1. scripts/doctor.sh:54 — do the thing",
+	});
+	assert.ok(brief.includes("Latest ticket comment"), "section present");
+	assert.ok(brief.includes("MUST FIX 1. scripts/doctor.sh:54 — do the thing"), "verbatim");
+	assert.ok(brief.includes("its latest comments"), "step 2 mandates reading comments");
+	const plain = assembleImplementerBrief({
+		ticket: 7, title: "T", worktree: "/w", branch: "b", notes: "/n.md", fastCheck: "true",
+		heavy: "/h", remote: "origin", baseBranch: "main", portRange: [9000, 9009],
+	});
+	assert.ok(!plain.includes("Latest ticket comment"), "no section without a comment");
+});
+
 
 test("reviewer brief carries branch, base, verdict contract, tree-clean rule, safety note", () => {
 	const brief = assembleReviewerBrief({

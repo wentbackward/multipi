@@ -244,10 +244,11 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 	finishEntry(ctx, key, entry, res, signal);
 	git(["fetch", "-q", ctx.cfg.remote], ctx.cfg.root); // child pushed; refresh the main repo's view
 
-	// Outcome-driven side effects: PR + labels (only when the child finished its job).
+	// Outcome-driven side effects: PR + labels. The report contract (STATUS line) decides, not the
+	// transport's stop reason — a child that delivered DONE but exited oddly still did the job.
 	let extra = "";
 	const verdict = parseReportStatus(res.finalText);
-	if (verdict === "done" && res.stopReason === "end") {
+	if (verdict === "done" && !res.aborted) {
 		try {
 			const out = execFileSync("bash", [path.join(ctx.scriptsDir, "open-pr.sh"), branch], {
 				cwd: ctx.cfg.root,
@@ -322,11 +323,14 @@ function persistEntry(ctx: ToolContext, key: string, entry: DispatchEntry): void
 export function finishEntry(ctx: ToolContext, key: string, entry: DispatchEntry, res: { exitCode: number; finalText: string; aborted: boolean; stopReason?: string; errorMessage?: string; stderr: string }, signal?: AbortSignal): void {
 	const state = readState(ctx.stateDir);
 	entry.report = res.finalText || res.stderr || res.errorMessage || "";
+	entry.stopReason = res.stopReason;
+	if (res.errorMessage) entry.error = res.errorMessage;
 	if (res.aborted || signal?.aborted) entry.status = "interrupted";
-	else if (res.stopReason === "end" && /STATUS:\s*BLOCKED/.test(res.finalText)) entry.status = "blocked";
-	else if (res.stopReason === "end" && /STATUS:\s*DONE/.test(res.finalText)) entry.status = "done";
+	else if (/STATUS:\s*BLOCKED/.test(res.finalText)) entry.status = "blocked";
+	else if (/STATUS:\s*DONE/.test(res.finalText)) entry.status = "done";
 	else entry.status = "crashed";
-	state[key] = entry;
+	// Keep the live pid recorded at spawn time (the entry object still carries the 0 placeholder).
+	state[key] = { ...entry, pid: state[key]?.pid ?? entry.pid };
 	writeState(ctx.stateDir, state);
 }
 
@@ -337,12 +341,13 @@ function usageLine(res: { usage: { input: number; output: number; cost: number; 
 
 function reportResult(role: string, ticket: number | undefined, entry: DispatchEntry, res: { finalText: string; aborted: boolean; stopReason?: string; errorMessage?: string; stderr: string; usage: { input: number; output: number; cost: number; totalTokens: number } }, extra = ""): AgentToolResult<DispatchDetails | undefined> {
 	const head = `${role} #${ticket ?? "?"} (${entry.branch ?? entry.worktree}) -> ${entry.status}`;
+	const transport = res.stopReason && res.stopReason !== "end" ? ` [transport: stopReason=${res.stopReason}${res.errorMessage ? ` error="${res.errorMessage}"` : ""}]` : "";
 	const body = res.aborted
 		? "interrupted before completion"
-		: res.finalText || res.errorMessage || res.stderr || `(no output; stopReason=${res.stopReason ?? "n/a"})`;
+		: res.finalText || res.errorMessage || res.stderr || `(no output; stopReason=${res.stopReason ?? "n/a"})` + transport;
 	const isError = res.aborted || (res.stopReason !== "end" && !res.aborted);
 	return {
-		...text(`${head}\n[${usageLine(res)}]\n\n${body}${extra}`),
+		...text(`${head}${transport}\n[${usageLine(res)}]\n\n${body}${extra}`),
 		details: { role, ticket, branch: entry.branch, worktree: entry.worktree, status: entry.status, aborted: res.aborted } as DispatchDetails,
 		...(isError ? { isError: true } : {}),
 	};
