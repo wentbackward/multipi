@@ -302,7 +302,8 @@ echo "$out"
   fail "doctor passed with one extension package missing"
 [ "$(echo "$out" | grep -c '^MISSING')" = 1 ] && pass "only the missing package is flagged" ||
   fail "expected exactly one MISSING line"
-echo "$out" | grep -q "^MISSING typebox" && pass "doctor names typebox" || fail "typebox not named"
+echo "$out" | grep -q "^MISSING @earendil-works/pi-coding-agent" &&
+  pass "doctor names the one missing package" || fail "the missing package was not named"
 echo "$out" | grep -q "npm i -D typebox @earendil-works/pi-coding-agent" &&
   pass "doctor offers the npm remedy" || fail "no npm remedy"
 
@@ -326,11 +327,19 @@ echo "$out" | grep -q "doctor: 2 problem(s)" && pass "problem tally counts the m
 # node not on PATH: named, and the run fails even with the packages present.
 stub_pkg /typebox
 stub_pkg /@earendil-works/pi-coding-agent
-node_dir=$(dirname "$(command -v node)")
+node_dirs=$(
+  for d in ${PATH//:/ }; do [ -x "$d/node" ] && printf '%s ' "$d"; done
+)
+[ -n "$node_dirs" ] || { echo "smoke: no node on PATH; cannot test the node-missing case"; exit 1; }
+path_nonode=$(printf '%s\n' "${PATH//:/ }" | while IFS= read -r d; do printf '%s\n' "$node_dirs" | tr ' ' '\n' | grep -Fxq "$d" || printf '%s\n' "$d"; done | paste -sd: -)
 mkdir -p "$work/bin-nonode"
-for tool in git jq python3 flock; do ln -sf "$(command -v "$tool")" "$work/bin-nonode/$tool"; done
+# Re-provide everything the filtered PATH loses (bash, coreutils, git, jq...) except node itself:
+for f in /usr/bin/* /bin/* /usr/local/bin/*; do
+  name=$(basename "$f")
+  [ "$name" = node ] && continue
+  [ -e "$f" ] && ln -sf "$f" "$work/bin-nonode/$name"
+done
 ln -sf "$work/bin/gh" "$work/bin-nonode/gh"
-path_nonode=$(printf '%s' "$PATH" | tr ':' '\n' | grep -Fxv "$node_dir" | paste -sd: -)
 out=$(PATH="$work/bin-nonode:$path_nonode" bash "$plugin/scripts/doctor.sh" 2>&1)
 rc=$?
 echo "$out"

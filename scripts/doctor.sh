@@ -43,5 +43,26 @@ else
   if [ -f "$DL_ROOT/AGENTS.md" ]; then ok "AGENTS.md"; else missing "AGENTS.md (run the devloop setup skill)"; fi
   if [ -f "$DL_ROOT/docs/DECISIONS.md" ]; then ok "docs/DECISIONS.md"; else optional "no docs/DECISIONS.md"; fi
 fi
+
+# Extension runtime: the installed extension imports typebox and the pi package at load time;
+# a repo missing either dies inside pi with an inscrutable load error, so doctor catches it here.
+# Resolution is probed with Node's own resolver from the repo root — the same lookup pi performs.
+if [ -n "$DL_ROOT" ] && [ -d "$DL_ROOT/.pi/extensions/multipi-devloop" ]; then
+  if ! command -v node >/dev/null 2>&1; then
+    missing "node (the devloop extension cannot run; install Node.js)"
+  else
+    unresolved=$(cd "$DL_ROOT" && node --input-type=module -e '
+for (const pkg of ["typebox", "@earendil-works/pi-coding-agent"]) {
+  try { await import(pkg); } catch { console.log(pkg); }
+}' 2>/dev/null)
+    if [ -n "$unresolved" ]; then
+      while IFS= read -r pkg; do
+        missing "$pkg (not in $DL_ROOT/node_modules; npm i -D typebox @earendil-works/pi-coding-agent)"
+      done <<<"$unresolved"
+    else
+      ok "extension runtime (node $(node --version), typebox, pi-coding-agent)"
+    fi
+  fi
+fi
 [ "$problems" -eq 0 ] && echo "doctor: ready" || echo "doctor: $problems problem(s)"
 [ "$problems" -eq 0 ]
