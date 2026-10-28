@@ -23,6 +23,12 @@
       "summary": "smoke: (\\\\d+) passed, (\\\\d+) failed"
     },
     {
+      "name": "hygiene",
+      "command": "bash tests/hygiene.sh",
+      "heavy": false,
+      "summary": "hygiene: (\\\\d+) passed, (\\\\d+) failed"
+    },
+    {
       "name": "shellcheck",
       "command": "make shellcheck",
       "heavy": false,
