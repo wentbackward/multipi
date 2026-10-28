@@ -38,16 +38,26 @@ else
   fi
 fi
 
-# --- fake-gh issue list: numeric ordering ------------------------------------
 # --- the gate wiring: hygiene must be visible to the batch gate ---------------
 # The gate reads its checks from .devloop.json, not from `make check` (learned
-# the hard way in gate round 1): the suite must be exposed there.
-cfg_hygiene=$(jq -r '
-  [.checks[]? | select(.name == "hygiene")] | first // empty
-  | "\(.command) \(.heavy)"' "$plugin/.devloop.json" 2>/dev/null)
+# the hard way in gate round 1): the suite must be exposed there. Same reader
+# policy as the loop itself: jq when installed, else python3.
+gate_check_field() {
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '[.checks[]? | select(.name == "hygiene")] | first // empty
+      | "\(.command) \(.heavy)"' "$plugin/.devloop.json" 2>/dev/null
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json, sys
+e = [c for c in json.load(open(sys.argv[1])).get("checks", [])
+      if isinstance(c, dict) and c.get("name") == "hygiene"]
+sys.stdout.write("%s %s" % (e[0]["command"], str(e[0]["heavy"]).lower()) if e else "")' \
+      "$plugin/.devloop.json" 2>/dev/null
+  fi
+}
 expect ".devloop.json exposes the hygiene check to the gate (non-heavy)" \
-  "bash tests/hygiene.sh false" "$cfg_hygiene"
+  "bash tests/hygiene.sh false" "$(gate_check_field)"
 
+# --- fake-gh issue list: numeric ordering ------------------------------------
 list_numbers() { # list_numbers STATE -> space-separated issue numbers, in order
   FAKE_GH_DIR="$work/gh" "$plugin/tests/fake-gh" issue list --state "$1" --json number \
     | sed -n 's/.*"number":\([0-9]*\).*/\1/p' | tr '\n' ' ' | sed -e 's/ $//'
