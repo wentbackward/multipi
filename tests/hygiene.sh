@@ -39,6 +39,15 @@ else
 fi
 
 # --- fake-gh issue list: numeric ordering ------------------------------------
+# --- the gate wiring: hygiene must be visible to the batch gate ---------------
+# The gate reads its checks from .devloop.json, not from `make check` (learned
+# the hard way in gate round 1): the suite must be exposed there.
+cfg_hygiene=$(jq -r '
+  [.checks[]? | select(.name == "hygiene")] | first // empty
+  | "\(.command) \(.heavy)"' "$plugin/.devloop.json" 2>/dev/null)
+expect ".devloop.json exposes the hygiene check to the gate (non-heavy)" \
+  "bash tests/hygiene.sh false" "$cfg_hygiene"
+
 list_numbers() { # list_numbers STATE -> space-separated issue numbers, in order
   FAKE_GH_DIR="$work/gh" "$plugin/tests/fake-gh" issue list --state "$1" --json number \
     | sed -n 's/.*"number":\([0-9]*\).*/\1/p' | tr '\n' ' ' | sed -e 's/ $//'
