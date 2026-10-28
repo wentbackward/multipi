@@ -761,7 +761,7 @@ git commit -m "feat: heavy.sh — machine-wide heavy-job slot queue with ports a
 - Create: `scripts/gate-train.sh`
 - Modify: `tests/smoke.sh` (append sections before the final summary)
 
-- [ ] **Step 1: Add the failing tests**
+- [x] **Step 1: Add the failing tests**
 
 Append before the final summary line. These tests create the two branches later reused by the merge tests (Task 7) — keep the names:
 
@@ -797,8 +797,9 @@ git checkout -q -B feat/3-broken origin/main
 echo BROKEN >>src.txt && git commit -q -am "feat: break it (Refs #3)" && git push -q -u origin feat/3-broken
 printf 'feat: break it (#3)\n\nCloses #3\n' >"$("$plugin/scripts/paths.sh" notes feat/3-broken)"
 out=$(bash "$plugin/scripts/gate-train.sh" feat/3-broken 2>&1)
+rc=$?
 echo "$out"
-expect "gate-train is red for a failing check" "1" "$?"
+expect "gate-train is red for a failing check" "1" "$rc"
 echo "$out" | grep -q "TRAIN RED" && pass "red train announced" || fail "no TRAIN RED line"
 [ ! -f "$work/home/project/train-green.txt" ] && pass "red train leaves no green record" ||
   fail "red train left a green record"
@@ -811,16 +812,18 @@ echo alpha >same.txt && git add same.txt && git commit -q -m "feat: alpha (Refs 
 git checkout -q -B feat/5-conflict origin/main
 echo beta >same.txt && git add same.txt && git commit -q -m "feat: beta (Refs #5)" && git push -q -u origin feat/5-conflict
 out=$(bash "$plugin/scripts/gate-train.sh" feat/4-conflict feat/5-conflict 2>&1)
+rc=$?
+echo "$out"
 expect "gate-train stops on a conflict and names the branch" "3 TRAIN rebase conflict at feat/5-conflict" \
-  "$? $(echo "$out" | tail -1)"
+  "$rc $(echo "$out" | tail -1)"
 ```
 
-- [ ] **Step 2: Run and verify it fails**
+- [x] **Step 2: Run and verify it fails**
 
 Run: `bash tests/smoke.sh`
 Expected: the gate assertions FAIL (`bash: .../scripts/gate-train.sh: No such file or directory`, `wc` on the missing record fails); 19 previous PASS.
 
-- [ ] **Step 3: Write `scripts/gate-train.sh`**
+- [x] **Step 3: Write `scripts/gate-train.sh`**
 
 Verbatim port (only the header comment name and the sourced library path change):
 
@@ -944,12 +947,12 @@ echo "TRAIN RED"
 exit 1
 ```
 
-- [ ] **Step 4: Run and verify it passes**
+- [x] **Step 4: Run and verify it passes**
 
 Run: `bash tests/smoke.sh`
 Expected: all gate assertions PASS (`green for two good branches`, `summary`, `record written`, `red`, `no green record`, `log kept`, `conflict names the branch`); total `30 passed, 0 failed`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/gate-train.sh tests/smoke.sh

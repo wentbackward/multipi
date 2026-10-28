@@ -106,5 +106,56 @@ first_end=$(awk '/^end 1/ {print $3}' "$work/heavy-1.out")
   fail "third heavy job started at ${third_start:-?} before the first ended at ${first_end:-?}"
 echo "heavy: 3x3s jobs on 2 slots took $(($(date +%s) - start))s"
 
+# --- gate-train.sh ------------------------------------------------------------
+git checkout -q -b feat/1-first
+echo "line two" >>src.txt && git commit -q -am "feat: second line (Refs #1)" && git push -q -u origin feat/1-first
+git checkout -q -b feat/2-second
+echo "other" >other.txt && git add other.txt && git commit -q -m "feat: other file (Refs #2)" && git push -q -u origin feat/2-second
+git checkout -q main
+echo "README" >README && git add README && git commit -q -m "docs: readme" && git push -q origin main
+notes_dir=$("$plugin/scripts/paths.sh" notes-dir)
+mkdir -p "$notes_dir"
+printf '# feat: second line (#1)\n\n## Summary\n- adds a line\n\nCloses #1\n' >"$("$plugin/scripts/paths.sh" notes feat/1-first)"
+printf 'feat: other file (#2)\n\nCloses #2\n' >"$("$plugin/scripts/paths.sh" notes feat/2-second)"
+
+out=$(bash "$plugin/scripts/gate-train.sh" 2>&1)
+expect "gate-train with no branches is a usage error" "2" "$?"
+echo "$out" | grep -q "usage: gate-train.sh" && pass "usage message printed" || fail "no usage message"
+
+out=$(bash "$plugin/scripts/gate-train.sh" feat/1-first feat/2-second 2>&1)
+rc=$?
+echo "$out"
+expect "gate-train is green for two good branches" "0" "$rc"
+gate=$(bash "$plugin/scripts/paths.sh" gate)
+expect "train-feat/2-second carries exactly the two branch commits on main" "2" \
+  "$(git -C "$gate" rev-list --count origin/main..train-feat/2-second)"
+echo "$out" | grep -q "^3 passed" && pass "gate prints the check summary" || fail "no check summary"
+expect "the green train record was written" "2" "$(wc -l <"$work/home/project/train-green.txt" | tr -d ' ')"
+
+# A red train: a branch whose content fails the check.
+git checkout -q -B feat/3-broken origin/main
+echo BROKEN >>src.txt && git commit -q -am "feat: break it (Refs #3)" && git push -q -u origin feat/3-broken
+printf 'feat: break it (#3)\n\nCloses #3\n' >"$("$plugin/scripts/paths.sh" notes feat/3-broken)"
+out=$(bash "$plugin/scripts/gate-train.sh" feat/3-broken 2>&1)
+rc=$?
+echo "$out"
+expect "gate-train is red for a failing check" "1" "$rc"
+echo "$out" | grep -q "TRAIN RED" && pass "red train announced" || fail "no TRAIN RED line"
+[ ! -f "$work/home/project/train-green.txt" ] && pass "red train leaves no green record" ||
+  fail "red train left a green record"
+[ -f "$work/home/project/logs/train-unit.log" ] && pass "red train kept the check log" ||
+  fail "red train lost the check log"
+
+# A rebase conflict names the branch: two branches editing the same line.
+git checkout -q -B feat/4-conflict origin/main
+echo alpha >same.txt && git add same.txt && git commit -q -m "feat: alpha (Refs #4)" && git push -q -u origin feat/4-conflict
+git checkout -q -B feat/5-conflict origin/main
+echo beta >same.txt && git add same.txt && git commit -q -m "feat: beta (Refs #5)" && git push -q -u origin feat/5-conflict
+out=$(bash "$plugin/scripts/gate-train.sh" feat/4-conflict feat/5-conflict 2>&1)
+rc=$?
+echo "$out"
+expect "gate-train stops on a conflict and names the branch" "3 TRAIN rebase conflict at feat/5-conflict" \
+  "$rc $(echo "$out" | tail -1)"
+
 echo "smoke: $passed passed, $failed failed (work dir $work)"
 [ "$failed" -eq 0 ]

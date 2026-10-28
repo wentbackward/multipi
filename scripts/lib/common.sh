@@ -123,13 +123,13 @@ dl_canonical() {
 dl_notes_dir() {
   local configured
   configured=$(cfg notes_dir "")
-  if [ -n "$configured" ]; then dl_canonical "$(dl_resolve "$configured")"; else printf '%s\n' "$DL_STATE/notes"; fi
+  if [ -n "$configured" ]; then dl_canonical "$(dl_resolve "$configured")"; else dl_canonical "$DL_STATE/notes"; fi
 }
 
 dl_logs_dir() {
   local configured
   configured=$(cfg logs_dir "")
-  if [ -n "$configured" ]; then dl_canonical "$(dl_resolve "$configured")"; else printf '%s\n' "$DL_STATE/logs"; fi
+  if [ -n "$configured" ]; then dl_canonical "$(dl_resolve "$configured")"; else dl_canonical "$DL_STATE/logs"; fi
 }
 
 dl_gate_dir() {
