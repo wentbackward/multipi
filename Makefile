@@ -1,15 +1,15 @@
 SHELL := /bin/bash
 
-SCRIPTS := $(wildcard scripts/*.sh scripts/lib/*.sh)
-
-check: ts shellcheck smoke
+check: ts shellcheck smoke hygiene
 
 ts:
 	npm run check
 
+# Run from scripts/ so the `$scripts_dir/lib/common.sh` dot-sources resolve to the
+# input file and are followed (shellcheck 0.11.0 resolves them CWD-relative).
 shellcheck:
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck $(SCRIPTS) tests/fake-gh tests/fake-pi; \
+		(cd scripts && shellcheck *.sh lib/*.sh ../tests/fake-gh ../tests/fake-pi); \
 	else \
 		echo "WARNING: shellcheck not installed — skipping. Install it; the loop must not silently skip."; \
 	fi
@@ -17,4 +17,7 @@ shellcheck:
 smoke:
 	bash tests/smoke.sh
 
-.PHONY: check shellcheck smoke
+hygiene:
+	bash tests/hygiene.sh
+
+.PHONY: check shellcheck smoke hygiene
