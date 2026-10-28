@@ -20,9 +20,9 @@ test("runningCount counts live running entries only", async () => {
 	const dead = spawn("sleep", ["0.2"]);
 	await new Promise((r) => dead.on("close", r));
 	const st: DispatchState = {
-		a: { pid: alive.pid, role: "implementer", branch: "b", worktree: "/w", startedAt: 1, status: "running" },
-		b: { pid: dead.pid, role: "implementer", branch: "b", worktree: "/w", startedAt: 1, status: "interrupted" },
-		c: { pid: dead.pid, role: "implementer", branch: "b", worktree: "/w", startedAt: 1, status: "running" },
+		a: { pid: alive.pid!, role: "implementer", branch: "b", worktree: "/w", startedAt: 1, status: "running" },
+		b: { pid: dead.pid!, role: "implementer", branch: "b", worktree: "/w", startedAt: 1, status: "interrupted" },
+		c: { pid: dead.pid!, role: "implementer", branch: "b", worktree: "/w", startedAt: 1, status: "running" },
 	};
 	writeState(dir, st);
 	const read = readState(dir);
@@ -34,7 +34,7 @@ test("pruneDead flips dead running entries to crashed without deleting them", as
 	const dir = mkdtempSync(path.join(tmpdir(), "st-"));
 	const dead = spawn("sleep", ["0.2"]);
 	await new Promise((r) => dead.on("close", r));
-	const st: DispatchState = { x: { pid: dead.pid, role: "implementer", branch: "b", worktree: "/w", startedAt: 1, status: "running" } };
+	const st: DispatchState = { x: { pid: dead.pid!, role: "implementer", branch: "b", worktree: "/w", startedAt: 1, status: "running" } };
 	const pruned = pruneDead(st);
 	assert.equal(pruned.x.status, "crashed");
 	assert.ok("x" in pruned, "history kept");
