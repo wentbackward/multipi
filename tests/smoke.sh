@@ -157,5 +157,21 @@ echo "$out"
 expect "gate-train stops on a conflict and names the branch" "3 TRAIN rebase conflict at feat/5-conflict" \
   "$rc $(echo "$out" | tail -1)"
 
+# --- fake-gh + open-pr.sh -----------------------------------------------------
+out=$(bash "$plugin/scripts/open-pr.sh" 2>&1)
+expect "open-pr with no branch is a usage error" "2" "$?"
+rm -f "$notes_dir/pr-feat_1-first.md"
+out=$(bash "$plugin/scripts/open-pr.sh" feat/1-first 2>&1)
+expect "open-pr without notes file (and no PR) exits 5" "5" "$?"
+printf '# feat: second line (#1)\n\n## Summary\n- adds a line\n\nCloses #1\n' >"$("$plugin/scripts/paths.sh" notes feat/1-first)"
+out=$(bash "$plugin/scripts/open-pr.sh" feat/1-first 2>&1)
+expect "open-pr opens the PR from the notes file" "0" "$?"
+expect "PR title has the leading '#' stripped" "feat: second line (#1)" \
+  "$(cat "$FAKE_GH_DIR/feat_1-first.title")"
+grep -q "Closes #1" "$FAKE_GH_DIR/feat_1-first.body" && pass "PR body is the rest of the notes file" ||
+  fail "PR body missing Closes #1"
+expect "open-pr is idempotent when the PR exists" "0" \
+  "$(bash "$plugin/scripts/open-pr.sh" feat/1-first >/dev/null 2>&1; echo $?)"
+
 echo "smoke: $passed passed, $failed failed (work dir $work)"
 [ "$failed" -eq 0 ]

@@ -967,7 +967,7 @@ git commit -m "feat: gate-train.sh — batch gate, one full check run per train"
 - Create: `tests/fake-gh`, `scripts/open-pr.sh`
 - Modify: `tests/smoke.sh` (append a section before the final summary)
 
-- [ ] **Step 1: Add the failing tests**
+- [x] **Step 1: Add the failing tests**
 
 Append before the final summary line:
 
@@ -988,12 +988,12 @@ grep -q "Closes #1" "$FAKE_GH_DIR/feat_1-first.body" && pass "PR body is the res
 expect "open-pr is idempotent when the PR exists" "0" "$(bash "$plugin/scripts/open-pr.sh" feat/1-first >/dev/null 2>&1; echo $?)"
 ```
 
-- [ ] **Step 2: Run and verify it fails**
+- [x] **Step 2: Run and verify it fails**
 
 Run: `bash tests/smoke.sh`
 Expected: the new assertions FAIL — first with `bash: .../open-pr.sh: No such file`, and after Step 3's open-pr alone would still fail because `gh` (fake) is missing; 27 previous PASS.
 
-- [ ] **Step 3: Write `tests/fake-gh`**
+- [x] **Step 3: Write `tests/fake-gh`**
 
 Port of the reference fake, identity code removed (`gh auth status` added for doctor.sh):
 
@@ -1056,7 +1056,7 @@ case "${1:-} ${2:-}" in
 esac
 ```
 
-- [ ] **Step 4: Write `scripts/open-pr.sh`**
+- [x] **Step 4: Write `scripts/open-pr.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -1090,12 +1090,12 @@ rm -f "$body_file"
 echo "opened PR for $branch: $title"
 ```
 
-- [ ] **Step 5: Run and verify it passes**
+- [x] **Step 5: Run and verify it passes**
 
 Run: `bash tests/smoke.sh`
 Expected: all 6 open-pr assertions PASS; `smoke: 36 passed, 0 failed`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tests/fake-gh scripts/open-pr.sh tests/smoke.sh

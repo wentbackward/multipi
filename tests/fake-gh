@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# A stand-in for the GitHub CLI, for the smoke tests: PRs live in $FAKE_GH_DIR as flat files, a
+# squash merge is a real squash commit pushed to the local bare origin. Every call is logged.
+# Supports only what the multipi scripts call: auth status, pr create, pr view, pr merge.
+set -u
+dir=${FAKE_GH_DIR:?FAKE_GH_DIR not set}
+mkdir -p "$dir"
+echo "gh $*" >>"$dir/calls.log"
+key() { printf '%s' "${1//\//_}"; }
+case "${1:-} ${2:-}" in
+  "auth status")
+    exit 0
+    ;;
+  "pr view")
+    branch=$3
+    [ -f "$dir/$(key "$branch").state" ] || exit 1
+    case "${5:-}" in
+      state) cat "$dir/$(key "$branch").state" ;;
+    esac
+    ;;
+  "pr create")
+    shift 2
+    head="" title="" body_file=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --head) head=$2; shift 2 ;;
+        --title) title=$2; shift 2 ;;
+        --body-file) body_file=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '%s\n' "$title" >"$dir/$(key "$head").title"
+    cp "$body_file" "$dir/$(key "$head").body"
+    echo OPEN >"$dir/$(key "$head").state"
+    ;;
+  "pr merge")
+    branch=$3
+    origin=$(git remote get-url origin)
+    expected=""
+    [[ " $* " == *" --match-head-commit "* ]] && expected=$(printf '%s\n' "$@" | grep -A1 -- --match-head-commit | tail -1)
+    work=$(mktemp -d)
+    git clone -q "$origin" "$work/clone"
+    (
+      cd "$work/clone" || exit 1
+      [ -z "$(git status --porcelain)" ] || { echo "fake gh: dirty clone" >&2; exit 1; }
+      [ -z "$expected" ] || [ "$(git rev-parse "origin/$branch" 2>/dev/null)" = "$expected" ] ||
+        { echo "fake gh: head moved" >&2; exit 1; }
+      git merge -q --squash "origin/$branch" >/dev/null
+      git commit -q -m "$(cat "$dir/$(key "$branch").title")"
+      git push -q origin HEAD:main
+    ) || { rm -rf "$work"; exit 1; }
+    rm -rf "$work"
+    echo MERGED >"$dir/$(key "$branch").state"
+    ;;
+  *) echo "fake gh: unsupported: $*" >&2; exit 1 ;;
+esac
