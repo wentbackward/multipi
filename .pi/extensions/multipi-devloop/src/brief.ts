@@ -39,6 +39,8 @@ export interface ImplementerBriefInput {
 	portRange: [number, number];
 	/** True when re-dispatching into a worktree that already holds partial work. */
 	resumed?: boolean;
+	/** Latest comment on the ticket (verbatim) — reviewer findings and requirement changes ride here. */
+	reviewNote?: string;
 }
 
 export function assembleImplementerBrief(i: ImplementerBriefInput): string {
@@ -51,8 +53,14 @@ exists, re-read the ticket (it may have changed), and either finish or discard i
 (decision to docs/DECISIONS.md). Do not blindly redo committed work.
 `
 		: "";
+	const review = i.reviewNote
+		? `
+## Latest ticket comment (READ IT — review findings and requirement changes are posted here)
+${i.reviewNote}
+`
+		: "";
 	return `Implement ticket #${i.ticket}: ${i.title}
-
+${review}
 ## Grounds you were given (from the orchestrator — authoritative)
 - Worktree: ${i.worktree}   (branch ${i.branch}, based on ${base})
 - Notes file (outside git, do NOT commit): ${i.notes}
@@ -77,7 +85,7 @@ ${resume}
 
 ## Steps
 1. \`cd ${i.worktree} && git status && git log --oneline -3\`: confirm you are on ${i.branch} based on ${base}.
-2. Read the ticket (\`gh issue view ${i.ticket}\`) and the spec sections it cites, plus the code it touches.
+2. Read the ticket AND its latest comments (\`gh issue view ${i.ticket}\`; the newest comment carries review findings) and the spec sections it cites, plus the code it touches.
 3. TESTS FIRST. Turn every acceptance criterion into at least one named test whose name states the
    behaviour; add the edge cases that matter (empty input, boundaries, duplicates, out-of-order input,
    failure of each dependency). Replace external services with fakes. No network in unit tests. Run them
