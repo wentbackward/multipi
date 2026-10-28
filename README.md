@@ -69,16 +69,37 @@ continue (bounded), startable ticket + free slot → continue (unbounded).
 
 ## Installing into a project
 
+You manage multipi as a plain clone alongside your projects; it is **not** installed into pi
+itself. Everything the loop needs is copied into the **target project**, where pi picks it up
+automatically from the project layer:
+
 ```bash
-/path/to/multipi/scripts/install.sh /path/to/target
+git clone https://github.com/wentbackward/multipi ~/src/multipi
+~/src/multipi/scripts/install.sh /path/to/target
 ```
 
-Copies `scripts/` (versioned in the target), the extension to
-`.pi/extensions/multipi-devloop/`, roles to `.pi/agents/`, skills to `.pi/skills/`.
-Then the target writes its `.devloop.json` (start from `templates/devloop.json`) and runs
-`scripts/doctor.sh`. Non-multipi targets additionally need `typebox` and
-`@earendil-works/pi-coding-agent` resolvable (devDependencies). In a pi session, the
-`devloop-setup` skill does all of this.
+What that does (idempotent — re-run after a `git pull` in multipi to update):
+
+- `scripts/` → copied into the target and **versioned with the target** (the deterministic
+  backbone: doctor, gate-train, merge-train, heavy queue).
+- `extension/` → `.pi/extensions/multipi-devloop/` in the target — pi loads project extensions
+  on session start, so the five `devloop.*` tools and both hooks are simply present.
+- `agents/*.md` → `.pi/agents/` (role prompts, implementer/code-reviewer/verifier) **and** a copy
+  bundled inside the extension (fallback when the project layer is absent).
+- `skills/` → `.pi/skills/devloop` + `.pi/skills/devloop-setup` (visible via pi's skill picker).
+
+So: yes — after running the script, open pi in the target folder and the extension, roles and
+skills are already there (pi loads the project layer on session start; on first open it will ask
+you to trust the project's extensions/skills — approve). Then, inside that pi session, run the **`devloop-setup`** skill (or do
+it by hand): it writes the target's `.devloop.json` (start from `templates/devloop.json`) and
+runs `scripts/doctor.sh` to verify the prerequisites.
+
+Prerequisites on the target: git, node ≥ 24 (pi's native TS support), and — for non-multipi
+targets — `typebox` and `@earendil-works/pi-coding-agent` resolvable from the repo root
+(devDependencies; doctor checks this and prints the remedy).
+
+This repo dogfoods itself: its committed `.pi/` directory **is** the result of
+`scripts/install.sh .` — the loop that built this project ran from these exact files.
 
 ## Checks
 
@@ -110,3 +131,7 @@ repo and run `devloop.status`, then dispatch a trivial ticket.
 max_blocks}`, `merge.{method, delete_branch}`. Runtime state (notes, logs,
 green-train record, dispatch state) lives under `~/.multipi/<repo>/` — derivable, never
 authoritative over GitHub + git.
+
+---
+
+This project was built 100% autonomously by Qwen3.8-27B-FP8 and pi.
