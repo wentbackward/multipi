@@ -2,7 +2,10 @@ SHELL := /bin/bash
 
 SCRIPTS := $(wildcard scripts/*.sh scripts/lib/*.sh)
 
-check: shellcheck smoke
+check: ts shellcheck smoke
+
+ts:
+	npm run check
 
 shellcheck:
 	@if command -v shellcheck >/dev/null 2>&1; then \
