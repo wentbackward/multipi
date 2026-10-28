@@ -4,7 +4,7 @@ import path from "node:path";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
-import { readState, writeState, pruneDead, runningCount, type DispatchState } from "../../extension/src/state.ts";
+import { readState, writeState, updateState, pruneDead, runningCount, type DispatchState } from "../../extension/src/state.ts";
 
 test("write then read round-trips", () => {
 	const dir = mkdtempSync(path.join(tmpdir(), "st-"));
@@ -51,4 +51,19 @@ test("writeState is atomic (tmp+rename) and creates the dir", () => {
 	const dir = path.join(mkdtempSync(path.join(tmpdir(), "st-")), "nested", "state");
 	writeState(dir, {});
 	assert.deepEqual(readState(dir), {});
+});
+
+test("concurrent updateState cycles keep every entry (lost-update guard)", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "multipi-state-"));
+	for (let i = 0; i < 20; i++) {
+		// Interleave two writers at the same tick; the lock must serialise them.
+		updateState(dir, (s) => {
+			s[`a-${i}`] = { pid: 0, role: "r", worktree: "/w", startedAt: 0, status: "running" };
+		});
+		updateState(dir, (s) => {
+			s[`b-${i}`] = { pid: 0, role: "r", worktree: "/w", startedAt: 0, status: "running" };
+		});
+	}
+	const st = readState(dir);
+	assert.equal(Object.keys(st).length, 40, "no lost updates");
 });

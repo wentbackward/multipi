@@ -4,12 +4,44 @@
   "fast_check": "npx tsc --noEmit",
   "format": null,
   "checks": [
-    { "name": "unit", "command": "node --test tests/unit/*.test.ts", "heavy": false, "summary": "(\\d+) pass" },
-    { "name": "smoke", "command": "bash tests/smoke.sh", "heavy": false, "summary": "smoke: (\\d+) passed, (\\d+) failed" },
-    { "name": "shellcheck", "command": "make shellcheck", "heavy": false, "summary": "shellcheck" }
+    {
+      "name": "ts",
+      "command": "npx tsc --noEmit",
+      "heavy": false,
+      "summary": "tsc"
+    },
+    {
+      "name": "unit",
+      "command": "node --test tests/unit/*.test.ts",
+      "heavy": false,
+      "summary": "(\\\\d+) pass"
+    },
+    {
+      "name": "smoke",
+      "command": "bash tests/smoke.sh",
+      "heavy": false,
+      "summary": "smoke: (\\\\d+) passed, (\\\\d+) failed"
+    },
+    {
+      "name": "shellcheck",
+      "command": "make shellcheck",
+      "heavy": false,
+      "summary": "shellcheck"
+    }
   ],
   "gate_worktree": "../multipi-gate",
-  "heavy": { "slots": 2, "port_base": 8600, "port_step": 10 },
-  "stop_gate": { "require_clean_tree": true, "max_blocks": 5 },
-  "merge": { "method": "squash", "delete_branch": true }
+  "heavy": {
+    "slots": 2,
+    "port_base": 8600,
+    "port_step": 10
+  },
+  "stop_gate": {
+    "require_clean_tree": true,
+    "max_blocks": 5
+  },
+  "merge": {
+    "method": "squash",
+    "delete_branch": true
+  },
+  "gate_setup": "[ -f package.json ] && npm ci --no-audit --no-fund"
 }

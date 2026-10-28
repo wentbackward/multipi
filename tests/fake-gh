@@ -145,12 +145,9 @@ case "${1:-} ${2:-}" in
     if [ -n "${fields##*comments}" ]; then
       printf '{"title":"%s"}\n' "$(jesc "$title")"
     else
-      comments="[]"
-      if [ -f "$dir/comments/$n" ]; then
-        comments=$(awk '{line=line (NR>1?"\n":"") $0} END{print line}' "$dir/comments/$n")
-        comments="[{"body":"$(jesc "$comments")"}]"
-      fi
-      printf '{"title":"%s","comments":%s}\n' "$(jesc "$title")" "$comments"
+      body=""
+      [ -f "$dir/comments/$n" ] && body=$(awk '{line=line (NR>1?"\n":"") $0} END{print line}' "$dir/comments/$n")
+      printf '{"title":"%s","comments":[{"body":"%s"}]}\n' "$(jesc "$title")" "$(jesc "$body")"
     fi
     ;;
   "issue edit")

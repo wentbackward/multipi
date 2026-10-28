@@ -6,7 +6,7 @@ import { Type, type TSchema } from "typebox";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult, AgentToolUpdateCallback, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { loadConfig, resolvePaths, resolveState, type DevloopConfig, type Paths } from "./config.ts";
-import { readState, writeState, pruneDead, runningCount, type DispatchEntry, type DispatchState } from "./state.ts";
+import { readState, updateState, pruneDead, runningCount, type DispatchEntry, type DispatchState } from "./state.ts";
 import {
 	branchSlug,
 	worktreePath,
@@ -189,8 +189,11 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 	if (ticket === undefined) return { ...text("implementer requires `ticket`"), isError: true };
 
 	// Local refusals first (no GitHub dependency): busy ticket, then capacity.
-	const state = pruneDead(readState(ctx.stateDir));
-	writeState(ctx.stateDir, state); // persist prune (dead pids -> crashed)
+	// Locked read-modify-write: the prune is persisted and concurrent dispatches can't lose entries.
+	const state = updateState(ctx.stateDir, (s) => {
+		pruneDead(s);
+		return s;
+	});
 	const prev = state[String(ticket)];
 	if (prev?.status === "running") {
 		return { ...text(`ticket #${ticket} already has an implementer running. In-flight: ${inFlightList(state)}`), isError: true };
@@ -300,11 +303,9 @@ function spawnAndTrack(
 		signal: controller.signal,
 		onSpawn: (pid) => {
 			if (pid === undefined) return;
-			const st = readState(ctx.stateDir);
-			if (st[key]?.status === "running") {
-				st[key].pid = pid;
-				writeState(ctx.stateDir, st);
-			}
+			updateState(ctx.stateDir, (st) => {
+				if (st[key]?.status === "running") st[key].pid = pid;
+			});
 		},
 		onUpdate: (p) => opts.onUpdate?.({ content: [{ type: "text", text: p.finalText }], details: p }),
 	}).then((res) => {
@@ -316,24 +317,24 @@ function spawnAndTrack(
 
 /** Record a freshly-created dispatch entry as running (idempotent per key). */
 function persistEntry(ctx: ToolContext, key: string, entry: DispatchEntry): void {
-	const state = readState(ctx.stateDir);
-	state[key] = { ...state[key], ...entry };
-	writeState(ctx.stateDir, state);
+	updateState(ctx.stateDir, (state) => {
+		state[key] = { ...state[key], ...entry };
+	});
 }
 
 /** Record the terminal state of a dispatch entry (state key = ticket or ad-hoc). */
 export function finishEntry(ctx: ToolContext, key: string, entry: DispatchEntry, res: { exitCode: number; finalText: string; aborted: boolean; stopReason?: string; errorMessage?: string; stderr: string }, signal?: AbortSignal): void {
-	const state = readState(ctx.stateDir);
-	entry.report = res.finalText || res.stderr || res.errorMessage || "";
-	entry.stopReason = res.stopReason;
-	if (res.errorMessage) entry.error = res.errorMessage;
-	if (res.aborted || signal?.aborted) entry.status = "interrupted";
-	else if (/STATUS:\s*BLOCKED/.test(res.finalText)) entry.status = "blocked";
-	else if (/STATUS:\s*DONE/.test(res.finalText)) entry.status = "done";
-	else entry.status = "crashed";
-	// Keep the live pid recorded at spawn time (the entry object still carries the 0 placeholder).
-	state[key] = { ...entry, pid: state[key]?.pid ?? entry.pid };
-	writeState(ctx.stateDir, state);
+	updateState(ctx.stateDir, (state) => {
+		entry.report = res.finalText || res.stderr || res.errorMessage || "";
+		entry.stopReason = res.stopReason;
+		if (res.errorMessage) entry.error = res.errorMessage;
+		if (res.aborted || signal?.aborted) entry.status = "interrupted";
+		else if (/STATUS:\s*BLOCKED/.test(res.finalText)) entry.status = "blocked";
+		else if (/STATUS:\s*DONE/.test(res.finalText)) entry.status = "done";
+		else entry.status = "crashed";
+		// Keep the live pid recorded at spawn time (the entry object still carries the 0 placeholder).
+		state[key] = { ...entry, pid: state[key]?.pid ?? entry.pid };
+	});
 }
 
 function usageLine(res: { usage: { input: number; output: number; cost: number; totalTokens: number } }): string {
@@ -387,8 +388,10 @@ export function cancelImpl(ctx: ToolContext, key: string): AgentToolResult<undef
 			/* process already gone; status below records the intent */
 		}
 	}
-	entry.status = "interrupted";
-	writeState(ctx.stateDir, state);
+	updateState(ctx.stateDir, (s) => {
+		const e = s[key];
+		if (e) e.status = "interrupted";
+	});
 	return { ...text(`cancel sent for '${key}' (pid ${entry.pid || "?"}); the worktree is kept for a re-dispatch`) };
 }
 
