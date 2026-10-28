@@ -55,10 +55,15 @@ if [ -n "$DL_ROOT" ] && [ -d "$DL_ROOT/.pi/extensions/multipi-devloop" ]; then
 for (const pkg of ["typebox", "@earendil-works/pi-coding-agent"]) {
   try { await import(pkg); } catch { console.log(pkg); }
 }' 2>/dev/null)
+    probe_rc=$?
     if [ -n "$unresolved" ]; then
       while IFS= read -r pkg; do
         missing "$pkg (not in $DL_ROOT/node_modules; npm i -D typebox @earendil-works/pi-coding-agent)"
       done <<<"$unresolved"
+    elif [ "$probe_rc" -ne 0 ]; then
+      # The probe itself died (a dependency crashed node at import): nothing was verified,
+      # so never print an ok line for it.
+      missing "extension runtime probe (node exited $probe_rc while importing the extension's dependencies)"
     else
       ok "extension runtime (node $(node --version), typebox, pi-coding-agent)"
     fi
