@@ -114,7 +114,7 @@ case "${1:-} ${2:-}" in
     src=$dir/issues
     [ "$state" = closed ] && src=$dir/issues-closed
     found=0
-    for f in $(ls "$src" 2>/dev/null | sort -n); do
+    for f in $(find "$src" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\n' 2>/dev/null | sort -n); do
       found=1
       if [ -n "$json" ]; then
         if [ "$state" = closed ]; then
