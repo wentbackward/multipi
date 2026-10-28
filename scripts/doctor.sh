@@ -49,7 +49,7 @@ fi
 # Resolution is probed with Node's own resolver FROM THE EXTENSION DIRECTORY — the same lookup
 # pi performs when it loads the extension. The probe silences stdout while a package is imported
 # (so dependency side-effects cannot masquerade as verdicts) and prints exactly one verdict line
-# per genuinely unresolvable known package.
+# per known package that fails to load (does not resolve, or throws at evaluation).
 if [ -n "$DL_ROOT" ] && [ -d "$DL_ROOT/.pi/extensions/multipi-devloop" ]; then
   if ! command -v node >/dev/null 2>&1; then
     missing "node (the devloop extension cannot run; install Node.js)"
@@ -81,7 +81,7 @@ for (const pkg of ["typebox", "@earendil-works/pi-coding-agent"]) {
     if [ -n "$known_missing" ]; then
       while IFS= read -r pkg; do
         [ -n "$pkg" ] || continue # herestring: skip the trailing empty line
-        missing "$pkg (cannot be resolved from .pi/extensions/multipi-devloop; npm i -D typebox @earendil-works/pi-coding-agent)"
+        missing "$pkg (cannot be loaded from .pi/extensions/multipi-devloop; npm i -D typebox @earendil-works/pi-coding-agent)"
       done <<<"$known_missing"
     fi
     if [ "$probe_bad" -ne 0 ] || [ "$probe_rc" -ne 0 ]; then
