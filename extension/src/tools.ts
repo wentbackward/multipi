@@ -16,6 +16,7 @@ import {
 	assembleVerifierBrief,
 	assembleAnalystBrief,
 } from "./brief.ts";
+import * as childreg from "./childreg.ts";
 import { spawnPi, type ChildResult } from "./child.ts";
 import { discoverRoles, findRole } from "./roles.ts";
 import { listOpenIssues, listClosedIssueNumbers, addLabel, latestComment } from "./issues.ts";
@@ -147,6 +148,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			worktree,
 			signal,
 			onUpdate,
+			ticket: params.ticket,
 		});
 		const res = await ac.promise;
 		finishEntry(ctx, key, entry, res, signal);
@@ -213,6 +215,8 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			worktree,
 			signal,
 			onUpdate,
+			ticket,
+			branch,
 		});
 		const res = await ac.promise;
 		finishEntry(ctx, key, reviewEntry, res, signal);
@@ -321,7 +325,7 @@ function spawnAndTrack(
 	ctx: ToolContext,
 	key: string,
 	role: { name: string; filePath: string; tools?: string[]; model?: string },
-	opts: { task: string; worktree: string; signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback<unknown> },
+	opts: { task: string; worktree: string; signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback<unknown>; ticket?: number; branch?: string },
 ): { promise: Promise<ChildResult>; controller: AbortController } {
 	const controller = new AbortController();
 	if (opts.signal) {
@@ -329,6 +333,21 @@ function spawnAndTrack(
 		else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
 	}
 	controllers.set(key, controller);
+	childreg.addChild({
+		key,
+		role: role.name,
+		ticket: opts.ticket,
+		branch: opts.branch,
+		worktree: opts.worktree,
+		startedAt: Date.now(),
+		status: "running",
+		turns: 0,
+		usage: { input: 0, output: 0, cost: 0, totalTokens: 0 },
+		activity: "starting",
+		events: [{ at: Date.now(), kind: "start", text: "dispatched" }],
+	});
+	let lastTurnText = "";
+	let lastActivity = "";
 	const promise = spawnPi({
 		task: opts.task,
 		appendSystemPrompt: role.filePath,
@@ -346,9 +365,30 @@ function spawnAndTrack(
 			const st = p.status;
 			const line = st ? `\n[${role.name} ${statusStamp(st.elapsedMs)} · tok ${compactTokens(st.usage.totalTokens)} · $${st.usage.cost.toFixed(2)} · ${st.activity}]` : "";
 			opts.onUpdate?.({ content: [{ type: "text", text: `${p.finalText}${line}` }], details: { ...p, status: st } });
+			// Live registry (widget bar + /devloop-agents): progress + a bounded event ring.
+			if (st) {
+				const events: childreg.ChildEvent[] = [];
+				if (p.finalText !== lastTurnText && p.finalText) {
+					events.push({ at: Date.now(), kind: "turn", text: p.finalText.slice(-300) });
+					lastTurnText = p.finalText;
+				}
+				if (st.activity !== lastActivity) {
+					events.push({ at: Date.now(), kind: "tool", text: st.activity });
+					lastActivity = st.activity;
+				}
+				childreg.updateChild(key, {
+					turns: st.turns,
+					usage: { input: st.usage.input, output: st.usage.output, cost: st.usage.cost, totalTokens: st.usage.totalTokens },
+					activity: st.activity,
+				}, events.length ? events[0] : undefined);
+				for (const e of events.slice(1)) childreg.updateChild(key, {}, e);
+			}
 		},
 	}).then((res) => {
 		controllers.delete(key);
+		const now = Date.now();
+		const status = res.aborted ? "interrupted" : /STATUS:\s*BLOCKED/.test(res.finalText) ? "blocked" : /STATUS:\s*DONE/.test(res.finalText) ? "done" : "crashed";
+		childreg.updateChild(key, { status, endedAt: now }, { at: now, kind: "end", text: `finished (${status}, $${res.usage.cost.toFixed(2)})` });
 		return res;
 	});
 	return { promise, controller };
