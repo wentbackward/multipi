@@ -1,12 +1,14 @@
 # multipi
 
 The autonomous multi-agent development loop for the [pi](https://pi.dev) coding agent.
-The main pi session orchestrates; one-shot role children (implementer, code-reviewer,
+The main pi session orchestrates; one-shot role children (analyst, implementer, code-reviewer,
 verifier) work in isolated git worktrees; a batch gate proves each train of approved
 branches with one full check run; green trains are squash-merged in order.
 
 GitHub issues are the tickets. Issue labels are the loop state. Deterministic scripts
-plus a small pi extension are the hands; skills are the brain.
+plus a small pi extension are the hands; skills are the brain. The loop seeds itself:
+with an empty board the analyst turns the spec into tickets, and the user's in-session
+feedback becomes tickets the same turn it arrives.
 
 Derived from [`wentbackward/claude-dev-loop`](https://github.com/wentbackward/claude-dev-loop)
 (Claude Code). Design: `docs/superpowers/specs/2026-10-27-devloop-pi-design.md`.
@@ -14,7 +16,10 @@ Derived from [`wentbackward/claude-dev-loop`](https://github.com/wentbackward/cl
 ## How it works
 
 ```
-spec ──► GitHub issues (acceptance criteria, Depends on #n)
+spec ──► devloop.dispatch analyst ──► ticket plan (ordered, falsifiable criteria)
+           │                              │ orchestrator raises them
+           ▼                              ▼
+   GitHub issues (acceptance criteria, Depends on #n)
            │
            ▼
    devloop.dispatch ──► role child: pi -p --no-session --mode json
@@ -31,6 +36,8 @@ spec ──► GitHub issues (acceptance criteria, Depends on #n)
            │
            ▼
    devloop.dispatch verifier     audit real outputs; anomalies become new tickets
+           ▲
+   user feedback in session ────┘ (steering: every request becomes a ticket, §skill 8)
 ```
 
 The stop-gate hook (`agent_before_settle`) makes "keep going while work is startable" a
@@ -41,7 +48,7 @@ continue (bounded), startable ticket + free slot → continue (unbounded).
 
 | Tool | What it does |
 |---|---|
-| `devloop.dispatch` | `{role, ticket}` (implementer) / `{role, ticket}` (reviewer) / `{role, task, worktree?}` (verifier). Computes branch, worktree, ports, notes path and the full brief; enforces the concurrency cap; labels the ticket as it goes. |
+| `devloop.dispatch` | `{role, ticket}` (implementer) / `{role, ticket}` (reviewer) / `{role, task, worktree?}` (verifier) / `{role, spec}` or `{role, focus}` (analyst — spec decomposition or feedback-to-tickets; no ticket, no capacity slot, plan lands in the notes dir). Computes branch, worktree, ports, notes path and the full brief; enforces the concurrency cap; labels the ticket as it goes. |
 | `devloop.cancel` | Kill one child by ticket. Worktree and branch are kept; re-dispatch resumes. |
 | `devloop.gate` | `{branches}` — stack on latest base in the gate worktree, run every configured check once. green / red / conflict(branch) / error. |
 | `devloop.merge` | `{branches}` — replay, verify tree == gated tree, squash each PR in order, delete branches. Refusals are informative, never silent. |
@@ -61,7 +68,7 @@ continue (bounded), startable ticket + free slot → continue (unbounded).
 - `extension/` — the pi extension: pure-node domain modules (`config`, `state`, `brief`,
   `child`, `roles`, `stopgate`, `formatter`, `gate`, `merge`, `issues`) and a thin
   registration layer (`tools`, `index`). No build step (Node 24 type stripping).
-- `agents/` — role prompts (implementer, code-reviewer, verifier).
+- `agents/` — role prompts (analyst, implementer, code-reviewer, verifier).
 - `skills/` — `devloop` (orchestrator workflow) and `devloop-setup` (project bootstrap).
 - `templates/` — `.devloop.json`, AGENTS.md and DECISIONS.md skeletons.
 - `tests/` — offline suites: `smoke.sh` (bash, local bare origin, `fake-gh`) and
@@ -84,7 +91,7 @@ What that does (idempotent — re-run after a `git pull` in multipi to update):
   backbone: doctor, gate-train, merge-train, heavy queue).
 - `extension/` → `.pi/extensions/multipi-devloop/` in the target — pi loads project extensions
   on session start, so the five `devloop.*` tools and both hooks are simply present.
-- `agents/*.md` → `.pi/agents/` (role prompts, implementer/code-reviewer/verifier) **and** a copy
+- `agents/*.md` → `.pi/agents/` (role prompts, analyst/implementer/code-reviewer/verifier) **and** a copy
   bundled inside the extension (fallback when the project layer is absent).
 - `skills/` → `.pi/skills/devloop` + `.pi/skills/devloop-setup` (visible via pi's skill picker).
 

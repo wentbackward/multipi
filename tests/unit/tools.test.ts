@@ -32,6 +32,7 @@ function agentsDir(fx: ReturnType<typeof makeFixture>): string {
 	);
 	writeFileSync(path.join(d, "code-reviewer.md"), "---\nname: code-reviewer\ndescription: reviews\ntools: read, bash\n---\nReview. End with VERDICT: APPROVE.\n");
 	writeFileSync(path.join(d, "verifier.md"), "---\nname: verifier\ndescription: audits\ntools: read, bash\n---\nAudit. End with STATUS: DONE.\n");
+	writeFileSync(path.join(d, "analyst.md"), "---\nname: analyst\ndescription: plans tickets\ntools: read, bash\n---\nPlan. End with STATUS: DONE.\n");
 	return d;
 }
 
@@ -264,3 +265,30 @@ function readCounterFile(fx: ReturnType<typeof makeFixture>): string {
 		return "0";
 	}
 }
+
+test("dispatch(analyst) refuses without spec or focus", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", checks: [{ name: "unit", command: "true", heavy: false }], format: null, format_extensions: null, fast_check: "true" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const res = await call(ctx, "devloop.dispatch", { role: "analyst" });
+		assert.equal(res.isError, true);
+		assert.match(textOf(res), /requires `spec`.*`focus`/);
+	} finally { fx.cleanup(); }
+});
+
+test("dispatch(analyst) plans from a spec, writes no ticket, records a done entry", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", checks: [{ name: "unit", command: "true", heavy: false }], format: null, format_extensions: null, fast_check: "true" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const res = await call(ctx, "devloop.dispatch", { role: "analyst", spec: "docs/prd.md" });
+		assert.equal(res.isError ?? false, false, textOf(res));
+		const out = textOf(res);
+		assert.match(out, /analyst .* -> done/);
+		assert.match(out, /plan file: .*notes\/tickets-prd-md\.md/);
+		const state = JSON.parse(execFileSync("cat", [path.join(fx.dir, "home", "proj", "dispatch.json")]).toString());
+		assert.equal(state["analyst-prd-md"].status, "done");
+		assert.equal(state["analyst-prd-md"].worktree, fx.repo);
+	} finally { fx.cleanup(); }
+});

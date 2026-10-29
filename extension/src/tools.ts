@@ -14,6 +14,7 @@ import {
 	assembleImplementerBrief,
 	assembleReviewerBrief,
 	assembleVerifierBrief,
+	assembleAnalystBrief,
 } from "./brief.ts";
 import { spawnPi, type ChildResult } from "./child.ts";
 import { discoverRoles, findRole } from "./roles.ts";
@@ -114,6 +115,8 @@ interface DispatchParams {
 	branch?: string;
 	worktree?: string;
 	task?: string;
+	spec?: string;
+	focus?: string;
 }
 
 async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback<unknown> | undefined): Promise<AgentToolResult<DispatchDetails | undefined>> {
@@ -145,6 +148,35 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 		const res = await ac.promise;
 		finishEntry(ctx, key, entry, res, signal);
 		return reportResult(role.name, params.ticket, entry, res);
+	}
+
+	// ---- analyst: spec/feedback -> ticket plan (no ticket, no capacity slot) --
+	if (params.role === "analyst") {
+		if (!params.spec && !params.focus) return { ...text("analyst requires `spec` (a spec path) or `focus` (operator feedback)"), isError: true };
+		const state = pruneDead(readState(ctx.stateDir));
+		const slug = branchSlug(params.spec ? path.basename(params.spec) : "operator-feedback") || "analysis";
+		const key = `analyst-${slug}`;
+		if (state[key]?.status === "running") {
+			return { ...text(`an analyst for '${slug}' is already running. In-flight: ${inFlightList(state)}`), isError: true };
+		}
+		const planPath = path.join(ctx.paths.notesDir, `tickets-${slug}.md`);
+		const analystEntry: DispatchEntry = {
+			pid: 0,
+			role: role.name,
+			worktree: ctx.cfg.root,
+			startedAt: Date.now(),
+			status: "running",
+		};
+		persistEntry(ctx, key, analystEntry);
+		const ac = spawnAndTrack(ctx, key, role, {
+			task: assembleAnalystBrief({ spec: params.spec, focus: params.focus, repoRoot: ctx.cfg.root, planPath }),
+			worktree: ctx.cfg.root,
+			signal,
+			onUpdate,
+		});
+		const res = await ac.promise;
+		finishEntry(ctx, key, analystEntry, res, signal);
+		return reportResult(role.name, undefined, analystEntry, res, `\nplan file: ${planPath}`);
 	}
 
 	// ---- code-reviewer: reviews an existing pushed branch -------------------
@@ -459,11 +491,13 @@ export async function formatEditedFile(cwd: string, filePath: string): Promise<v
 // Tool registrations
 // ---------------------------------------------------------------------------
 const DispatchSchema = Type.Object({
-	role: Type.String({ description: "implementer | code-reviewer | verifier" }),
+	role: Type.String({ description: "implementer | code-reviewer | verifier | analyst" }),
 	ticket: Type.Optional(Type.Number({ description: "Issue number (required for implementer and code-reviewer)" })),
 	branch: Type.Optional(Type.String({ description: "Branch override (code-reviewer)" })),
 	worktree: Type.Optional(Type.String({ description: "Worktree for verifier (defaults to the repo root)" })),
 	task: Type.Optional(Type.String({ description: "Free-form assignment (verifier)" })),
+	spec: Type.Optional(Type.String({ description: "Spec path to decompose into a ticket plan (analyst)" })),
+	focus: Type.Optional(Type.String({ description: "Operator feedback to turn into 1-3 tickets (analyst, steering mode)" })),
 });
 
 type Params<S extends TSchema> = import("typebox").Static<S>;

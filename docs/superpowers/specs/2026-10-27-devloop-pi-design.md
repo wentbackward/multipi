@@ -282,3 +282,46 @@ or pi package; decided during implementation). This repo is its own first instal
 4. Gate/merge/status tools; hooks (stop-gate 3-way, format-on-edit) + tests.
 5. Role prompts + skills; manual end-to-end pass on a trivial ticket in a scratch repo.
 6. Dogfood bootstrap of this repo; loop-driven completion of remaining tickets.
+
+---
+
+## Addendum 2026-10-29 — self-seeding and steering (analyst role)
+
+The loop must not require a human-pre-populated board, and operator feedback during a
+session must become tickets without leaving the loop.
+
+**Role: `analyst`** (`agents/analyst.md`)
+- Tools: `read, grep, find, ls, bash`. Bash is inspection-only; mutating `gh`/git calls are
+  forbidden by the role prompt and produce no loop state.
+- Disposition: free-form like the verifier — NO ticket required, consumes NO implementer
+  capacity slot, runs at the repo root (read-only).
+- Two modes via `devloop.dispatch` params:
+  - `spec: "<path>"` — decompose the spec into a complete ordered ticket plan.
+  - `focus: "<text>"` — turn operator feedback into 1–3 tickets.
+- Key: `analyst-<slug>` (slug = `branchSlug(basename(spec))` or `operator-feedback`); a second
+  concurrent analyst for the same slug is refused (busy), terminal re-runs reuse the key.
+
+**Deliverable contract** (brief: `assembleAnalystBrief`)
+- Plan written to `<notesDir>/tickets-<slug>.md` (outside git) AND repeated verbatim in the
+  report (the report is what the orchestrator tool call returns).
+- Per-ticket block: imperative title (≤10 words), `Why` (anchored in spec/feedback), falsifiable
+  `- [ ]` acceptance criteria, `Depends on: <earlier title | none>`, `Size: S|M`; plan ordered by
+  dependency; closing `## Out of scope` list (deliverable, not afterthought).
+- Dedupes against `gh issue list --state open` before planning.
+- Report contract: `STATUS: DONE` / `STATUS: BLOCKED — <reason>` (blocked spec ⇒ orchestrator
+  stops for a human decision).
+
+**Ticket creation stays with the orchestrator** (deliberate): the analyst proposes, the main
+session disposes — `gh issue create` in plan order, resolving `Depends on` titles to numbers,
+Out-of-scope commented on the first ticket. Rationale: an unattended child inventing scope is
+the failure mode the loop exists to prevent; the human-auditable unit is the ticket, and exactly
+one component owns its creation.
+
+**Phase 0 (skill §0.5/§1.1)**: no open tickets + spec exists ⇒ dispatch analyst on the spec ⇒
+raise the planned tickets ⇒ continue. The user never pre-populates the board.
+
+**Steering (skill §8)**: any user report/request in session becomes a ticket the same turn —
+direct `gh issue create` (single obvious item, body carries a `## Reported` section quoting the
+user verbatim) or analyst `focus` mode (multi-item/ambiguous), then triage: reproducible defect
+⇒ dispatch now; enhancement ⇒ queue; judgement needed ⇒ `dl/blocked`. No live messaging into
+running children (unchanged).

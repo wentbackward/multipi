@@ -190,3 +190,58 @@ STATUS: DONE
 STATUS: BLOCKED — <one-line reason>
 `;
 }
+
+// ---- analyst --------------------------------------------------------------
+export interface AnalystBriefInput {
+	/** Absolute path of the spec to decompose (spec mode). */
+	spec?: string;
+	/** Operator feedback to turn into tickets (steering mode). */
+	focus?: string;
+	repoRoot: string;
+	planPath: string;
+}
+
+export function assembleAnalystBrief(i: AnalystBriefInput): string {
+	const assignment = i.spec
+		? `Turn the spec at \`${i.spec}\` (relative to ${i.repoRoot}) into a complete implementation ticket plan.`
+		: `Turn the following operator feedback into 1–3 implementation tickets (1 for a bug report, up to 3 if the feedback implies distinct work):\n\n"""\n${i.focus}\n"""`;
+	return `Work at ${i.repoRoot}.
+
+## Assignment
+${assignment}
+
+Before planning:
+1. Read the project's AGENTS.md and the material above in full.
+2. Skim the existing code enough to use its real vocabulary (module names, APIs, test layout).
+3. List the open tickets (\`gh issue list --state open --json number,title\`) and treat their scope
+   as ALREADY CLAIMED — do not re-propose it; you may propose tickets that depend on them.
+
+## Deliverable
+Write the plan to \`${i.planPath}\` (outside git — never commit it) and repeat the FULL plan text
+at the end of your report. Exact format, tickets in dependency order:
+
+## Ticket: <imperative title, <= 10 words>
+Why: <one or two sentences, anchored in the spec/feedback>
+Acceptance criteria:
+- [ ] <falsifiable: a test or a command proves it>
+Depends on: <earlier ticket title in this plan, or "none">
+Size: S|M   (S = one focused implementer pass)
+
+After the tickets:
+
+## Out of scope
+- <spec/feedback item deliberately not ticketed, and why>
+
+Rules:
+- Falsifiable acceptance criteria only — "improve"/"clean up"/"robust" are not criteria.
+- Vertical slices, not horizontal layers.
+- Minimal-complete set for the Definition of Done: typical 4–12 tickets for a spec, 1–3 for
+  feedback. Smaller is better if it is still complete.
+- No ticket may depend on an out-of-scope item or on another team's work.
+- READ-ONLY: no git mutations, no issues, no labels, no pushes. Bash is for inspection and
+  \`gh issue list/view\` only. Never read or print secrets.
+- End with EXACTLY one of:
+STATUS: DONE
+STATUS: BLOCKED — <one-line reason>
+`;
+}

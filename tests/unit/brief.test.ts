@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	branchSlug, worktreePath, portRange,
-	assembleImplementerBrief, assembleReviewerBrief, assembleVerifierBrief,
+	assembleImplementerBrief, assembleReviewerBrief, assembleAnalystBrief, assembleVerifierBrief,
 } from "../../extension/src/brief.ts";
 
 const REPO = "/home/u/src/proj";
@@ -111,4 +111,21 @@ test("verifier brief embeds the task and worktree", () => {
 	const brief = assembleVerifierBrief({ task: "Audit the backfill of 2026-09 outputs", worktree: "/repo" });
 	assert.ok(brief.includes("Audit the backfill of 2026-09 outputs"));
 	assert.ok(brief.includes("/repo"));
+});
+
+test("analyst brief: spec mode carries spec, repo, plan path and the plan contract", () => {
+	const brief = assembleAnalystBrief({ spec: "docs/prd.md", repoRoot: "/repo", planPath: "/h/multipi/proj/notes/tickets-prd.md" });
+	assert.ok(brief.includes("`docs/prd.md`"), "spec path carried");
+	assert.ok(brief.includes("relative to /repo"), "repo root context");
+	assert.ok(brief.includes("/h/multipi/proj/notes/tickets-prd.md"), "plan path");
+	assert.ok(brief.includes("## Ticket: <imperative title"), "plan format");
+	assert.ok(brief.includes("Out of scope"), "out-of-scope deliverable");
+	assert.ok(brief.includes("gh issue list"), "dedupes against open tickets");
+	assert.ok(brief.includes("STATUS: DONE"), "report contract");
+});
+
+test("analyst brief: focus mode embeds the operator feedback verbatim", () => {
+	const brief = assembleAnalystBrief({ focus: "the alert email arrived TWICE", repoRoot: "/repo", planPath: "/p.md" });
+	assert.ok(brief.includes("the alert email arrived TWICE"), "feedback verbatim");
+	assert.ok(!brief.includes("## Ticket: <imperative title") === false, "still has the plan format");
 });
