@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 import { mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { loadConfig, resolveState } from "../../extension/src/config.ts";
+import { repoSlugFromRemote } from "../../extension/src/config.ts";
 import { makeFixture, BASE_CONFIG } from "../fixtures.ts";
 
 test("loadConfig reads the repo config with defaults filled", () => {
@@ -67,4 +69,14 @@ test("loadConfig parses object and plain-string checks uniformly", () => {
 		assert.equal(cfg.checks[0].name, "check-1");
 		assert.equal(cfg.checks[1].name, "e");
 	} finally { fx.cleanup(); }
+});
+
+test("repoSlugFromRemote parses https and ssh remote urls", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "slug-"));
+	execFileSync("git", ["init", "-q", "-b", "main", dir]);
+	execFileSync("git", ["-C", dir, "remote", "add", "origin", "https://github.com/acme/widget.git"]);
+	assert.equal(repoSlugFromRemote(dir, "origin"), "acme/widget");
+	execFileSync("git", ["-C", dir, "remote", "set-url", "origin", "git@github.com:acme/widget"]);
+	assert.equal(repoSlugFromRemote(dir, "origin"), "acme/widget");
+	assert.equal(repoSlugFromRemote(dir, "nope"), "");
 });

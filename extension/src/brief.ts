@@ -199,6 +199,8 @@ export interface AnalystBriefInput {
 	focus?: string;
 	repoRoot: string;
 	planPath: string;
+	/** `owner/name` to pin on every gh call (gh defaults to the PARENT tracker in forks). */
+	repoSlug?: string;
 }
 
 export function assembleAnalystBrief(i: AnalystBriefInput): string {
@@ -213,8 +215,9 @@ ${assignment}
 Before planning:
 1. Read the project's AGENTS.md and the material above in full.
 2. Skim the existing code enough to use its real vocabulary (module names, APIs, test layout).
-3. List the open tickets (\`gh issue list --state open --json number,title\`) and treat their scope
+3. List the open tickets (\`gh ${i.repoSlug ? "-R "+i.repoSlug+" " : ""}issue list --state open --json number,title\`) and treat their scope
    as ALREADY CLAIMED — do not re-propose it; you may propose tickets that depend on them.
+   Never create, edit or label issues from here; only read.
 
 ## Deliverable
 Write the plan to \`${i.planPath}\` (outside git — never commit it) and repeat the FULL plan text

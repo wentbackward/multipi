@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { Type, type TSchema } from "typebox";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult, AgentToolUpdateCallback, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { loadConfig, resolvePaths, resolveState, type DevloopConfig, type Paths } from "./config.ts";
+import { loadConfig, resolvePaths, resolveState, repoSlugFromRemote, type DevloopConfig, type Paths } from "./config.ts";
 import { readState, updateState, pruneDead, runningCount, type DispatchEntry, type DispatchState } from "./state.ts";
 import {
 	branchSlug,
@@ -45,6 +45,8 @@ export interface ToolContext {
 	scriptsDir: string;
 	bundledAgentsDir: string;
 	projectAgentsDir: string;
+	/** `owner/name` of the configured remote — every gh call pins it (gh defaults to the PARENT tracker inside a fork). */
+	repoSlug: string;
 }
 
 export function buildContext(cwd: string): ToolContext {
@@ -61,6 +63,7 @@ export function buildContext(cwd: string): ToolContext {
 		scriptsDir,
 		bundledAgentsDir: process.env.MULTIPI_AGENTS_DIR ?? PACKAGED_AGENTS,
 		projectAgentsDir: path.join(cfg.root, ".pi", "agents"),
+		repoSlug: repoSlugFromRemote(cfg.root, cfg.remote),
 	};
 }
 
@@ -169,7 +172,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 		};
 		persistEntry(ctx, key, analystEntry);
 		const ac = spawnAndTrack(ctx, key, role, {
-			task: assembleAnalystBrief({ spec: params.spec, focus: params.focus, repoRoot: ctx.cfg.root, planPath }),
+			task: assembleAnalystBrief({ spec: params.spec, focus: params.focus, repoRoot: ctx.cfg.root, planPath, repoSlug: ctx.repoSlug }),
 			worktree: ctx.cfg.root,
 			signal,
 			onUpdate,
@@ -236,19 +239,19 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 		return { ...text(`capacity full: ${runningImplementers.length}/${cap} implementers in flight: ${inFlightList(state)}. Wait for a report (or cancel a ticket) and dispatch again.`), isError: true };
 	}
 
-	const issues = listOpenIssues();
+	const issues = listOpenIssues(ctx.repoSlug);
 	let issue = issues.find((i) => i.number === ticket);
 	if (!issue) {
 		// GitHub's list endpoint briefly lags a just-created issue; one bounded retry, then refuse.
 		await new Promise((r) => setTimeout(r, 1500));
-		issue = listOpenIssues().find((i) => i.number === ticket);
+		issue = listOpenIssues(ctx.repoSlug).find((i) => i.number === ticket);
 	}
 	if (!issue) return { ...text(`ticket #${ticket} not found among open issues (already merged/closed?)`), isError: true };
 	const slug = branchSlug(issue.title);
 	const branch = prev?.branch ?? (slug ? `feat/${ticket}-${slug}` : `feat/${ticket}`);
 	const worktree = prev?.worktree ?? worktreePath(ctx.cfg.root, ticket);
 	ensureWorktree(ctx, branch, worktree, !prev);
-	addLabel(ticket, "dl/in-progress");
+	addLabel(ctx.repoSlug, ticket, "dl/in-progress");
 
 	const key = String(ticket);
 	const entry: DispatchEntry = {
@@ -260,7 +263,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 		status: "running",
 	};
 	const idx = runningImplementers.length; // this child's port slice position
-	const reviewNote = latestComment(ticket);
+	const reviewNote = latestComment(ctx.repoSlug, ticket);
 	const brief = assembleImplementerBrief({
 		ticket,
 		title: issue.title,
@@ -294,14 +297,14 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			})
 				.toString()
 				.trim();
-			addLabel(ticket, "dl/in-review");
+			addLabel(ctx.repoSlug, ticket, "dl/in-review");
 			extra = `\nPR: ${out}`;
 		} catch (e) {
 			extra = `\nWARNING: could not open the PR: ${(e as Error).message.split("\n")[0]}`;
 		}
 	} else if (verdict === "blocked") {
 		try {
-			addLabel(ticket, "dl/blocked");
+			addLabel(ctx.repoSlug, ticket, "dl/blocked");
 		} catch {
 			/* labelling is best-effort; the report carries the reason */
 		}
@@ -339,7 +342,11 @@ function spawnAndTrack(
 				if (st[key]?.status === "running") st[key].pid = pid;
 			});
 		},
-		onUpdate: (p) => opts.onUpdate?.({ content: [{ type: "text", text: p.finalText }], details: p }),
+		onUpdate: (p) => {
+			const st = p.status;
+			const line = st ? `\n[${role.name} ${statusStamp(st.elapsedMs)} · tok ${compactTokens(st.usage.totalTokens)} · $${st.usage.cost.toFixed(2)} · ${st.activity}]` : "";
+			opts.onUpdate?.({ content: [{ type: "text", text: `${p.finalText}${line}` }], details: { ...p, status: st } });
+		},
 	}).then((res) => {
 		controllers.delete(key);
 		return res;
@@ -367,6 +374,19 @@ export function finishEntry(ctx: ToolContext, key: string, entry: DispatchEntry,
 		// Keep the live pid recorded at spawn time (the entry object still carries the 0 placeholder).
 		state[key] = { ...entry, pid: state[key]?.pid ?? entry.pid };
 	});
+}
+
+/** mm:ss (or h:mm:ss) for a child's elapsed time. */
+function statusStamp(ms: number): string {
+	const s = Math.floor(ms / 1000);
+	const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+	const mmss = `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+	return h ? `${h}:${mmss}` : mmss;
+}
+
+/** 123456 -> "123k" for the status line. */
+function compactTokens(n: number): string {
+	return n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n);
 }
 
 function usageLine(res: { usage: { input: number; output: number; cost: number; totalTokens: number } }): string {
@@ -434,7 +454,7 @@ export async function evaluateSettle(cwd: string): Promise<{ entries: { type: "c
 	try {
 		const ctx = buildContext(cwd);
 		const cfg = ctx.cfg;
-		const [fc, issues, closed] = await Promise.all([runFastCheck(cfg.fastCheck ?? null, ctx.cfg.root), listOpenIssues(), listClosedIssueNumbers()]);
+		const [fc, issues, closed] = await Promise.all([runFastCheck(cfg.fastCheck ?? null, ctx.cfg.root), listOpenIssues(ctx.repoSlug), listClosedIssueNumbers(ctx.repoSlug)]);
 		const state = pruneDead(readState(ctx.stateDir));
 		const running = Object.values(state).filter((e) => e.status === "running" && e.role === "implementer").length;
 		const decision = evaluateStopGate({
@@ -576,7 +596,7 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 			const kids = Object.entries(state)
 				.map(([k, e]) => `| #${k} | ${e.role} | ${e.branch ?? "-"} | ${e.status} | ${new Date(e.startedAt).toISOString().slice(0, 16).replace("T", " ")} |`)
 				.join("\n");
-			const issues = listOpenIssues()
+			const issues = listOpenIssues(ctx.repoSlug)
 				.map((i) => {
 					const labels = i.labels.filter((l) => l.startsWith("dl/")).join(", ") || "-";
 					const deps = [...i.body.matchAll(/Depends on #(\d+)/g)].map((m) => `#${m[1]}`).join(" ");

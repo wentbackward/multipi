@@ -292,3 +292,30 @@ test("dispatch(analyst) plans from a spec, writes no ticket, records a done entr
 		assert.equal(state["analyst-prd-md"].worktree, fx.repo);
 	} finally { fx.cleanup(); }
 });
+
+test("dispatch streams a status line (elapsed, tokens, cost, activity) while the child runs", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", checks: [{ name: "unit", command: "true", heavy: false }], format: null, format_extensions: null, fast_check: "true" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Stream a status line");
+		const updates: string[] = [];
+		const tools = makeTools();
+		const tool = tools.find((t) => t.name === "devloop.dispatch")!;
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any -- test harness drives raw tool executes
+		const res = await (tool.execute as unknown as (id: string, p: Record<string, unknown>, s: unknown, u: (u: { content?: { text?: string }[] }) => void, tc: unknown) => Promise<any>)(
+			"tc-test",
+			{ role: "implementer", ticket: n },
+			new AbortController().signal,
+			(u: { content?: { text?: string }[] }) => {
+				const t = (u.content ?? []).map((c) => c.text ?? "").join("");
+				if (t) updates.push(t);
+			},
+			{ cwd: ctx.cwd },
+		);
+		assert.equal(res.isError ?? false, false, textOf(res));
+		const statusLines = updates.filter((t) => /tok [^ ]* · \$\d/.test(t));
+		assert.ok(statusLines.length >= 1, "a status update streamed: " + JSON.stringify(updates).slice(0, 400));
+		assert.match(statusLines[statusLines.length - 1], /implementer/);
+	} finally { fx.cleanup(); }
+});

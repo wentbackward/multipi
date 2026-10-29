@@ -29,6 +29,9 @@ echo "gh $*" >>"$dir/calls.log"
 key() { printf '%s' "${1//\//_}"; }
 jesc() { printf '%s' "${1:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
+# global --repo FLAG VALUE: the extension pins the repo explicitly; the fake ignores it
+if [ "${1:-}" = "--repo" ]; then shift 2; fi
+
 case "${1:-} ${2:-}" in
   "auth status")
     exit 0

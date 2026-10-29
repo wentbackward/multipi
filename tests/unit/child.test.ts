@@ -75,3 +75,31 @@ test("spawnPi resolves the missing binary as an error result, not a throw", asyn
 	assert.equal(res.exitCode, 1);
 	assert.ok(res.stderr.length > 0);
 });
+
+test("spawnPi streams throttled status (elapsed, usage, activity) with the report", async () => {
+	const updates: { finalText: string; toolCalls: string[]; status?: { elapsedMs: number; turns: number; usage: { cost: number; totalTokens: number }; activity: string } }[] = [];
+	const res = await spawnPi({
+		task: "measure me",
+		cwd: process.cwd(),
+		env: { MULTIPI_PI_BIN: FAKE_PI },
+		onUpdate: (u) => updates.push(u),
+	});
+	assert.equal(res.exitCode, 0);
+	const withStatus = updates.filter((u) => u.status);
+	assert.ok(withStatus.length >= 1, "at least one status update");
+	const last = withStatus[withStatus.length - 1];
+	assert.equal(last.status!.turns, 1);
+	assert.equal(last.status!.usage.cost, 0.001);
+	assert.equal(last.status!.usage.totalTokens, 30);
+	assert.ok(last.status!.elapsedMs >= 0);
+	assert.match(last.status!.activity, /^bash/);
+	assert.match(updates[updates.length - 1].finalText, /STATUS: DONE/);
+});
+
+test("spawnPi marks the child process with MULTIPI_CHILD (extension guard)", async () => {
+	const os = await import("node:os");
+	const fs = await import("node:fs");
+	const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "multi-pi-env-")), "env.txt");
+	await spawnPi({ task: "x", cwd: process.cwd(), env: { MULTIPI_PI_BIN: FAKE_PI, FAKE_PI_ECHO_ENV: f } });
+	assert.equal(fs.readFileSync(f, "utf8"), "1");
+});

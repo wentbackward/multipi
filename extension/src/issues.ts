@@ -25,8 +25,9 @@ export function parseGhOutput(out: string): unknown[] {
 	}
 }
 
-function ghJson(args: string[]): unknown[] {
-	const out = execFileSync("gh", args, {
+function ghJson(repo: string, args: string[]): unknown[] {
+	const full = repo ? ["--repo", repo, ...args] : args;
+	const out = execFileSync("gh", full, {
 		env: process.env,
 		stdio: ["ignore", "pipe", "pipe"],
 		maxBuffer: 32 * 1024 * 1024,
@@ -34,8 +35,8 @@ function ghJson(args: string[]): unknown[] {
 	return parseGhOutput(out);
 }
 
-export function listOpenIssues(): Issue[] {
-	const rows = ghJson(["issue", "list", "--state", "open", "--limit", "200", "--json", "number,title,labels,body"]) as {
+export function listOpenIssues(repo: string): Issue[] {
+	const rows = ghJson(repo, ["issue", "list", "--state", "open", "--limit", "200", "--json", "number,title,labels,body"]) as {
 		number: number;
 		title: string;
 		labels: { name: string }[];
@@ -44,16 +45,16 @@ export function listOpenIssues(): Issue[] {
 	return rows.map((r) => ({ number: r.number, title: r.title, labels: (r.labels ?? []).map((l) => l.name), body: r.body ?? "" }));
 }
 
-export function listClosedIssueNumbers(): number[] {
-	const rows = ghJson(["issue", "list", "--state", "closed", "--limit", "200", "--json", "number"]) as { number: number }[];
+export function listClosedIssueNumbers(repo: string): number[] {
+	const rows = ghJson(repo, ["issue", "list", "--state", "closed", "--limit", "200", "--json", "number"]) as { number: number }[];
 	return rows.map((r) => r.number);
 }
 
 /** Latest issue comment (review findings ride here), or "". Truncated to maxChars. */
-export function latestComment(number: number, maxChars = 6000): string {
+export function latestComment(repo: string, number: number, maxChars = 6000): string {
 	let rows: { comments?: { body: string }[] }[];
 	try {
-		rows = ghJson(["issue", "view", String(number), "--json", "title,comments"]) as { comments?: { body: string }[] }[];
+		rows = ghJson(repo, ["issue", "view", String(number), "--json", "title,comments"]) as { comments?: { body: string }[] }[];
 	} catch {
 		return "";
 	}
@@ -62,14 +63,14 @@ export function latestComment(number: number, maxChars = 6000): string {
 	return (comments[comments.length - 1].body ?? "").slice(0, maxChars);
 }
 
-export function issueTitle(number: number): string {
-	const rows = ghJson(["issue", "view", String(number), "--json", "title"]) as { title: string }[];
+export function issueTitle(repo: string, number: number): string {
+	const rows = ghJson(repo, ["issue", "view", String(number), "--json", "title"]) as { title: string }[];
 	return rows[0]?.title ?? "";
 }
 
-export function addLabel(number: number, label: string): void {
+export function addLabel(repo: string, number: number, label: string): void {
 	try {
-		execFileSync("gh", ["issue", "edit", String(number), "--add-label", label], {
+		execFileSync("gh", repo ? ["--repo", repo, "issue", "edit", String(number), "--add-label", label] : ["issue", "edit", String(number), "--add-label", label], {
 			env: process.env,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
@@ -88,8 +89,8 @@ export function addLabel(number: number, label: string): void {
 	}
 }
 
-export function closeIssue(number: number, comment: string): void {
-	execFileSync("gh", ["issue", "close", String(number), "--comment", comment], {
+export function closeIssue(repo: string, number: number, comment: string): void {
+	execFileSync("gh", repo ? ["--repo", repo, "issue", "close", String(number), "--comment", comment] : ["issue", "close", String(number), "--comment", comment], {
 		env: process.env,
 		stdio: ["ignore", "pipe", "pipe"],
 	});

@@ -491,5 +491,14 @@ for (const ev of ["agent_before_settle", "tool_result"]) {
 }
 ' >/dev/null 2>&1 && pass "extension registers the five devloop tools and both hooks" || fail "extension registration probe"
 
+# --- extension: a child process (MULTIPI_CHILD) registers nothing -----------
+MULTIPI_PLUGIN_DIR="$plugin" MULTIPI_CHILD=1 node --input-type=module -e '
+const pi = { registered: [], handlers: {}, registerTool(t) { this.registered.push(t.name); }, on(ev, h) { this.handlers[ev] = h; } };
+const mod = await import(process.env.MULTIPI_PLUGIN_DIR + "/extension/index.ts");
+mod.default(pi);
+if (pi.registered.length !== 0) { console.error("child registered tools:", pi.registered.join(",")); process.exit(1); }
+if (Object.keys(pi.handlers).length !== 0) { console.error("child registered hooks:", Object.keys(pi.handlers).join(",")); process.exit(1); }
+' >/dev/null 2>&1 && pass "a child process (MULTIPI_CHILD) registers no tools and no hooks" || fail "child extension guard"
+
 echo "smoke: $passed passed, $failed failed (work dir $work)"
 [ "$failed" -eq 0 ]

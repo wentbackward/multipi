@@ -32,6 +32,9 @@ if [ -n "$note" ]; then
 fi
 emit "{\"type\":\"tool_result_end\",\"message\":{\"role\":\"toolResult\",\"toolName\":\"bash\",\"content\":[{\"type\":\"text\",\"text\":\"ls\"}],\"details\":null}}"
 emit "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Ran the task. Tests pass.\\n\\nSTATUS: DONE\"}],\"model\":\"fake/model\",\"stopReason\":\"end\",\"usage\":{\"input\":10,\"output\":20,\"cacheRead\":0,\"cacheWrite\":0,\"cost\":{\"total\":0.001},\"totalTokens\":30}}}"
+if [ -n "${FAKE_PI_ECHO_ENV:-}" ]; then
+  printf "%s" "${MULTIPI_CHILD:-unset}" >"$FAKE_PI_ECHO_ENV"
+fi
 if [ -n "${FAKE_PI_ECHO_TASK:-}" ]; then
   task=${task#?}
   esc=${task//\"/\\\"}

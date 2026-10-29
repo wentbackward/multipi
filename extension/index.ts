@@ -13,6 +13,10 @@ const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issu
  * everything is resolved lazily per invocation from the context's cwd.
  */
 export default function devloopExtension(pi: ExtensionAPI): void {
+	// A one-shot role child (spawnPi sets MULTIPI_CHILD) must not load the loop: registering the
+	// tools would let a child drive the loop itself, and the stop-gate hook would keep a child
+	// that delivered its report from ever settling (it is not the orchestrator).
+	if (process.env.MULTIPI_CHILD) return;
 	for (const tool of makeTools(DEVLOOP_INSTRUCTIONS)) {
 		try {
 			pi.registerTool(tool);

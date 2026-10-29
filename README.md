@@ -42,7 +42,10 @@ spec ──► devloop.dispatch analyst ──► ticket plan (ordered, falsifia
 
 The stop-gate hook (`agent_before_settle`) makes "keep going while work is startable" a
 harness property, not a discipline: red fast check → continue (bounded), dirty tree →
-continue (bounded), startable ticket + free slot → continue (unbounded).
+continue (bounded), startable ticket + free slot → continue (unbounded). While a
+`devloop.dispatch` call is running, the child streams progress into the tool output
+(elapsed, tokens, cost, current activity — `[implementer 12:03 · tok 132k · $1.44 ·
+bash: npm test:unit]`), so a long wait is observable, not opaque.
 
 ## Tools (pi extension)
 
