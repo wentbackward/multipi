@@ -480,16 +480,17 @@ rm -rf "$EXT" node_modules "$work/bin-nonode" "$work/bin-badnode"
 
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
 MULTIPI_PLUGIN_DIR="$plugin" node --input-type=module -e '
-const pi = { registered: [], handlers: {}, registerTool(t) { this.registered.push(t.name); }, on(ev, h) { this.handlers[ev] = h; } };
+const pi = { registered: [], handlers: {}, commands: [], registerTool(t) { this.registered.push(t.name); }, registerCommand(n) { this.commands.push(n); }, on(ev, h) { this.handlers[ev] = h; } };
 const mod = await import(process.env.MULTIPI_PLUGIN_DIR + "/extension/index.ts");
 if (typeof mod.default !== "function") { console.error("extension default export is not a factory"); process.exit(1); }
 mod.default(pi);
 const want = ["devloop.dispatch", "devloop.cancel", "devloop.gate", "devloop.merge", "devloop.status"].join(",");
 if (pi.registered.join(",") !== want) { console.error("registered tools:", pi.registered.join(",")); process.exit(1); }
-for (const ev of ["agent_before_settle", "tool_result"]) {
+for (const ev of ["agent_before_settle", "tool_result", "session_start", "session_tree"]) {
   if (typeof pi.handlers[ev] !== "function") { console.error("missing hook:", ev); process.exit(1); }
 }
-' >/dev/null 2>&1 && pass "extension registers the five devloop tools and both hooks" || fail "extension registration probe"
+if (pi.commands.join(",") !== "devloop-agents") { console.error("commands:", pi.commands.join(",")); process.exit(1); }
+' >/dev/null 2>&1 && pass "extension registers the five devloop tools, hooks, and /devloop-agents" || fail "extension registration probe"
 
 # --- extension: a child process (MULTIPI_CHILD) registers nothing -----------
 MULTIPI_PLUGIN_DIR="$plugin" MULTIPI_CHILD=1 node --input-type=module -e '

@@ -47,6 +47,12 @@ continue (bounded), startable ticket + free slot → continue (unbounded). While
 (elapsed, tokens, cost, current activity — `[implementer 12:03 · tok 132k · $1.44 ·
 bash: npm test:unit]`), so a long wait is observable, not opaque.
 
+Running children are also visible at a glance in the TUI: while any child is live, a
+bar under the editor shows one line per child (`● implementer #2 · 12:03 · tok 132k ·
+$1.44 · bash: npm test:unit`), updating every second. `/devloop-agents` opens a browse
+panel — ↑/↓ selects a child (running or just finished), PgUp/PgDn scrolls its recent
+output (tool calls, turn summaries, finish line), `q` closes.
+
 ## Tools (pi extension)
 
 | Tool | What it does |

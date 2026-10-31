@@ -150,3 +150,58 @@ export function renderChildBar(list: Pick<LiveChild, "key" | "role" | "ticket" |
 	}
 	return lines;
 }
+
+// ---- /devloop-agents panel (pure renderer) --------------------------------
+
+const KIND_TAG: Record<ChildEvent["kind"], string> = { start: "[start]", tool: "[tool] ", turn: "[turn] ", end: "[end]  " };
+
+/**
+ * Render the browse panel: selectable child list + the selected child's event tail.
+ * Pure: (children, selection, scroll, width) -> lines.
+ */
+export function renderAgentsPanel(
+	kids: Pick<LiveChild, "key" | "role" | "ticket" | "branch" | "worktree" | "status" | "startedAt" | "endedAt" | "usage" | "events">[],
+	sel: number,
+	scroll: number,
+	width: number,
+	now: number,
+): string[] {
+	const lines: string[] = [];
+	const usable = Math.max(20, width);
+	const clip = (s: string) => (s.length > usable ? `${s.slice(0, usable - 1)}…` : s);
+
+	lines.push(clip(` Devloop agents — ${kids.filter((k) => k.status === "running").length} running, ${kids.filter((k) => k.status !== "running").length} recent`));
+	if (kids.length === 0) {
+		lines.push(clip("  No children dispatched yet this session."));
+		lines.push(clip("  q: close"));
+		return lines;
+	}
+	kids.forEach((k, i) => {
+		const who = k.ticket !== undefined ? `${k.role} #${k.ticket}` : k.role;
+		const el = formatElapsed((k.endedAt ?? now) - k.startedAt);
+		const tok = formatTokens(k.usage.totalTokens);
+		const cost = `$${k.usage.cost.toFixed(2)}`;
+		const mark = i === sel ? "▶" : " ";
+		const dot = k.status === "running" ? "●" : "○";
+		lines.push(clip(`${mark} ${dot} ${who}  ${k.status.toUpperCase().padEnd(11)} ${el}  tok ${tok}  ${cost}`));
+	});
+	const k = kids[Math.min(sel, kids.length - 1)];
+	lines.push("─".repeat(Math.min(usable, 72)));
+	lines.push(clip(` ${k.ticket !== undefined ? `${k.role} #${k.ticket}` : k.role} · ${k.branch ?? "(no branch)"} · ${k.worktree}`));
+	const events = k.events;
+	if (events.length === 0) {
+		lines.push(clip("  (no events recorded)"));
+	} else {
+		// scroll = events hidden below the window (0 = latest); window shows up to WIN lines.
+		const win = 10;
+		const hi = Math.max(0, events.length - 1 - scroll);
+		const lo = Math.max(0, hi - win + 1);
+		for (let i = lo; i <= hi; i++) {
+			const e = events[i]!;
+			const rel = formatElapsed(e.at - k.startedAt);
+			lines.push(clip(` ${rel.padStart(7)} ${KIND_TAG[e.kind]} ${e.text.replace(/\s+/g, " ").slice(0, usable - 16)}`));
+		}
+	}
+	lines.push(clip(" ↑/↓ select · PgUp/PgDn scroll · q close"));
+	return lines;
+}

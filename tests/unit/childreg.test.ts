@@ -10,6 +10,7 @@ import {
 	formatElapsed,
 	formatTokens,
 	renderChildBar,
+	renderAgentsPanel,
 } from "../../extension/src/childreg.ts";
 
 afterEach(() => resetChildren());
@@ -95,4 +96,33 @@ test("renderChildBar truncates to width", () => {
 	const lines = renderChildBar(running, 130_000, 25);
 	assert.equal(lines[0].length, 25);
 	assert.ok(lines[0].endsWith("…"));
+});
+
+// ---- panel renderer ---------------------------------------------------------
+
+test("panel: empty state", () => {
+	const lines = renderAgentsPanel([], 0, 0, 100, 1_000_000);
+	assert.ok(lines.some((l) => l.includes("No children dispatched")));
+});
+
+test("panel: lists children, marks selection, shows event window", () => {
+	const kids = [
+		{ ...base, key: "r1", status: "done" as const, endedAt: 2_000_000, events: Array.from({ length: 15 }, (_, i) => ({ at: 1_500_000 + i * 1000, kind: "tool" as const, text: `evt-${i}` })) },
+		{ ...base, key: "a2", role: "analyst", ticket: undefined, status: "running" as const, events: [{ at: 1_000_500, kind: "start" as const, text: "dispatched" }] },
+	];
+	const lines = renderAgentsPanel(kids, 1, 0, 100, 2_000_000);
+	assert.ok(lines.some((l) => l.startsWith("▶") && l.includes("analyst")), "selection marker on sel=1");
+	assert.ok(lines.some((l) => l.includes("implementer #2") && l.includes("DONE")));
+	assert.ok(lines.some((l) => l.includes("RUNNING")));
+});
+
+test("panel: scroll moves the event window toward older events", () => {
+	const events = Array.from({ length: 15 }, (_, i) => ({ at: 1_500_000 + i * 1000, kind: "tool" as const, text: `evt-${i}` }));
+	const kids = [{ ...base, status: "done" as const, endedAt: 2_000_000, events }];
+	const fresh = renderAgentsPanel(kids, 0, 0, 100, 2_000_000).join("\n");
+	assert.ok(fresh.includes("evt-14"), "scroll=0 shows newest");
+	assert.ok(!fresh.includes("evt-0"), "window caps at 10");
+	const back = renderAgentsPanel(kids, 0, 5, 100, 2_000_000).join("\n");
+	assert.ok(back.includes("evt-9"), "scroll=5 shifts window down");
+	assert.ok(!back.includes("evt-14"), "newest hidden when scrolling back");
 });
