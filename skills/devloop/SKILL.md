@@ -16,12 +16,15 @@ and act on them.
 1. Read `AGENTS.md`, the spec it names, `.devloop.json`, `docs/DECISIONS.md` and the repo's spec docs.
 2. `devloop.status` — in-flight children, open tickets with their `dl/` labels, capacity, last green
    gate. Then `git worktree list` and `git fetch` for anything the state file misses.
-3. Recover: a child marked `crashed`/`interrupted` with a live worktree is a RE-DISPATCH (it resumes
+3. **Handoff:** if `HANDOFF.md` exists in the loop notes dir, read it — the loop was paused by the
+   operator. Re-dispatch the listed interrupted children (same ticket -> same worktree; their
+   committed and uncommitted work is intact) and continue the pipeline from the labels.
+4. Recover: a child marked `crashed`/`interrupted` with a live worktree is a RE-DISPATCH (it resumes
    from git state). A ticket labelled `dl/in-review` with a green branch is ready for the reviewer.
    A gated-but-unmerged train may be mergeable now.
-4. If `.devloop.json` is missing or `scripts/doctor.sh` reports MISSING items, run the `devloop-setup`
+5. If `.devloop.json` is missing or `scripts/doctor.sh` reports MISSING items, run the `devloop-setup`
    skill before anything else.
-5. **Self-seeding (Phase 0):** if there are NO open tickets and the spec named by `AGENTS.md`
+6. **Self-seeding (Phase 0):** if there are NO open tickets and the spec named by `AGENTS.md`
    exists, the loop seeds itself: dispatch the analyst on the spec (§1.1), raise the tickets it
    plans, and continue. The user never has to pre-populate the board.
 
@@ -124,6 +127,11 @@ is done: mark its issues closed, summarise what shipped and where, and stop ONLY
 
 - `devloop.cancel {ticket}` kills one child (its worktree and branch are kept; a re-dispatch resumes).
   Ctrl+C kills everything — after it, recover via step 0.
+- **Pausing:** when the user asks to pause, stop, or checkpoint the loop, call `devloop.pause`:
+  it interrupts every running child (worktrees kept), writes `HANDOFF.md` (per-child positions
+  plus the board snapshot), and comments each interrupted ticket. Then settle — a fresh session
+  resumes from the handoff (step 0.3). It is also a safe checkpoint before an expected
+  interruption (lunch, overnight, laptop lid).
 - A requirement changes while a child runs: edit the ISSUE first (the child re-reads it on resume),
   then cancel, then re-dispatch. There is no live messaging into a running child.
 - **Steering = tickets.** Whenever the user reports something in chat — a bug they hit while

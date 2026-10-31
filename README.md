@@ -59,6 +59,7 @@ output (tool calls, turn summaries, finish line), `q` closes.
 |---|---|
 | `devloop.dispatch` | `{role, ticket}` (implementer) / `{role, ticket}` (reviewer) / `{role, task, worktree?}` (verifier) / `{role, spec}` or `{role, focus}` (analyst — spec decomposition or feedback-to-tickets; no ticket, no capacity slot, plan lands in the notes dir). Computes branch, worktree, ports, notes path and the full brief; enforces the concurrency cap; labels the ticket as it goes. |
 | `devloop.cancel` | Kill one child by ticket. Worktree and branch are kept; re-dispatch resumes. |
+| `devloop.pause` | Operator pause: interrupt every running child (worktrees kept), write `HANDOFF.md` (per-child positions + board snapshot) to the notes dir, and comment each interrupted ticket. A fresh session resumes from the handoff (skill step 0.3). |
 | `devloop.gate` | `{branches}` — stack on latest base in the gate worktree, run every configured check once. green / red / conflict(branch) / error. |
 | `devloop.merge` | `{branches}` — replay, verify tree == gated tree, squash each PR in order, delete branches. Refusals are informative, never silent. |
 | `devloop.status` | In-flight children, open tickets with `dl/` labels, capacity, last green gate. |

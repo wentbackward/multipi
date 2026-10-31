@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type, type TSchema } from "typebox";
@@ -19,7 +19,7 @@ import {
 import * as childreg from "./childreg.ts";
 import { spawnPi, type ChildResult } from "./child.ts";
 import { discoverRoles, findRole } from "./roles.ts";
-import { listOpenIssues, listClosedIssueNumbers, addLabel, latestComment } from "./issues.ts";
+import { listOpenIssues, listClosedIssueNumbers, addLabel, latestComment, addComment } from "./issues.ts";
 import {
 	evaluateStopGate,
 	runFastCheck,
@@ -488,6 +488,165 @@ export function cancelImpl(ctx: ToolContext, key: string): AgentToolResult<undef
 }
 
 // ---------------------------------------------------------------------------
+// Pause / handoff (operator-initiated stop for loops that run for days)
+// ---------------------------------------------------------------------------
+
+export interface HandoffChild {
+	key: string;
+	role: string;
+	ticket?: number;
+	branch?: string;
+	worktree: string;
+	startedAt: number;
+	note: string;
+	head?: string;
+	/** dirty files in the worktree at pause time (undefined = not determined) */
+	dirty?: number;
+}
+
+export interface HandoffBoardRow {
+	number: number;
+	title: string;
+	labels: string;
+}
+
+/** Pure: build the HANDOFF.md document. */
+export function buildHandoff(opts: { pausedAt: number; children: HandoffChild[]; board: HandoffBoardRow[] }): string {
+	const lines: string[] = [];
+	lines.push("# Devloop handoff — loop paused by operator");
+	lines.push("");
+	lines.push(`Paused: ${new Date(opts.pausedAt).toISOString()}`);
+	lines.push("");
+	if (opts.children.length === 0) {
+		lines.push("No children were running at pause time (idle checkpoint).");
+	} else {
+		lines.push("The children below were interrupted at the operator's request. Worktrees and");
+		lines.push("branches are intact; committed work sits on the branch.");
+		lines.push("");
+		lines.push("| ticket | role | branch | elapsed | note | HEAD | dirty |")
+		lines.push("|---|---|---|---|---|---|---|");
+		for (const c of opts.children) {
+			lines.push(`| ${c.ticket ?? "—"} | ${c.role} | ${c.branch ?? "—"} | ${childreg.formatElapsed(opts.pausedAt - c.startedAt)} | ${c.note} | ${c.head ?? "—"} | ${c.dirty === undefined ? "—" : String(c.dirty)} |`);
+		}
+	}
+	lines.push("");
+	lines.push("## Board at pause time");
+	lines.push("");
+	if (opts.board.length === 0) lines.push("(no open issues)");
+	else {
+		lines.push("| # | title | labels |");
+		lines.push("|---|---|---|");
+		for (const b of opts.board) lines.push(`| ${b.number} | ${b.title} | ${b.labels || "—"} |`);
+	}
+	lines.push("");
+	lines.push("## Resume");
+	lines.push("");
+	lines.push("1. Start a fresh pi session in this repo and say \"keep going\".");
+	lines.push("2. Step 0 re-dispatches the interrupted children (same ticket -> same worktree) and the");
+	lines.push("   pipeline continues from the labels (review -> gate -> merge).");
+	lines.push("3. Do not re-plan work that is already committed; each new child inspects its worktree first.");
+	lines.push("");
+	lines.push("This file is overwritten on the next pause.");
+	return lines.join("\n") + "\n";
+}
+
+function gitHeadAndDirty(worktree: string): { head?: string; dirty?: number } {
+	try {
+		const head = execFileSync("git", ["-C", worktree, "rev-parse", "--short", "HEAD"], { stdio: "pipe" }).toString().trim();
+		const porcelain = execFileSync("git", ["-C", worktree, "status", "--porcelain"], { stdio: "pipe" }).toString();
+		const dirty = porcelain.split("\n").filter((l) => l.trim().length > 0).length;
+		return { head, dirty };
+	} catch {
+		return {};
+	}
+}
+
+const PAUSE_EXIT_GRACE_MS = 15_000;
+
+export async function pauseImpl(ctx: ToolContext): Promise<AgentToolResult<undefined>> {
+	const state = pruneDead(readState(ctx.stateDir));
+	const runningKeys = Object.keys(state).filter((k) => state[k]?.status === "running");
+	const now = Date.now();
+
+	// 1) Terminate every running child (worktrees are kept).
+	for (const key of runningKeys) {
+		const controller = controllers.get(key);
+		if (controller) controller.abort();
+		else {
+			try {
+				process.kill(state[key]!.pid, "SIGTERM");
+			} catch {
+				/* already gone */
+			}
+		}
+	}
+	for (const key of runningKeys) {
+		updateState(ctx.stateDir, (s) => {
+			const e = s[key];
+			if (e && e.status === "running") e.status = "interrupted";
+		});
+	}
+
+	// 2) Bounded wait for the processes to actually die.
+	const deadline = Date.now() + PAUSE_EXIT_GRACE_MS;
+	while (childreg.runningChildren().length > 0 && Date.now() < deadline) {
+		await new Promise((r) => setTimeout(r, 500));
+	}
+	const laggards = childreg.runningChildren().map((c) => c.key);
+
+	// 3) Per-child forensics (re-read: statuses are now 'interrupted') + board snapshot.
+	const after = pruneDead(readState(ctx.stateDir));
+	const interruptedKeys = Object.keys(after).filter((k) => after[k]?.status === "interrupted");
+	const children: HandoffChild[] = interruptedKeys.map((key) => {
+		const e = after[key]!;
+		return {
+			key,
+			role: e.role,
+			ticket: /^\d+$/.test(key) ? Number(key) : undefined,
+			branch: e.branch,
+			worktree: e.worktree,
+			startedAt: e.startedAt,
+			note: laggards.includes(key) ? "PAUSE DID NOT KILL IT" : runningKeys.includes(key) ? "paused now" : "earlier interruption",
+			...gitHeadAndDirty(e.worktree),
+		};
+	});
+	let board: HandoffBoardRow[] = [];
+	let boardError: string | undefined;
+	try {
+		board = listOpenIssues(ctx.repoSlug).map((i) => ({ number: i.number, title: i.title, labels: i.labels.join(", ") }));
+	} catch (e) {
+		boardError = (e as Error).message;
+	}
+
+	// 4) Write HANDOFF.md (the durable record; the comments are the ping).
+	mkdirSync(ctx.paths.notesDir, { recursive: true });
+	const handoffPath = path.join(ctx.paths.notesDir, "HANDOFF.md");
+	writeFileSync(handoffPath, buildHandoff({ pausedAt: now, children, board }));
+
+	// 5) One-line comment on each ticket interrupted by this pause.
+	const commented: number[] = [];
+	for (const key of runningKeys) {
+		if (!/^\d+$/.test(key)) continue;
+		const n = Number(key);
+		try {
+			addComment(ctx.repoSlug, n, `⏸ Paused by operator at ${new Date(now).toISOString()} — the child was interrupted; its worktree and branch are kept. It will be re-dispatched on resume (see HANDOFF.md in the loop notes).`);
+			commented.push(n);
+		} catch {
+			/* non-fatal: the handoff file is the record */
+		}
+	}
+
+	const parts: string[] = [];
+	parts.push(runningKeys.length > 0 ? `Paused: interrupted ${runningKeys.length} child(ren): ${runningKeys.join(", ")}` : "Paused: no children were running (idle checkpoint)");
+	if (laggards.length > 0) parts.push(`WARNING: ${laggards.join(", ")} did not die within ${PAUSE_EXIT_GRACE_MS / 1000}s — kill by pid or re-run devloop.cancel`);
+	if (boardError) parts.push(`board snapshot unavailable: ${boardError}`);
+	parts.push(`handoff: ${handoffPath}`);
+	if (commented.length > 0) parts.push(`commented tickets: ${commented.join(", ")}`);
+	parts.push('Resume: fresh pi session in this repo + "keep going" (step 0 reads the handoff).');
+	return { ...text(parts.join("; ")) };
+}
+
+// ---------------------------------------------------------------------------
 // Stop gate (called from the agent_before_settle hook; also unit/smoke tested)
 // ---------------------------------------------------------------------------
 export async function evaluateSettle(cwd: string): Promise<{ entries: { type: "custom_message"; customType: string; content: string; display: boolean }[]; continue: boolean } | undefined> {
@@ -657,7 +816,16 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 		}),
 	});
 
-	return [dispatch, cancel, gate, merge, status];
+	const pause = defineTool({
+		name: "devloop.pause",
+		label: "Pause dev-loop",
+			description:
+			"Operator pause: terminate every running child (worktrees kept), write HANDOFF.md (per-child positions + board snapshot) in the notes dir, and comment on the interrupted tickets. On resume (fresh session + 'keep going'), step 0 reads the handoff and re-dispatches the interrupted children.",
+		parameters: Type.Object({}),
+		execute: (_id, _params, _s, _u, toolCtx) => runGuarded(toolCtx, (c) => pauseImpl(c)),
+	});
+
+	return [dispatch, cancel, pause, gate, merge, status];
 }
 
 // Re-export for index.ts and tests.

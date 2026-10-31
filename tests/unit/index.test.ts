@@ -21,13 +21,14 @@ function fakePi() {
 	return { pi: pi as unknown as Parameters<typeof devloopExtension>[0], tools, hooks, commands };
 }
 
-test("extension registers 5 tools, 4 hooks and the /devloop-agents command for an orchestrator session", () => {
+test("extension registers 6 tools, 4 hooks and the /devloop-agents command for an orchestrator session", () => {
 	const saved = process.env.MULTIPI_CHILD;
 	delete process.env.MULTIPI_CHILD; // hermetic: a loop child's env carries MULTIPI_CHILD=1
 	try {
 		const { pi, tools, hooks, commands } = fakePi();
 		devloopExtension(pi);
-		assert.equal(tools.length, 5);
+		assert.equal(tools.length, 6);
+		assert.ok(tools.includes("devloop.pause"));
 		assert.ok(tools.includes("devloop.dispatch"));
 		assert.deepEqual(hooks.sort(), ["agent_before_settle", "session_start", "session_tree", "tool_result"]);
 		assert.deepEqual(commands, ["devloop-agents"]);
