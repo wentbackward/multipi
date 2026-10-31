@@ -21,12 +21,33 @@ and act on them.
    A gated-but-unmerged train may be mergeable now.
 4. If `.devloop.json` is missing or `scripts/doctor.sh` reports MISSING items, run the `devloop-setup`
    skill before anything else.
+5. **Self-seeding (Phase 0):** if there are NO open tickets and the spec named by `AGENTS.md`
+   exists, the loop seeds itself: dispatch the analyst on the spec (§1.1), raise the tickets it
+   plans, and continue. The user never has to pre-populate the board.
 
 ## 1. Tickets
 
 - One GitHub issue per work item: acceptance criteria as a checklist, `Depends on #n` lines in the
-  body for dependencies, sensible labels. Create them from the spec's work breakdown when the board is
-  empty for a section.
+  body for dependencies, sensible labels. You create issues mechanically (`gh issue create`); the
+  CONTENT comes from the analyst (§1.1) or from the user's steer (§8). You do not invent scope
+  yourself.
+
+### 1.1 Self-seeding: spec → analyst → tickets
+
+`devloop.dispatch {role: "analyst", spec: <spec path>}` — the analyst reads the spec and the
+existing code, and returns an ordered ticket plan (also written to the plan file named in its
+report). Then, for each planned ticket IN PLAN ORDER:
+
+1. `gh issue create` with the planned title and a body carrying the plan's `Why`, the acceptance
+   criteria as `- [ ]` checkboxes, `Depends on #<numbers>` (resolve titles to the numbers as you
+   create, in order) and a `Size: S|M` line. Keep the body verbatim from the plan — no rewriting.
+2. Collect the new numbers; `gh issue list` to confirm the board matches the plan.
+3. Comment the plan's **Out of scope** list on the FIRST ticket (scope transparency for humans).
+
+Then dispatch implementers per the normal rules. If the analyst came back `STATUS: BLOCKED`
+(spec unreadable/contradictory), label the situation, tell the user, and stop for a decision.
+
+### 1.2 Ticket lifecycle
 - The label line IS the loop state — keep it truthful:
   - `dl/in-progress` — a child is working (set automatically on dispatch)
   - `dl/in-review` — branch pushed, PR open, reviewer may run (set automatically on green report)
@@ -99,18 +120,31 @@ lives>, task: <precise, checkable expectations with the commands to run>}`. The 
 become new tickets (broken expectation = P1 ticket before the loop continues). When the spec section
 is done: mark its issues closed, summarise what shipped and where, and stop ONLY then.
 
-## 8. Interruptions and the user
+## 8. Interruptions, steering and the user
 
 - `devloop.cancel {ticket}` kills one child (its worktree and branch are kept; a re-dispatch resumes).
   Ctrl+C kills everything — after it, recover via step 0.
 - A requirement changes while a child runs: edit the ISSUE first (the child re-reads it on resume),
-  then cancel, then re-dispatch. There is no live steering in v1.
+  then cancel, then re-dispatch. There is no live messaging into a running child.
+- **Steering = tickets.** Whenever the user reports something in chat — a bug they hit while
+  testing, a test result, a "I wish it would…" — turn it into a ticket the same turn:
+  - Single obvious item: create the issue directly, with a `## Reported` section quoting the user's
+    words verbatim plus your context (what they were testing, what they saw).
+  - Multi-item or ambiguous: `devloop.dispatch {role: "analyst", focus: <user's words + context>}`
+    and raise the tickets from the plan (§1.1 mechanics).
+  - Triage on creation: reproducible defect → dispatch an implementer immediately (or queue it per
+    §2); preference/enhancement → queue it; anything needing the user's judgement →
+    `dl/blocked` with the question in the body.
+  - Acknowledge the user in ONE line (ticket number + what happens next) and keep working — the
+    ticket, not the chat, is the record.
 - The user's direct instructions always outrank this skill. When the user asks for a report, give it
   and CONTINUE afterwards unless told to stop.
 
 ## 9. What you never do
 
 - Never dispatch two children for one ticket; never dispatch a ticket that is `dl/in-progress`.
+- Never raise a ticket whose acceptance criteria you cannot falsify; if a request is too vague to
+  falsify, ask ONE question before creating it (or send it to the analyst with the vagueness noted).
 - Never merge a branch that was not in a green gate; never gate a branch that has no APPROVE.
 - Never weaken a check, a test or a gate to make the loop "go green". A red gate is a finding, not an
   inconvenience.

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { Type, type TSchema } from "typebox";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult, AgentToolUpdateCallback, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { loadConfig, resolvePaths, resolveState, type DevloopConfig, type Paths } from "./config.ts";
+import { loadConfig, resolvePaths, resolveState, repoSlugFromRemote, type DevloopConfig, type Paths } from "./config.ts";
 import { readState, updateState, pruneDead, runningCount, type DispatchEntry, type DispatchState } from "./state.ts";
 import {
 	branchSlug,
@@ -14,7 +14,9 @@ import {
 	assembleImplementerBrief,
 	assembleReviewerBrief,
 	assembleVerifierBrief,
+	assembleAnalystBrief,
 } from "./brief.ts";
+import * as childreg from "./childreg.ts";
 import { spawnPi, type ChildResult } from "./child.ts";
 import { discoverRoles, findRole } from "./roles.ts";
 import { listOpenIssues, listClosedIssueNumbers, addLabel, latestComment } from "./issues.ts";
@@ -44,6 +46,8 @@ export interface ToolContext {
 	scriptsDir: string;
 	bundledAgentsDir: string;
 	projectAgentsDir: string;
+	/** `owner/name` of the configured remote — every gh call pins it (gh defaults to the PARENT tracker inside a fork). */
+	repoSlug: string;
 }
 
 export function buildContext(cwd: string): ToolContext {
@@ -60,6 +64,7 @@ export function buildContext(cwd: string): ToolContext {
 		scriptsDir,
 		bundledAgentsDir: process.env.MULTIPI_AGENTS_DIR ?? PACKAGED_AGENTS,
 		projectAgentsDir: path.join(cfg.root, ".pi", "agents"),
+		repoSlug: repoSlugFromRemote(cfg.root, cfg.remote),
 	};
 }
 
@@ -114,6 +119,8 @@ interface DispatchParams {
 	branch?: string;
 	worktree?: string;
 	task?: string;
+	spec?: string;
+	focus?: string;
 }
 
 async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback<unknown> | undefined): Promise<AgentToolResult<DispatchDetails | undefined>> {
@@ -141,10 +148,40 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			worktree,
 			signal,
 			onUpdate,
+			ticket: params.ticket,
 		});
 		const res = await ac.promise;
 		finishEntry(ctx, key, entry, res, signal);
 		return reportResult(role.name, params.ticket, entry, res);
+	}
+
+	// ---- analyst: spec/feedback -> ticket plan (no ticket, no capacity slot) --
+	if (params.role === "analyst") {
+		if (!params.spec && !params.focus) return { ...text("analyst requires `spec` (a spec path) or `focus` (operator feedback)"), isError: true };
+		const state = pruneDead(readState(ctx.stateDir));
+		const slug = branchSlug(params.spec ? path.basename(params.spec) : "operator-feedback") || "analysis";
+		const key = `analyst-${slug}`;
+		if (state[key]?.status === "running") {
+			return { ...text(`an analyst for '${slug}' is already running. In-flight: ${inFlightList(state)}`), isError: true };
+		}
+		const planPath = path.join(ctx.paths.notesDir, `tickets-${slug}.md`);
+		const analystEntry: DispatchEntry = {
+			pid: 0,
+			role: role.name,
+			worktree: ctx.cfg.root,
+			startedAt: Date.now(),
+			status: "running",
+		};
+		persistEntry(ctx, key, analystEntry);
+		const ac = spawnAndTrack(ctx, key, role, {
+			task: assembleAnalystBrief({ spec: params.spec, focus: params.focus, repoRoot: ctx.cfg.root, planPath, repoSlug: ctx.repoSlug }),
+			worktree: ctx.cfg.root,
+			signal,
+			onUpdate,
+		});
+		const res = await ac.promise;
+		finishEntry(ctx, key, analystEntry, res, signal);
+		return reportResult(role.name, undefined, analystEntry, res, `\nplan file: ${planPath}`);
 	}
 
 	// ---- code-reviewer: reviews an existing pushed branch -------------------
@@ -178,6 +215,8 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			worktree,
 			signal,
 			onUpdate,
+			ticket,
+			branch,
 		});
 		const res = await ac.promise;
 		finishEntry(ctx, key, reviewEntry, res, signal);
@@ -204,19 +243,19 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 		return { ...text(`capacity full: ${runningImplementers.length}/${cap} implementers in flight: ${inFlightList(state)}. Wait for a report (or cancel a ticket) and dispatch again.`), isError: true };
 	}
 
-	const issues = listOpenIssues();
+	const issues = listOpenIssues(ctx.repoSlug);
 	let issue = issues.find((i) => i.number === ticket);
 	if (!issue) {
 		// GitHub's list endpoint briefly lags a just-created issue; one bounded retry, then refuse.
 		await new Promise((r) => setTimeout(r, 1500));
-		issue = listOpenIssues().find((i) => i.number === ticket);
+		issue = listOpenIssues(ctx.repoSlug).find((i) => i.number === ticket);
 	}
 	if (!issue) return { ...text(`ticket #${ticket} not found among open issues (already merged/closed?)`), isError: true };
 	const slug = branchSlug(issue.title);
 	const branch = prev?.branch ?? (slug ? `feat/${ticket}-${slug}` : `feat/${ticket}`);
 	const worktree = prev?.worktree ?? worktreePath(ctx.cfg.root, ticket);
 	ensureWorktree(ctx, branch, worktree, !prev);
-	addLabel(ticket, "dl/in-progress");
+	addLabel(ctx.repoSlug, ticket, "dl/in-progress");
 
 	const key = String(ticket);
 	const entry: DispatchEntry = {
@@ -228,7 +267,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 		status: "running",
 	};
 	const idx = runningImplementers.length; // this child's port slice position
-	const reviewNote = latestComment(ticket);
+	const reviewNote = latestComment(ctx.repoSlug, ticket);
 	const brief = assembleImplementerBrief({
 		ticket,
 		title: issue.title,
@@ -262,14 +301,14 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			})
 				.toString()
 				.trim();
-			addLabel(ticket, "dl/in-review");
+			addLabel(ctx.repoSlug, ticket, "dl/in-review");
 			extra = `\nPR: ${out}`;
 		} catch (e) {
 			extra = `\nWARNING: could not open the PR: ${(e as Error).message.split("\n")[0]}`;
 		}
 	} else if (verdict === "blocked") {
 		try {
-			addLabel(ticket, "dl/blocked");
+			addLabel(ctx.repoSlug, ticket, "dl/blocked");
 		} catch {
 			/* labelling is best-effort; the report carries the reason */
 		}
@@ -286,7 +325,7 @@ function spawnAndTrack(
 	ctx: ToolContext,
 	key: string,
 	role: { name: string; filePath: string; tools?: string[]; model?: string },
-	opts: { task: string; worktree: string; signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback<unknown> },
+	opts: { task: string; worktree: string; signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback<unknown>; ticket?: number; branch?: string },
 ): { promise: Promise<ChildResult>; controller: AbortController } {
 	const controller = new AbortController();
 	if (opts.signal) {
@@ -294,6 +333,21 @@ function spawnAndTrack(
 		else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
 	}
 	controllers.set(key, controller);
+	childreg.addChild({
+		key,
+		role: role.name,
+		ticket: opts.ticket,
+		branch: opts.branch,
+		worktree: opts.worktree,
+		startedAt: Date.now(),
+		status: "running",
+		turns: 0,
+		usage: { input: 0, output: 0, cost: 0, totalTokens: 0 },
+		activity: "starting",
+		events: [{ at: Date.now(), kind: "start", text: "dispatched" }],
+	});
+	let lastTurnText = "";
+	let lastActivity = "";
 	const promise = spawnPi({
 		task: opts.task,
 		appendSystemPrompt: role.filePath,
@@ -307,9 +361,34 @@ function spawnAndTrack(
 				if (st[key]?.status === "running") st[key].pid = pid;
 			});
 		},
-		onUpdate: (p) => opts.onUpdate?.({ content: [{ type: "text", text: p.finalText }], details: p }),
+		onUpdate: (p) => {
+			const st = p.status;
+			const line = st ? `\n[${role.name} ${statusStamp(st.elapsedMs)} · tok ${compactTokens(st.usage.totalTokens)} · $${st.usage.cost.toFixed(2)} · ${st.activity}]` : "";
+			opts.onUpdate?.({ content: [{ type: "text", text: `${p.finalText}${line}` }], details: { ...p, status: st } });
+			// Live registry (widget bar + /devloop-agents): progress + a bounded event ring.
+			if (st) {
+				const events: childreg.ChildEvent[] = [];
+				if (p.finalText !== lastTurnText && p.finalText) {
+					events.push({ at: Date.now(), kind: "turn", text: p.finalText.slice(-300) });
+					lastTurnText = p.finalText;
+				}
+				if (st.activity !== lastActivity) {
+					events.push({ at: Date.now(), kind: "tool", text: st.activity });
+					lastActivity = st.activity;
+				}
+				childreg.updateChild(key, {
+					turns: st.turns,
+					usage: { input: st.usage.input, output: st.usage.output, cost: st.usage.cost, totalTokens: st.usage.totalTokens },
+					activity: st.activity,
+				}, events.length ? events[0] : undefined);
+				for (const e of events.slice(1)) childreg.updateChild(key, {}, e);
+			}
+		},
 	}).then((res) => {
 		controllers.delete(key);
+		const now = Date.now();
+		const status = res.aborted ? "interrupted" : /STATUS:\s*BLOCKED/.test(res.finalText) ? "blocked" : /STATUS:\s*DONE/.test(res.finalText) ? "done" : "crashed";
+		childreg.updateChild(key, { status, endedAt: now }, { at: now, kind: "end", text: `finished (${status}, $${res.usage.cost.toFixed(2)})` });
 		return res;
 	});
 	return { promise, controller };
@@ -335,6 +414,19 @@ export function finishEntry(ctx: ToolContext, key: string, entry: DispatchEntry,
 		// Keep the live pid recorded at spawn time (the entry object still carries the 0 placeholder).
 		state[key] = { ...entry, pid: state[key]?.pid ?? entry.pid };
 	});
+}
+
+/** mm:ss (or h:mm:ss) for a child's elapsed time. */
+function statusStamp(ms: number): string {
+	const s = Math.floor(ms / 1000);
+	const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+	const mmss = `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+	return h ? `${h}:${mmss}` : mmss;
+}
+
+/** 123456 -> "123k" for the status line. */
+function compactTokens(n: number): string {
+	return n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n);
 }
 
 function usageLine(res: { usage: { input: number; output: number; cost: number; totalTokens: number } }): string {
@@ -402,7 +494,7 @@ export async function evaluateSettle(cwd: string): Promise<{ entries: { type: "c
 	try {
 		const ctx = buildContext(cwd);
 		const cfg = ctx.cfg;
-		const [fc, issues, closed] = await Promise.all([runFastCheck(cfg.fastCheck ?? null, ctx.cfg.root), listOpenIssues(), listClosedIssueNumbers()]);
+		const [fc, issues, closed] = await Promise.all([runFastCheck(cfg.fastCheck ?? null, ctx.cfg.root), listOpenIssues(ctx.repoSlug), listClosedIssueNumbers(ctx.repoSlug)]);
 		const state = pruneDead(readState(ctx.stateDir));
 		const running = Object.values(state).filter((e) => e.status === "running" && e.role === "implementer").length;
 		const decision = evaluateStopGate({
@@ -459,11 +551,13 @@ export async function formatEditedFile(cwd: string, filePath: string): Promise<v
 // Tool registrations
 // ---------------------------------------------------------------------------
 const DispatchSchema = Type.Object({
-	role: Type.String({ description: "implementer | code-reviewer | verifier" }),
+	role: Type.String({ description: "implementer | code-reviewer | verifier | analyst" }),
 	ticket: Type.Optional(Type.Number({ description: "Issue number (required for implementer and code-reviewer)" })),
 	branch: Type.Optional(Type.String({ description: "Branch override (code-reviewer)" })),
 	worktree: Type.Optional(Type.String({ description: "Worktree for verifier (defaults to the repo root)" })),
 	task: Type.Optional(Type.String({ description: "Free-form assignment (verifier)" })),
+	spec: Type.Optional(Type.String({ description: "Spec path to decompose into a ticket plan (analyst)" })),
+	focus: Type.Optional(Type.String({ description: "Operator feedback to turn into 1-3 tickets (analyst, steering mode)" })),
 });
 
 type Params<S extends TSchema> = import("typebox").Static<S>;
@@ -542,7 +636,7 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 			const kids = Object.entries(state)
 				.map(([k, e]) => `| #${k} | ${e.role} | ${e.branch ?? "-"} | ${e.status} | ${new Date(e.startedAt).toISOString().slice(0, 16).replace("T", " ")} |`)
 				.join("\n");
-			const issues = listOpenIssues()
+			const issues = listOpenIssues(ctx.repoSlug)
 				.map((i) => {
 					const labels = i.labels.filter((l) => l.startsWith("dl/")).join(", ") || "-";
 					const deps = [...i.body.matchAll(/Depends on #(\d+)/g)].map((m) => `#${m[1]}`).join(" ");

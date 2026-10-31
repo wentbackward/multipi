@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -138,4 +139,17 @@ export function resolvePaths(cfg: DevloopConfig, env: NodeJS.ProcessEnv = proces
 		logsDir: path.resolve(resolveOpt(cfg.logsDir) || path.join(state, "logs")),
 		gateDir: path.resolve(resolveOpt(cfg.gateWorktree) || path.join(path.dirname(cfg.root), `${path.basename(cfg.root)}-gate`)),
 	};
+}
+
+/** `owner/name` of the configured remote (https or ssh URL form), or "" when undecipherable.
+ * gh defaults to the PARENT tracker inside a fork, so every gh call pins this slug. */
+export function repoSlugFromRemote(root: string, remote: string): string {
+	try {
+		const url = spawnSync("git", ["remote", "get-url", remote], { cwd: root, stdio: ["ignore", "pipe", "pipe"] })
+			.stdout.toString().trim();
+		const m = url.match(/[:/]([^/:]+)\/([^/]+?)(?:\.git)?$/);
+		return m ? `${m[1]}/${m[2]}` : "";
+	} catch {
+		return "";
+	}
 }

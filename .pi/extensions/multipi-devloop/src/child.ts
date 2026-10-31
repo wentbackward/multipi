@@ -24,6 +24,14 @@ export interface ChildResult {
 	toolCalls: string[];
 }
 
+export interface ChildStatus {
+	elapsedMs: number;
+	turns: number;
+	usage: ChildUsage;
+	/** Most recent tool activity: "bash: npm run test:unit", "edit: src/x.ts", "…". */
+	activity: string;
+}
+
 export interface SpawnOpts {
 	task: string;
 	/** Path of the role prompt file, passed via --append-system-prompt. */
@@ -36,8 +44,13 @@ export interface SpawnOpts {
 	signal?: AbortSignal;
 	/** Called once the process has started, with its (possibly undefined) pid. */
 	onSpawn?: (pid: number | undefined) => void;
-	onUpdate?: (partial: { finalText: string; toolCalls: string[] }) => void;
+	onUpdate?: (partial: { finalText: string; toolCalls: string[]; status: ChildStatus }) => void;
 }
+
+/** Minimum wall time between status emissions while the child is quiet (heartbeats). */
+const STATUS_HEARTBEAT_MS = 30_000;
+/** Status emissions are rate-limited: at most one per tick while events are flowing. */
+const STATUS_TICK_MS = 20_000;
 
 /**
  * Resolve the pi binary. Precedence:
@@ -84,7 +97,7 @@ export function spawnPi(opts: SpawnOpts): Promise<ChildResult> {
 				cwd: opts.cwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
-				env: { ...process.env, ...opts.env },
+				env: { ...process.env, ...opts.env, MULTIPI_CHILD: "1" },
 			});
 		} catch (e) {
 			res.exitCode = 1;
@@ -93,6 +106,23 @@ export function spawnPi(opts: SpawnOpts): Promise<ChildResult> {
 			return;
 		}
 		let buf = "";
+		const startedAt = Date.now();
+		let turns = 0;
+		let activity = "starting";
+		let lastStatusTick = 0;
+		let lastEmittedActivity = "";
+		const usageNow = (): ChildUsage => ({ ...res.usage });
+		const emitStatus = (force = false) => {
+			const now = Date.now();
+			if (!force && now - lastStatusTick < STATUS_TICK_MS && activity === lastEmittedActivity) return;
+			lastStatusTick = now;
+			lastEmittedActivity = activity;
+			opts.onUpdate?.({ finalText: res.finalText, toolCalls: res.toolCalls, status: { elapsedMs: now - startedAt, turns, usage: usageNow(), activity } });
+		};
+		const heartbeat = setInterval(() => {
+			emitStatus(true);
+		}, STATUS_HEARTBEAT_MS);
+		heartbeat.unref?.();
 		const handleLine = (line: string) => {
 			if (!line.trim()) return;
 			let ev: {
@@ -100,7 +130,7 @@ export function spawnPi(opts: SpawnOpts): Promise<ChildResult> {
 				message?: {
 					role?: string;
 					toolName?: string;
-					content?: { type: string; text?: string; name?: string }[];
+					content?: { type: string; text?: string; name?: string; arguments?: { command?: string; path?: string; file_path?: string; [k: string]: unknown } }[];
 					model?: string;
 					stopReason?: string;
 					errorMessage?: string;
@@ -117,8 +147,14 @@ export function spawnPi(opts: SpawnOpts): Promise<ChildResult> {
 			if (ev.type === "message_end" && msg.role === "assistant") {
 				for (const part of msg.content ?? []) {
 					if (part.type === "text" && typeof part.text === "string") res.finalText = part.text;
-					if (part.type === "toolCall" && part.name) res.toolCalls.push(part.name);
+					if (part.type === "toolCall" && part.name) {
+						res.toolCalls.push(part.name);
+						const a = part.arguments;
+						const hint = (a?.command ?? a?.path ?? a?.file_path ?? "") as string;
+						activity = hint ? `${part.name}: ${hint.slice(0, 72)}` : part.name;
+					}
 				}
+				turns++;
 				const u = msg.usage;
 				if (u) {
 					res.usage.input += u.input ?? 0;
@@ -131,10 +167,14 @@ export function spawnPi(opts: SpawnOpts): Promise<ChildResult> {
 				if (msg.model) res.model = msg.model;
 				if (msg.stopReason) res.stopReason = msg.stopReason;
 				if (msg.errorMessage) res.errorMessage = msg.errorMessage;
-				opts.onUpdate?.({ finalText: res.finalText, toolCalls: res.toolCalls });
+				emitStatus(true); // a completed turn is meaningful progress — always visible
 			} else if (ev.type === "tool_result_end") {
-				if (typeof msg.toolName === "string") res.toolCalls.push(msg.toolName);
-				opts.onUpdate?.({ finalText: res.finalText, toolCalls: res.toolCalls });
+				if (typeof msg.toolName === "string") {
+					res.toolCalls.push(msg.toolName);
+					// Keep the richer toolCall hint when one was seen; name the tool otherwise.
+					if (activity === "starting") activity = msg.toolName;
+				}
+				emitStatus();
 			}
 		};
 		proc.stdout.on("data", (d: Buffer) => {
@@ -166,10 +206,12 @@ export function spawnPi(opts: SpawnOpts): Promise<ChildResult> {
 			else opts.signal.addEventListener("abort", onAbort, { once: true });
 		}
 		proc.on("close", (code) => {
+			clearInterval(heartbeat);
 			if (buf.trim()) handleLine(buf);
 			resolve({ ...res, exitCode: spawnFailed ? 1 : code ?? (res.aborted ? 130 : 0) });
 		});
 		proc.on("error", (e) => {
+			clearInterval(heartbeat);
 			res.stderr += String(e);
 			spawnFailed = true;
 			res.exitCode = 1;
