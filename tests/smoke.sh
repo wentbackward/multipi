@@ -479,7 +479,7 @@ echo "$out" | grep -q '^MISSING extension runtime probe (import check did not ru
 rm -rf "$EXT" node_modules "$work/bin-nonode" "$work/bin-badnode"
 
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
-MULTIPI_PLUGIN_DIR="$plugin" node --input-type=module -e '
+MULTIPI_PLUGIN_DIR="$plugin" env -u MULTIPI_CHILD node --input-type=module -e '
 const pi = { registered: [], handlers: {}, commands: [], registerTool(t) { this.registered.push(t.name); }, registerCommand(n) { this.commands.push(n); }, on(ev, h) { this.handlers[ev] = h; } };
 const mod = await import(process.env.MULTIPI_PLUGIN_DIR + "/extension/index.ts");
 if (typeof mod.default !== "function") { console.error("extension default export is not a factory"); process.exit(1); }
