@@ -325,3 +325,55 @@ direct `gh issue create` (single obvious item, body carries a `## Reported` sect
 user verbatim) or analyst `focus` mode (multi-item/ambiguous), then triage: reproducible defect
 ⇒ dispatch now; enhancement ⇒ queue; judgement needed ⇒ `dl/blocked`. No live messaging into
 running children (unchanged).
+
+## Addendum 2026-11-01 — pause, visibility, child isolation, watchdog
+
+Observed in live operation and added without changing any pinned contract above (label
+vocabulary, exit codes, state-file shape, gate/merge semantics all unchanged).
+
+**`devloop.pause` — operator checkpoint.** Interrupts every running child (SIGTERM to the
+whole process tree; worktrees and branches kept), writes `HANDOFF.md` to the notes dir
+(per-child positions — ticket, branch, elapsed, worktree HEAD, dirty-file count — plus the
+open-board snapshot at that instant), and comments each interrupted ticket with a one-line
+operator note. Bounded 15 s kill-wait; children that do not die are reported as laggards.
+Resume is a fresh session: skill step 0.3 reads the handoff and re-dispatches the listed
+children (same ticket → same worktree). `buildHandoff` is pure and unit-tested.
+
+**Agent visibility (TUI).** While any child runs, a below-editor widget shows one line per
+child (`● implementer #2 · 12:03 · tok 132k · $1.44 · bash: npm test:unit`), refreshed every
+second; `/devloop-agents` opens a browse panel (↑/↓ select, PgUp/PgDn scroll the selected
+child's event ring, `q` close). Data comes from an IN-PROCESS registry (`childreg.ts`) fed by
+`spawnAndTrack` — children run in the orchestrator's process, so their live progress is
+directly observable; the registry is bounded (40-event ring per child, 8 finished entries)
+because it is UI data, not truth. Renderers are pure and unit-tested.
+
+**Child status streaming.** `spawnPi` accumulates turns/tokens/cost/current-activity from the
+child's NDJSON stream and emits tool updates on every completed turn plus a 30 s heartbeat
+(rate-limited to one per 20 s while events flow), rendered as
+`[role mm:ss · tok N · $C · activity]` in the dispatch tool output.
+
+**Child isolation (`MULTIPI_CHILD`).** `spawnPi` sets `MULTIPI_CHILD=1` in the child's env;
+the extension registers NOTHING (no tools, no hooks) when it is present. Rationale (observed
+live): an analyst child that loaded the loop sat in the stop-gate's "startable + free slot"
+continue loop for 30+ minutes after delivering, and the tools would have let a child dispatch
+grandchildren. Children are executors; only the orchestrator drives.
+
+**Watchdog (`child_silence_minutes`, config, default 30).** A child whose stream produces no
+OUTPUT for that long is killed as a whole process tree (SIGTERM, SIGKILL after a 15 s grace),
+recorded as crashed with `errorMessage: WATCHDOG: no child output for Nm (last activity: …)`
+and exitCode 124; the ordinary crashed-entry recovery re-dispatches it. The metric is stream
+silence, not wall time — a chatty 4-hour child is fine. Rationale (observed live): a child
+wedged inside one tool call ran 10+ hours with nobody noticing.
+
+**Process-tree discipline.** Children are spawned `detached` (own process group; pgid ==
+child pid) so their entire descendant tree is signallable as one unit:
+- abort/cancel/pause/watchdog kill the GROUP, not just the child;
+- every child EXIT sweeps the group: survivors get SIGTERM, then SIGKILL after 5 s, and the
+  report notes how many orphaned subprocesses were reaped;
+- the orchestrator registers an `exit` hook that SIGKILLs every still-live child tree, so
+  "Ctrl+C kills everything" is true (hard kills bypass hooks; residue is what step-0
+  recovery finds).
+- Settlement is driven by the child's `exit` event, NOT `close`: a leaked grandchild (an
+  abandoned browser) inherits the child's stdio and holds the pipes open, so `close` would
+  never fire while the child is long dead. `close` remains the fast path; a 150 ms
+  post-exit fallback settles (and sweeps) if the pipes stay held.

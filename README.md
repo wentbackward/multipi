@@ -53,6 +53,13 @@ $1.44 · bash: npm test:unit`), updating every second. `/devloop-agents` opens a
 panel — ↑/↓ selects a child (running or just finished), PgUp/PgDn scrolls its recent
 output (tool calls, turn summaries, finish line), `q` closes.
 
+Children are also protected against the two ways a loop loses hours: a **watchdog** kills
+a child whose stream goes quiet for `child_silence_minutes` (default 30) — a child wedged
+inside one tool call is restarted, not mourned — and **process-tree discipline**: each child
+runs in its own process group, so a cancelled/paused/watched/killed child takes its whole
+descendant tree with it (abandoned browsers and test runners are reaped on every child
+exit, and when the orchestrator itself quits, no child tree survives).
+
 ## Tools (pi extension)
 
 | Tool | What it does |
@@ -145,9 +152,10 @@ repo and run `devloop.status`, then dispatch a trivial ticket.
 `base_branch`, `remote`, `fast_check`, `format`/`format_extensions`, `checks[]`
 (`{name, command, heavy, summary}` or plain command), `gate_worktree`,
 `heavy.{slots, memory_max, port_env, port_base, port_step}`, `stop_gate.{require_clean_tree,
-max_blocks}`, `merge.{method, delete_branch}`. Runtime state (notes, logs,
-green-train record, dispatch state) lives under `~/.multipi/<repo>/` — derivable, never
-authoritative over GitHub + git.
+max_blocks}`, `merge.{method, delete_branch}`, `child_silence_minutes` (watchdog: kill a
+child whose stream goes quiet this long, default 30 — see "How it works"). Runtime state
+(notes, logs, green-train record, dispatch state) lives under `~/.multipi/<repo>/` —
+derivable, never authoritative over GitHub + git.
 
 ---
 

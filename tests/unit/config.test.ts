@@ -47,6 +47,15 @@ test("loadConfig applies defaults for an empty config", () => {
 		assert.equal(cfg.heavy.portStep, 10);
 		assert.equal(cfg.stopGate.maxBlocks, 5);
 		assert.equal(cfg.checks.length, 0);
+		assert.equal(cfg.childSilenceMinutes, 30, "watchdog default");
+	} finally { fx.cleanup(); }
+});
+
+test("loadConfig parses child_silence_minutes (watchdog)", () => {
+	const fx = makeFixture('{"child_silence_minutes": 45}');
+	try {
+		const cfg = loadConfig(fx.repo);
+		assert.equal(cfg?.childSilenceMinutes, 45);
 	} finally { fx.cleanup(); }
 });
 

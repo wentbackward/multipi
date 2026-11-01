@@ -16,6 +16,20 @@ if [ "$mode" = fail ]; then
   echo "fake-pi: model blew up" >&2
   exit 3
 fi
+# FAKE_PI_HANG=1: emit ONE event, then hang forever, immune to SIGTERM —
+# the watchdog scenario (a child wedged inside a tool call whose subprocess never returns).
+if [ "${FAKE_PI_HANG:-}" = "1" ]; then
+  emit "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"kicked off the long tool call...\"}],\"model\":\"fake/model\",\"stopReason\":\"end\",\"usage\":{\"input\":5,\"output\":5,\"cacheRead\":0,\"cacheWrite\":0,\"cost\":{\"total\":0.0005},\"totalTokens\":10}}}"
+  bash -c 'trap "" TERM; sleep 300' &
+  wait $!
+  exit 0
+fi
+# FAKE_PI_LEAK_PIDFILE=F: simulate a child that leaks a long-lived grandchild
+# (a TERM-immune background loop, i.e. the abandoned browser), then exits cleanly.
+if [ -n "${FAKE_PI_LEAK_PIDFILE:-}" ]; then
+  bash -c 'trap "" TERM; while :; do sleep 0.2; done' &
+  echo $! >"$FAKE_PI_LEAK_PIDFILE"
+fi
 # Simulate an honest implementer: if the brief carries a notes-file instruction, write the notes file.
 note=$(printf '%s' "$task" | grep -oE 'Notes file \(outside git, do NOT commit\): [^ ]+' | head -1 | sed 's/.*: //')
 if [ -n "$note" ]; then

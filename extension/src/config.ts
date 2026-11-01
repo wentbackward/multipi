@@ -29,6 +29,8 @@ export interface DevloopConfig {
 	checks: CheckSpec[];
 	gateSetup?: string;
 	gateWorktree?: string;
+	/** Watchdog: kill a child that emits no output for this many minutes (default 30). */
+	childSilenceMinutes: number;
 	notesDir?: string;
 	logsDir?: string;
 	heavy: HeavyConfig;
@@ -101,6 +103,7 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): D
 		checks,
 		gateSetup: str(raw.gate_setup) || undefined,
 		gateWorktree: str(raw.gate_worktree) || undefined,
+		childSilenceMinutes: num(raw.child_silence_minutes, 30),
 		notesDir: str(raw.notes_dir) || undefined,
 		logsDir: str(raw.logs_dir) || undefined,
 		heavy: {

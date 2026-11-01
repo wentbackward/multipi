@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-c
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { matchesKey } from "@earendil-works/pi-tui";
 import * as childreg from "./src/childreg.ts";
+import { registerChildProcessGuards } from "./src/child.ts";
 import { makeTools, evaluateSettle, formatEditedFile } from "./src/tools.ts";
 
 const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issue labels: open -> dl/in-progress (a child is working) -> dl/in-review (PR open) -> dl/approved (review VERDICT: APPROVE) -> dl/gated (batch gate green) -> dl/merged (squash-merged; then close the issue). dl/blocked marks tickets needing a human decision. Workflow: dispatch role agents with devloop.dispatch (one ticket per implementer; independent tickets in parallel, up to the slot cap); when reports land, review, then gate ALL dl/approved branches together with devloop.gate (in a deliberate merge order), and merge the green train with devloop.merge (same order). Check progress any time with devloop.status. When the operator asks to pause or stop the loop, call devloop.pause (it interrupts all children, writes HANDOFF.md, and comments the tickets), then settle. On a fresh session, step 0 of the devloop skill reads a HANDOFF.md if present and re-dispatches the interrupted children. Stop only when no open ticket is startable (unblocked with closed or in-flight dependencies) — the stop-gate enforces this for you.`;
@@ -20,6 +21,8 @@ export default function devloopExtension(pi: ExtensionAPI): void {
 	// tools would let a child drive the loop itself, and the stop-gate hook would keep a child
 	// that delivered its report from ever settling (it is not the orchestrator).
 	if (process.env.MULTIPI_CHILD) return;
+	// When this orchestrator exits, no spawned child tree survives (best-effort; see child.ts).
+	registerChildProcessGuards();
 	for (const tool of makeTools(DEVLOOP_INSTRUCTIONS)) {
 		try {
 			pi.registerTool(tool);

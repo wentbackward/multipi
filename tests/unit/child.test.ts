@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnPi, resolvePiInvocation } from "../../extension/src/child.ts";
+import { readFileSync, unlinkSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { spawn as cpSpawn } from "node:child_process";
+import { spawnPi, resolvePiInvocation, killGroup, groupAlive, groupMemberCount } from "../../extension/src/child.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_PI = path.join(HERE, "..", "fake-pi");
@@ -102,4 +105,79 @@ test("spawnPi marks the child process with MULTIPI_CHILD (extension guard)", asy
 	const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "multi-pi-env-")), "env.txt");
 	await spawnPi({ task: "x", cwd: process.cwd(), env: { MULTIPI_PI_BIN: FAKE_PI, FAKE_PI_ECHO_ENV: f } });
 	assert.equal(fs.readFileSync(f, "utf8"), "1");
+});
+
+// --- watchdog: a silent child is killed, not waited on -----------------------
+
+test("watchdog kills a child that emits no output for silenceMs", { timeout: 30_000 }, async () => {
+	const t0 = Date.now();
+	const res = await spawnPi({
+		task: "hang",
+		cwd: process.cwd(),
+		env: { MULTIPI_PI_BIN: FAKE_PI, FAKE_PI_HANG: "1" },
+		silenceMs: 900,
+		killGraceMs: 400,
+	});
+	const elapsed = Date.now() - t0;
+	assert.equal(res.aborted, false, "watchdog is not an abort");
+	assert.equal(res.exitCode, 124);
+	assert.match(res.errorMessage ?? "", /WATCHDOG: no child output for 1m/);
+	assert.match(res.errorMessage ?? "", /last activity/);
+	assert.ok(elapsed < 20_000, `settled promptly (took ${elapsed}ms)`);
+});
+
+test("watchdog disabled when silenceMs is unset (baseline path unchanged)", async () => {
+	const res = await spawnPi({
+		task: "x",
+		cwd: process.cwd(),
+		env: { MULTIPI_PI_BIN: FAKE_PI },
+	});
+	assert.equal(res.exitCode, 0);
+	assert.equal(res.errorMessage, undefined);
+});
+
+// --- orphan reaping: a leaked grandchild cannot outlive the child ------------
+
+test("a grandchild leaked by the child is reaped from its process tree", { timeout: 25_000 }, async () => {
+	const pidFile = path.join(mkdtempSync(path.join(tmpdir(), "fake-pi-leak-")), "leak.pid");
+	const res = await spawnPi({
+		task: "leak",
+		cwd: process.cwd(),
+		env: { MULTIPI_PI_BIN: FAKE_PI, FAKE_PI_LEAK_PIDFILE: pidFile },
+	});
+	assert.equal(res.exitCode, 0, "the child itself exited cleanly");
+	assert.match(res.stderr, /reaping .* orphaned subprocess/);
+	const leakedPid = Number(readFileSync(pidFile, "utf8").trim());
+	// The leaker is TERM-immune: the sweep must have escalated to SIGKILL.
+	const deadline = Date.now() + 6_000;
+	let alive = true;
+	while (Date.now() < deadline) {
+		try {
+			process.kill(leakedPid, 0);
+			await new Promise((r) => setTimeout(r, 200));
+		} catch {
+			alive = false;
+			break;
+		}
+	}
+	assert.equal(alive, false, "leaked grandchild is dead");
+	try {
+		unlinkSync(pidFile);
+	} catch { /* */ }
+});
+
+// --- group helpers -------------------------------------------------------------
+
+test("group helpers: detached group is counted, alive, and killed as a unit", async () => {
+	const leader = cpSpawn("bash", ["-c", "sleep 300"], { detached: true, stdio: "ignore" });
+	const pgid = leader.pid!;
+	leader.unref();
+	await new Promise((r) => setTimeout(r, 150));
+	if (process.platform === "linux") {
+		assert.ok(groupMemberCount(pgid) >= 1, "member visible in /proc scan");
+	}
+	assert.equal(groupAlive(pgid), true);
+	killGroup(pgid, "SIGKILL");
+	await new Promise((r) => setTimeout(r, 150));
+	assert.equal(groupAlive(pgid), false, "group gone after SIGKILL");
 });

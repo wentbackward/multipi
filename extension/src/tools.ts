@@ -355,6 +355,7 @@ function spawnAndTrack(
 		model: role.model,
 		cwd: opts.worktree,
 		signal: controller.signal,
+		silenceMs: ctx.cfg.childSilenceMinutes * 60_000,
 		onSpawn: (pid) => {
 			if (pid === undefined) return;
 			updateState(ctx.stateDir, (st) => {
