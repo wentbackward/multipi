@@ -106,6 +106,9 @@ dl_load_config() {
     esac
   fi
   [ -n "${GH_REPO:-}" ] && export GH_REPO
+  # Return 0 unconditionally: as the function's last command, the conditional above
+  # would make dl_load_config fail whenever GH_REPO is empty, breaking every "&&" caller.
+  return 0
 }
 
 # cfg PATH [DEFAULT]: a value from the project config, or DEFAULT.
