@@ -90,6 +90,22 @@ dl_load_config() {
   DL_STATE=${MULTIPI_HOME:-$HOME/.multipi}/$DL_REPO
   DL_REMOTE=$(cfg remote origin)
   DL_BASE=$(cfg base_branch main)
+  # Fork-trap protection: bare `gh` calls in a fork can resolve to the UPSTREAM tracker
+  # by default (see AGENTS.md). Pin GH_REPO to the configured origin unless the caller
+  # already exported one. Applies to every loop script (gate/merge/open-pr/doctor/heavy).
+  # NOTE: this block is local patch — keep it in sync with the per-repo copies (crisis_monitor
+  # main @ 4a60747). An upgrade reinstall overwrites per-repo scripts from this plugin source;
+  # without the pin here, upgrades silently drop the pin and merges hit the parent tracker.
+  if [ -z "${GH_REPO:-}" ]; then
+    local origin_url
+    origin_url=$(git -C "${DL_ROOT:-.}" remote get-url "$DL_REMOTE" 2>/dev/null || true)
+    case $origin_url in
+      *github.com*)
+        GH_REPO=$(printf '%s\n' "$origin_url" | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')
+        ;;
+    esac
+  fi
+  [ -n "${GH_REPO:-}" ] && export GH_REPO
 }
 
 # cfg PATH [DEFAULT]: a value from the project config, or DEFAULT.
