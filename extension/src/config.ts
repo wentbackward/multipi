@@ -29,6 +29,8 @@ export interface DevloopConfig {
 	checks: CheckSpec[];
 	gateSetup?: string;
 	gateWorktree?: string;
+	/** Single dir holding all issue worktrees (default: <stateDir>/worktrees/<repo>; relative resolves against the repo PARENT). */
+	worktreeDir?: string;
 	/** Watchdog: kill a child that emits no output for this many minutes (default 30). */
 	childSilenceMinutes: number;
 	notesDir?: string;
@@ -44,6 +46,7 @@ export interface Paths {
 	notesDir: string;
 	logsDir: string;
 	gateDir: string;
+	worktreeDir: string;
 }
 
 function str(v: unknown, d = ""): string {
@@ -103,6 +106,7 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): D
 		checks,
 		gateSetup: str(raw.gate_setup) || undefined,
 		gateWorktree: str(raw.gate_worktree) || undefined,
+		worktreeDir: str(raw.worktree_dir) || undefined,
 		childSilenceMinutes: num(raw.child_silence_minutes, 30),
 		notesDir: str(raw.notes_dir) || undefined,
 		logsDir: str(raw.logs_dir) || undefined,
@@ -136,11 +140,16 @@ export function resolvePaths(cfg: DevloopConfig, env: NodeJS.ProcessEnv = proces
 		if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
 		return p.startsWith("/") ? p : path.join(cfg.root, p);
 	};
+	// All issue worktrees live in ONE dir per project (plus the gate worktree inside it),
+	// so the repo's parent directory holds a single entry instead of one folder per ticket.
+	const resolveWt = (p: string): string => (p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p.startsWith("/") ? p : path.join(path.dirname(cfg.root), p));
+	const wt = path.resolve(cfg.worktreeDir ? resolveWt(cfg.worktreeDir) : path.join(state, "worktrees", path.basename(cfg.root)));
 	return {
 		stateDir: state,
 		notesDir: path.resolve(resolveOpt(cfg.notesDir) || path.join(state, "notes")),
 		logsDir: path.resolve(resolveOpt(cfg.logsDir) || path.join(state, "logs")),
-		gateDir: path.resolve(resolveOpt(cfg.gateWorktree) || path.join(path.dirname(cfg.root), `${path.basename(cfg.root)}-gate`)),
+		gateDir: path.resolve(resolveOpt(cfg.gateWorktree) || path.join(wt, "gate")),
+		worktreeDir: wt,
 	};
 }
 

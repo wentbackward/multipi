@@ -109,6 +109,21 @@ for branch in "$@"; do
     git merge -q --ff-only "$DL_REMOTE/$DL_BASE" >/dev/null 2>&1
   fi
   echo "merged $branch -> $(git log --oneline -1 "$DL_REMOTE/$DL_BASE")"
+  # Remove the ticket's worktree now that the train is merged: the loop created it, so the
+  # loop owns its deletion. A DIRTY worktree is kept — uncommitted work is evidence, and
+  # nothing may be destroyed to tidy a directory. (Legacy sibling worktrees are collected by
+  # scripts/cleanup-worktrees.sh.)
+  wt=$(git worktree list --porcelain | awk -v b="refs/heads/$branch" '$1 == "worktree" { w = $2 } $1 == "branch" && $2 == b { print w }')
+  if [ -n "$wt" ] && [ -d "$wt" ]; then
+    if [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+      git worktree remove "$wt" >/dev/null 2>&1 || true
+      git worktree prune >/dev/null 2>&1 || true
+      git branch -q -D "$branch" >/dev/null 2>&1 || true
+      echo "cleaned worktree $wt (branch $branch)"
+    else
+      echo "KEPT worktree $wt — uncommitted changes; remove by hand when ready"
+    fi
+  fi
   previous=$branch
 done
 rm -f "$train_file"

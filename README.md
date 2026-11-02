@@ -60,6 +60,15 @@ runs in its own process group, so a cancelled/paused/watched/killed child takes 
 descendant tree with it (abandoned browsers and test runners are reaped on every child
 exit, and when the orchestrator itself quits, no child tree survives).
 
+Each ticket's work lives in its **own worktree**, and the loop owns its full lifecycle: all
+worktrees sit in one directory per project (`worktree_dir`, default
+`~/.multipi/<repo>/worktrees/<repo>/` — so the repo's parent directory holds a single entry
+instead of one folder per ticket), a child re-dispatch resumes in the same worktree, and
+`devloop.merge` **removes the worktree when the train it belonged to merges** (a dirty
+worktree is kept — uncommitted work is never destroyed to tidy a directory). Litter left by
+earlier versions is collected with `scripts/cleanup-worktrees.sh [repo]`, which only removes
+clean worktrees whose branch is already gone from the remote.
+
 ## Tools (pi extension)
 
 | Tool | What it does |
@@ -150,7 +159,8 @@ repo and run `devloop.status`, then dispatch a trivial ticket.
 ## Project config (`.devloop.json`, committed)
 
 `base_branch`, `remote`, `fast_check`, `format`/`format_extensions`, `checks[]`
-(`{name, command, heavy, summary}` or plain command), `gate_worktree`,
+(`{name, command, heavy, summary}` or plain command), `gate_worktree`, `worktree_dir`
+(single dir for all issue worktrees; default under `~/.multipi/<repo>/worktrees/<repo>`),
 `heavy.{slots, memory_max, port_env, port_base, port_step}`, `stop_gate.{require_clean_tree,
 max_blocks}`, `merge.{method, delete_branch}`, `child_silence_minutes` (watchdog: kill a
 child whose stream goes quiet this long, default 30 — see "How it works"). Runtime state

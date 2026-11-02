@@ -57,11 +57,22 @@ cfg_out() { # evaluate common.sh in the fixture repo; args = shell expression
 expect "cfg reads a plain value" "main" "$(cfg_out 'printf %s "$DL_BASE"')"
 expect "cfg falls back to the default" "fallback" "$(cfg_out 'cfg no.such.key fallback')"
 expect "cfg_len counts the checks array" "2" "$(cfg_out 'cfg_len checks')"
+
+# Worktrees: one consolidated dir per project (under state), gate inside it.
+expect "worktree dir defaults under state, not beside the repo" \
+  "$work/home/project/worktrees/project" "$(cfg_out 'dl_worktree_dir')"
+expect "gate dir defaults inside the worktree dir" \
+  "$work/home/project/worktrees/project/gate" "$(cfg_out 'dl_gate_dir')"
+cp .devloop.json /tmp/.smoke-devloop-backup
+printf '{"worktree_dir":"/tmp/elsewhere"}' > .devloop.json
+expect "worktree dir honours an explicit worktree_dir" \
+  "/tmp/elsewhere" "$(bash -c ". \"$plugin/scripts/lib/common.sh\" && dl_load_config required && dl_worktree_dir")"
+mv /tmp/.smoke-devloop-backup .devloop.json
 expect "json_get walks into an array object" "unit" "$(cfg_out 'json_get checks.0.name <"$DL_CONFIG"')"
 expect "dl_note_file maps slashes to underscores" \
   "$work/home/project/notes/pr-feat_1-first.md" "$(cfg_out 'dl_note_file feat/1-first')"
-expect "dl_gate_dir resolves the default relative to the main root" \
-  "$work/project-gate" "$(cfg_out 'dl_gate_dir')"
+expect "dl_gate_dir defaults inside the worktree dir" \
+  "$work/home/project/worktrees/project/gate" "$(cfg_out 'dl_gate_dir')"
 expect "dl_state is under MULTIPI_HOME/<repo>" \
   "$work/home/project" "$(cfg_out 'printf %s "$DL_STATE"')"
 cfg_out 'dl_die boom' >/dev/null 2>&1

@@ -8,8 +8,9 @@ export function branchSlug(title: string): string {
 	return slug || "work";
 }
 
-/** Sibling of the repo root, named after it and the ticket number. */
-export function worktreePath(repoRoot: string, ticket: number): string {
+/** Issue worktree for a ticket: <worktreeDir>/issue-<ticket>; legacy sibling <repo>-<ticket> when no dir is configured. */
+export function worktreePath(repoRoot: string, ticket: number, worktreeDir?: string): string {
+	if (worktreeDir) return path.join(worktreeDir, `issue-${ticket}`);
 	return path.join(path.dirname(repoRoot), `${path.basename(repoRoot)}-${ticket}`);
 }
 

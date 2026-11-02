@@ -89,6 +89,13 @@ export function addLabel(repo: string, number: number, label: string): void {
 	}
 }
 
+export function addComment(repo: string, number: number, body: string): void {
+	execFileSync("gh", repo ? ["--repo", repo, "issue", "comment", String(number), "--body", body] : ["issue", "comment", String(number), "--body", body], {
+		env: process.env,
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+}
+
 export function closeIssue(repo: string, number: number, comment: string): void {
 	execFileSync("gh", repo ? ["--repo", repo, "issue", "close", String(number), "--comment", comment] : ["issue", "close", String(number), "--comment", comment], {
 		env: process.env,

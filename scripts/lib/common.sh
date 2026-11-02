@@ -151,8 +151,31 @@ dl_logs_dir() {
   if [ -n "$configured" ]; then dl_canonical "$(dl_resolve "$configured")"; else dl_canonical "$DL_STATE/logs"; fi
 }
 
+dl_worktree_dir() {
+  # Single directory holding ALL issue worktrees of this project (plus the gate worktree).
+  # worktree_dir: absolute, ~/, or relative to the repo's PARENT dir (never the repo itself —
+  # a worktree cannot live inside the repository it belongs to). Mirrors worktreeDir in config.ts.
+  local wd
+  wd=$(cfg worktree_dir "")
+  if [ -z "$wd" ]; then
+    dl_canonical "$DL_STATE/worktrees/$DL_REPO"
+  elif [ "${wd#/}" != "$wd" ] || [ "${wd#~/}" != "$wd" ]; then
+    dl_canonical "$(dl_resolve "$wd")"
+  else
+    dl_canonical "$(dl_resolve "../$wd")"
+  fi
+}
+
 dl_gate_dir() {
-  dl_canonical "$(dl_resolve "$(cfg gate_worktree "../$DL_REPO-gate")")"
+  local configured
+  configured=$(cfg gate_worktree "")
+  if [ -n "$configured" ]; then
+    dl_canonical "$(dl_resolve "$configured")"
+  else
+    # Default: <worktree dir>/gate — the same default config.ts computes, so scripts and
+    # extension agree on one location.
+    dl_canonical "$(dl_worktree_dir)/gate"
+  fi
 }
 
 # dl_note_file BRANCH: the PR notes file of a branch (slashes become underscores).

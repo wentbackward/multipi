@@ -377,3 +377,17 @@ child pid) so their entire descendant tree is signallable as one unit:
   abandoned browser) inherits the child's stdio and holds the pipes open, so `close` would
   never fire while the child is long dead. `close` remains the fast path; a 150 ms
   post-exit fallback settles (and sweeps) if the pipes stay held.
+
+**Review classification (bug fix).** Dispatch entries are classified on the ROLE'S contract:
+reviewers end with `VERDICT: APPROVE` / `VERDICT: CHANGES REQUIRED` (both a finished job →
+`done`; a reviewer report without a verdict is `crashed`), all other roles on
+`STATUS: DONE` / `STATUS: BLOCKED`. Previously every successful review was recorded
+`crashed` (observed live in two projects); state consumers must never be lied to.
+
+**Worktree lifecycle.** `worktree_dir` (config; default `~/.multipi/<repo>/worktrees/<repo>`,
+absolute / `~/` / relative-to-repo-parent) holds all issue worktrees
+(`<dir>/issue-<ticket>`) and, by default, the gate worktree (`<dir>/gate`). Re-dispatch
+reuses the worktree recorded in the dispatch entry. `devloop.merge` removes each merged
+branch's worktree when its tree is clean (dirty ⇒ kept and reported). `scripts/
+cleanup-worktrees.sh [repo]` collects legacy litter: removes only clean worktrees whose
+branch is gone from the remote, keeps everything else with a stated reason.

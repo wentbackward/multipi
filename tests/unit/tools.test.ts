@@ -88,8 +88,8 @@ test("dispatch(implementer) runs the child, opens the PR, labels in-review", asy
 		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
 		assert.match(textOf(res), /implementer #\d+ .* -> done/);
-		// worktree created beside the repo
-		assert.ok(existsSync(path.join(path.dirname(fx.repo), `proj-${n}`)), "worktree exists");
+		// worktree created in the consolidated worktree dir (<state>/worktrees/<repo>/issue-<n>)
+		assert.ok(existsSync(path.join(fx.dir, "home", "proj", "worktrees", "proj", `issue-${n}`)), "worktree exists");
 		// branch pushed
 		assert.ok(sh(fx.repo, "rev-parse", "--verify", `-q`, `origin/feat/${n}-add-a-feature`).toString().length > 0, "branch on origin");
 		// PR opened (fake gh flat file)

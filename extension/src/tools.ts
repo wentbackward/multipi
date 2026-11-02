@@ -192,7 +192,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 		const entry = state[String(ticket)];
 		const branch = params.branch ?? entry?.branch;
 		if (!branch) return { ...text(`no known branch for ticket #${ticket}; pass \`branch\``), isError: true };
-		const worktree = entry?.worktree ?? worktreePath(ctx.cfg.root, ticket);
+		const worktree = entry?.worktree ?? worktreePath(ctx.cfg.root, ticket, ctx.paths.worktreeDir);
 		const key = `review-${ticket}`;
 		const reviewEntry: DispatchEntry = {
 			pid: 0,
@@ -253,7 +253,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 	if (!issue) return { ...text(`ticket #${ticket} not found among open issues (already merged/closed?)`), isError: true };
 	const slug = branchSlug(issue.title);
 	const branch = prev?.branch ?? (slug ? `feat/${ticket}-${slug}` : `feat/${ticket}`);
-	const worktree = prev?.worktree ?? worktreePath(ctx.cfg.root, ticket);
+	const worktree = prev?.worktree ?? worktreePath(ctx.cfg.root, ticket, ctx.paths.worktreeDir);
 	ensureWorktree(ctx, branch, worktree, !prev);
 	addLabel(ctx.repoSlug, ticket, "dl/in-progress");
 
@@ -409,6 +409,14 @@ export function finishEntry(ctx: ToolContext, key: string, entry: DispatchEntry,
 		entry.stopReason = res.stopReason;
 		if (res.errorMessage) entry.error = res.errorMessage;
 		if (res.aborted || signal?.aborted) entry.status = "interrupted";
+		else if (entry.role === "code-reviewer") {
+			// The reviewer's contract is VERDICT: APPROVE / CHANGES REQUIRED — not STATUS: DONE.
+			// Classifying on the implementer's contract recorded every finished review as
+			// "crashed" (observed live in two projects: full reports, stopReason=stop).
+			if (/VERDICT:\s*(APPROVE|CHANGES)/.test(res.finalText)) entry.status = "done";
+			else if (/STATUS:\s*BLOCKED/.test(res.finalText)) entry.status = "blocked";
+			else entry.status = "crashed";
+		}
 		else if (/STATUS:\s*BLOCKED/.test(res.finalText)) entry.status = "blocked";
 		else if (/STATUS:\s*DONE/.test(res.finalText)) entry.status = "done";
 		else entry.status = "crashed";
