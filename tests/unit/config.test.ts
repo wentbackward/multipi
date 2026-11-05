@@ -110,7 +110,7 @@ test("loadConfig parses a scenarios block with spec defaults for unset keys", ()
 	const fx = makeFixture('{"scenarios": {"dir": "/srv/store"}}');
 	try {
 		const sc = loadConfig(fx.repo)?.scenarios;
-		assert.ok(sc && sc !== false, "block must parse to an object");
+		assert.ok(sc, "block must parse to an object");
 		assert.equal(sc!.dir, "/srv/store");
 		assert.equal(sc!.run, undefined);
 		assert.equal(sc!.runSeconds, 120);
@@ -126,7 +126,7 @@ test("loadConfig parses a fully specified scenarios block", () => {
 	const fx = makeFixture('{"scenarios": {"dir": "d", "run": "r", "run_seconds": 5, "judge": "j", "judge_seconds": 7, "pass": 0.5, "min_satisfaction": 0.7, "sealed": 0.1}}');
 	try {
 		const sc = loadConfig(fx.repo)?.scenarios;
-		assert.ok(sc && sc !== false);
+		assert.ok(sc);
 		assert.equal(sc!.dir, "d");
 		assert.equal(sc!.run, "r");
 		assert.equal(sc!.runSeconds, 5);
