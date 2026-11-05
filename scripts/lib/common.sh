@@ -166,6 +166,23 @@ dl_worktree_dir() {
   fi
 }
 
+dl_scenarios_dir() {
+  # Scenario store dir (dark-factory spec §2). scenarios.dir: absolute, ~/, or relative to
+  # the repo's PARENT dir (same rule as worktree_dir — the store can never live inside the
+  # repo). Default: <state>/scenarios, a sibling of the consolidated worktrees dir. Mirrors
+  # scenariosDir in config.ts. An explicit "scenarios": false still yields the default path
+  # (the store is off; the path is where it would live).
+  local sd
+  sd=$(cfg scenarios.dir "")
+  if [ -z "$sd" ]; then
+    dl_canonical "$DL_STATE/scenarios"
+  elif [ "${sd#/}" != "$sd" ] || [ "${sd#~/}" != "$sd" ]; then
+    dl_canonical "$(dl_resolve "$sd")"
+  else
+    dl_canonical "$(dl_resolve "../$sd")"
+  fi
+}
+
 dl_gate_dir() {
   local configured
   configured=$(cfg gate_worktree "")
