@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
-import { mkdtempSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { loadConfig, resolveState } from "../../extension/src/config.ts";
+import { loadConfig, resolveState, scenariosOn } from "../../extension/src/config.ts";
+import { resolvePaths } from "../../extension/src/config.ts";
 import { repoSlugFromRemote } from "../../extension/src/config.ts";
 import { makeFixture, BASE_CONFIG } from "../fixtures.ts";
 
@@ -78,6 +80,135 @@ test("loadConfig parses object and plain-string checks uniformly", () => {
 		assert.equal(cfg.checks[0].name, "check-1");
 		assert.equal(cfg.checks[1].name, "e");
 	} finally { fx.cleanup(); }
+});
+
+test("loadConfig defaults factory to collaborative and scenarios to absent", () => {
+	const fx = makeFixture(BASE_CONFIG);
+	try {
+		const cfg = loadConfig(fx.repo);
+		assert.ok(cfg);
+		assert.equal(cfg.factory, "collaborative");
+		assert.equal(cfg.scenarios, undefined);
+	} finally { fx.cleanup(); }
+});
+
+test("loadConfig parses factory: dark", () => {
+	const fx = makeFixture('{"factory": "dark"}');
+	try {
+		assert.equal(loadConfig(fx.repo)?.factory, "dark");
+	} finally { fx.cleanup(); }
+});
+
+test("loadConfig treats an unknown factory value as collaborative", () => {
+	const fx = makeFixture('{"factory": "night-shift"}');
+	try {
+		assert.equal(loadConfig(fx.repo)?.factory, "collaborative");
+	} finally { fx.cleanup(); }
+});
+
+test("loadConfig parses a scenarios block with spec defaults for unset keys", () => {
+	const fx = makeFixture('{"scenarios": {"dir": "/srv/store"}}');
+	try {
+		const sc = loadConfig(fx.repo)?.scenarios;
+		assert.ok(sc && sc !== false, "block must parse to an object");
+		assert.equal(sc!.dir, "/srv/store");
+		assert.equal(sc!.run, undefined);
+		assert.equal(sc!.runSeconds, 120);
+		assert.equal(sc!.judge, undefined);
+		assert.equal(sc!.judgeSeconds, 600);
+		assert.equal(sc!.pass, 0.8);
+		assert.equal(sc!.minSatisfaction, 0.9);
+		assert.equal(sc!.sealed, 0.2);
+	} finally { fx.cleanup(); }
+});
+
+test("loadConfig parses a fully specified scenarios block", () => {
+	const fx = makeFixture('{"scenarios": {"dir": "d", "run": "r", "run_seconds": 5, "judge": "j", "judge_seconds": 7, "pass": 0.5, "min_satisfaction": 0.7, "sealed": 0.1}}');
+	try {
+		const sc = loadConfig(fx.repo)?.scenarios;
+		assert.ok(sc && sc !== false);
+		assert.equal(sc!.dir, "d");
+		assert.equal(sc!.run, "r");
+		assert.equal(sc!.runSeconds, 5);
+		assert.equal(sc!.judge, "j");
+		assert.equal(sc!.judgeSeconds, 7);
+		assert.equal(sc!.pass, 0.5);
+		assert.equal(sc!.minSatisfaction, 0.7);
+		assert.equal(sc!.sealed, 0.1);
+	} finally { fx.cleanup(); }
+});
+
+test("loadConfig parses an explicit scenarios: false", () => {
+	const fx = makeFixture('{"factory": "dark", "scenarios": false}');
+	try {
+		const cfg = loadConfig(fx.repo);
+		assert.ok(cfg);
+		assert.equal(cfg.scenarios, false);
+	} finally { fx.cleanup(); }
+});
+
+test("scenariosOn: block present on in any mode; explicit false off even in dark; absent on only in dark", () => {
+	const table: [json: string, on: boolean, why: string][] = [
+		['{"scenarios": {}}', true, "an empty block counts as present: on in collaborative"],
+		['{"scenarios": {"dir": "/srv/store"}}', true, "block present: on in collaborative"],
+		['{"factory": "dark", "scenarios": {"dir": "/srv/store"}}', true, "block present: on in dark"],
+		['{"factory": "dark", "scenarios": false}', false, "explicit false wins even in dark"],
+		["{}", false, "absent is off in collaborative"],
+		['{"factory": "dark"}', true, "absent is on by the dark preset"],
+	];
+	for (const [json, on, why] of table) {
+		const fx = makeFixture(json);
+		try {
+			const cfg = loadConfig(fx.repo);
+			assert.ok(cfg, why);
+			assert.equal(scenariosOn(cfg), on, why);
+		} finally { fx.cleanup(); }
+	}
+});
+
+test("resolvePaths: scenariosDir defaults to <stateDir>/scenarios, sibling of the worktrees dir", () => {
+	const fx = makeFixture(BASE_CONFIG);
+	try {
+		const home = path.join(fx.dir, "home");
+		const p = resolvePaths(loadConfig(fx.repo)!, { MULTIPI_HOME: home });
+		assert.equal(p.stateDir, path.join(home, "proj"));
+		assert.equal(p.worktreeDir, path.join(home, "proj", "worktrees", "proj"));
+		assert.equal(p.scenariosDir, path.join(home, "proj", "scenarios"));
+	} finally { fx.cleanup(); }
+});
+
+test("resolvePaths: scenarios.dir ~/ expands against $HOME", () => {
+	const fx = makeFixture('{"scenarios": {"dir": "~/store"}}');
+	try {
+		const home = path.join(fx.dir, "home");
+		const p = resolvePaths(loadConfig(fx.repo)!, { MULTIPI_HOME: home, HOME: home });
+		assert.equal(p.scenariosDir, path.join(home, "store"));
+	} finally { fx.cleanup(); }
+});
+
+test("resolvePaths: scenarios.dir relative resolves against the repo PARENT (worktree_dir rule)", () => {
+	const fx = makeFixture('{"scenarios": {"dir": "store"}}');
+	try {
+		const p = resolvePaths(loadConfig(fx.repo)!, { MULTIPI_HOME: path.join(fx.dir, "home") });
+		assert.equal(p.scenariosDir, path.join(path.dirname(fx.repo), "store"));
+	} finally { fx.cleanup(); }
+});
+
+test("resolvePaths: scenarios.dir absolute passes through", () => {
+	const fx = makeFixture('{"scenarios": {"dir": "/abs/store"}}');
+	try {
+		const p = resolvePaths(loadConfig(fx.repo)!, { MULTIPI_HOME: path.join(fx.dir, "home") });
+		assert.equal(p.scenariosDir, "/abs/store");
+	} finally { fx.cleanup(); }
+});
+
+test("setup templates ship no factory and no scenarios keys (fresh = collaborative, scenarios off)", () => {
+	const here = path.dirname(fileURLToPath(import.meta.url));
+	for (const rel of ["templates/devloop.json", ".pi/templates/devloop.json"]) {
+		const raw = JSON.parse(readFileSync(path.join(here, "..", "..", rel), "utf8")) as Record<string, unknown>;
+		assert.equal("factory" in raw, false, `${rel} must not set factory`);
+		assert.equal("scenarios" in raw, false, `${rel} must not set scenarios`);
+	}
 });
 
 test("repoSlugFromRemote parses https and ssh remote urls", () => {

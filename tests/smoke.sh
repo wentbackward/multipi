@@ -68,6 +68,18 @@ printf '{"worktree_dir":"/tmp/elsewhere"}' > .devloop.json
 expect "worktree dir honours an explicit worktree_dir" \
   "/tmp/elsewhere" "$(bash -c ". \"$plugin/scripts/lib/common.sh\" && dl_load_config required && dl_worktree_dir")"
 mv /tmp/.smoke-devloop-backup .devloop.json
+
+# Scenario store (dark-factory spec §2): defaults under state, sibling of the worktrees dir.
+expect "scenarios dir defaults under state, sibling of the worktrees dir" \
+  "$work/home/project/scenarios" "$(cfg_out 'dl_scenarios_dir')"
+cp .devloop.json "$work/.smoke-devloop-backup"
+printf '{"scenarios":{"dir":"store-rel"}}' > .devloop.json
+expect "scenarios dir relative resolves against the repo PARENT (worktree_dir rule)" \
+  "$work/store-rel" "$(cfg_out 'dl_scenarios_dir')"
+printf '{"scenarios":{"dir":"~/scen-home"}}' > .devloop.json
+expect "scenarios dir ~/ expands against HOME" \
+  "$work/home2/scen-home" "$(cd "$work/project" && HOME="$work/home2" bash -c ". \"$plugin/scripts/lib/common.sh\" && dl_load_config required && dl_scenarios_dir")"
+mv "$work/.smoke-devloop-backup" .devloop.json
 expect "json_get walks into an array object" "unit" "$(cfg_out 'json_get checks.0.name <"$DL_CONFIG"')"
 expect "dl_note_file maps slashes to underscores" \
   "$work/home/project/notes/pr-feat_1-first.md" "$(cfg_out 'dl_note_file feat/1-first')"
