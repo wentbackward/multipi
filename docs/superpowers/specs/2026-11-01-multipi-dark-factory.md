@@ -121,10 +121,19 @@ The store must stay invisible to the agents whose work is judged by it.
   it registers exactly one `tool_call` hook (pi's block-capable pre-tool event) and nothing
   else. No tools, no stop-gate, no UI: a guarded child still cannot drive the loop.
 - **New documented env seam** `MULTIPI_CHILD_ROLE=<role>` (set by `spawnPi` next to
-  `MULTIPI_CHILD=1`). Guarded roles: `implementer`, `code-reviewer`. **Not** guarded:
-  `analyst`, `verifier`, `scenario-writer`, `scenario-judge` (writer and judge must reach
-  the store; analyst reads spec only but touches no store paths — left unguarded, simplest
-  and it can never be judged by the store).
+  `MULTIPI_CHILD=1`). Guarded roles: `implementer`, `code-reviewer`, `verifier`. **Not**
+  guarded: `analyst`, `scenario-writer`, `scenario-judge` (writer and judge must reach the
+  store; analyst reads spec only but touches no store paths — left unguarded, simplest and it
+  can never be judged by the store). The verifier IS guarded: it runs at the repo root
+  post-merge and its reports reach the implementer, so an unguarded verifier could read the
+  store and launder it through its report.
+- **How the guard learns the store path:** the guard-only extension reads `.devloop.json`
+  from the child's working directory (the committed repo config) at extension load; **no env
+  seam carries the path** — env is child-readable, and the path was never secret (it sits in
+  the committed config): what the hook denies is *access*, not *knowledge*. If the config
+  cannot be parsed or the store path cannot be resolved, the guard fails closed — every
+  guarded call gets the generic refusal — so a broken config bricks the loop loudly rather
+  than running a guarded child loose.
 - **Active when** the store is on (`scenarios` block, or `factory: dark` without
   `"scenarios": false`). With the store off the guard registers nothing, ever.
 - **Matching (best effort, like the reference — it reads the command line, not what runs):**
@@ -176,8 +185,10 @@ other multipi gate contract.
    running (foreground server) or exit; the stage stops the group at the end (SIGTERM →
    SIGKILL after 2 s). Exiting before printing, or silence past `run_seconds`, is red.
 2. **Judge each scenario**, once per scenario, as a one-shot headless child (default
-   `judge` = `pi -p` with the `scenario-judge` role — the same `spawnPi` machinery; the judge
-   is NOT a guarded role, so it may read its own scenario file). Env contract (documented
+   `judge` = `pi -p` with the `scenario-judge` role — the stage script itself execs the `pi`
+   binary in a detached process group, mirroring the spawnPi/watchdog spawn contract: own
+   group, bounded wait, TERM→KILL; a bash script cannot import the TS `spawnPi`. The judge is
+   NOT a guarded role, so it may read its own scenario file). Env contract (documented
    seams): `MULTIPI_SCENARIO_FILE`, `MULTIPI_SCENARIO_ID`, `MULTIPI_SCENARIO_TARGET`. The
    judge drives the system (HTTP/CLI/browser) and ends with a **verdict** — its last line
    starting with `{`: `{"id", "satisfied": 0..1, "required", "evidence", "missing"}`.
@@ -189,8 +200,9 @@ other multipi gate contract.
    of all judged scenarios `>= min_satisfaction`. **Red** prints one line per unsatisfied
    NON-sealed scenario — `scenario <id> unsatisfied (<score>, required|scored): <missing>`
    — then `scenarios red: mean <m> (<n> judged, <k> unsatisfied)` and `TRAIN RED`.
-5. **Sealed:** a scenario is sealed when `checksum(id) mod 1000 < sealed * 1000` — the choice
-   depends only on the id (stable, no state, no agent discretion). Sealed scenarios are
+5. **Sealed:** a scenario is sealed when `int(first 10 hex chars of sha256(id), 16) mod 1000
+   < sealed * 1000` — the digest is pinned so the seal cannot drift across platforms or
+   versions; the choice depends only on the id (stable, no state, no agent discretion). Sealed scenarios are
    judged and **counted only**: never named, never described, `scenarios sealed: <n> judged,
    <k> unsatisfied`. This is the overfitting check on the feedback loop itself.
 6. **Feedback without leakage:** what travels back to the implementer is the `missing` text
@@ -250,8 +262,8 @@ within the current contract (no new exit codes). Role files: `agents/scenario-wr
 `"factory"` is a preset: dark ⇒ scenarios on unless explicitly off, scenario-writing at
 ticket creation with startability conditioned on it, and automatic cleanup. `"scenarios"`
 alone ⇒ the store and the gate stage in ANY mode, guard included. The guard is a block-capable
-`tool_call` hook loaded ONLY by implementer and code-reviewer children, ONLY when the store
-is on, refusing anything that names a path inside the store. The gate's scenario stage runs
+`tool_call` hook loaded ONLY by implementer, code-reviewer, and verifier children, ONLY when
+the store is on, refusing anything that names a path inside the store. The gate's scenario stage runs
 the system (`run`, first line = target, own process group), judges every scenario with a
 one-shot headless judge (verdict JSON, rejudge once, better run counts, invalid ⇒ 0), decides
 in the script (all required ≥ `pass`, mean ≥ `min_satisfaction`), seals a deterministic share
