@@ -6,7 +6,8 @@ one batched check gate per train of ready branches, and ordered squash merges. G
 the tickets; labels are the loop state; the deterministic scripts + extension tools are the hands.
 
 The design spec is `docs/superpowers/specs/2026-10-27-devloop-pi-design.md` and is the source of
-truth. Implementation history: `docs/superpowers/plans/`.
+truth; the dark-factory mode (the `"factory"` toggle, holdout scenarios, the role guard) is
+specified in `docs/superpowers/specs/2026-11-01-multipi-dark-factory.md`. Implementation history: `docs/superpowers/plans/`.
 
 ## Project conventions
 
