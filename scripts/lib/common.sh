@@ -159,7 +159,7 @@ dl_worktree_dir() {
   wd=$(cfg worktree_dir "")
   if [ -z "$wd" ]; then
     dl_canonical "$DL_STATE/worktrees/$DL_REPO"
-  elif [ "${wd#/}" != "$wd" ] || [ "${wd#~/}" != "$wd" ]; then
+  elif [ "${wd#/}" != "$wd" ] || [ "${wd#"~"/}" != "$wd" ]; then
     dl_canonical "$(dl_resolve "$wd")"
   else
     dl_canonical "$(dl_resolve "../$wd")"
@@ -176,7 +176,7 @@ dl_scenarios_dir() {
   sd=$(cfg scenarios.dir "")
   if [ -z "$sd" ]; then
     dl_canonical "$DL_STATE/scenarios"
-  elif [ "${sd#/}" != "$sd" ] || [ "${sd#~/}" != "$sd" ]; then
+  elif [ "${sd#/}" != "$sd" ] || [ "${sd#"~"/}" != "$sd" ]; then
     dl_canonical "$(dl_resolve "$sd")"
   else
     dl_canonical "$(dl_resolve "../$sd")"
