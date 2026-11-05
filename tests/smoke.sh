@@ -67,6 +67,9 @@ cp .devloop.json /tmp/.smoke-devloop-backup
 printf '{"worktree_dir":"/tmp/elsewhere"}' > .devloop.json
 expect "worktree dir honours an explicit worktree_dir" \
   "/tmp/elsewhere" "$(bash -c ". \"$plugin/scripts/lib/common.sh\" && dl_load_config required && dl_worktree_dir")"
+printf '{"worktree_dir":"~/wt-home"}' > .devloop.json
+expect "worktree dir ~/ expands against HOME" \
+  "$work/home2/wt-home" "$(cd "$work/project" && HOME="$work/home2" bash -c ". \"$plugin/scripts/lib/common.sh\" && dl_load_config required && dl_worktree_dir")"
 mv /tmp/.smoke-devloop-backup .devloop.json
 
 # Scenario store (dark-factory spec §2): defaults under state, sibling of the worktrees dir.
