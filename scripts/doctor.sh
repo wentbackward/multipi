@@ -57,14 +57,16 @@ else
     elif ! command -v node >/dev/null 2>&1; then
       optional "factory report skipped (node not found)"
     else
+      # SCEN_SRC env, not string interpolation: the path never enters the JS source, so a
+      # path containing a quote can't break (or alter) the one-shot — the stage's pattern.
       factory_json=$(
-        node --input-type=module -e "
-const { loadConfig, scenariosOn, resolvePaths } = await import('$factory_src/config.ts');
-const { scanStore, storeCounts } = await import('$factory_src/scenarios.ts');
+        SCEN_SRC=$factory_src node --input-type=module -e '
+const { loadConfig, scenariosOn, resolvePaths } = await import(process.env.SCEN_SRC + "/config.ts");
+const { scanStore, storeCounts } = await import(process.env.SCEN_SRC + "/scenarios.ts");
 const cfg = loadConfig(process.cwd());
 if (cfg) {
   const on = scenariosOn(cfg);
-  const source = cfg.scenarios === undefined ? (on ? 'preset' : 'default') : 'explicit';
+  const source = cfg.scenarios === undefined ? (on ? "preset" : "default") : "explicit";
   const report = { mode: cfg.factory, on, source };
   if (on) {
     const store = resolvePaths(cfg).scenariosDir;
@@ -73,11 +75,11 @@ if (cfg) {
     report.store = store;
     report.total = counts.total;
     report.required = counts.required;
-    report.invalid = files.filter((f) => !f.valid).map((f) => ({ file: f.file, reason: f.reason || 'unknown' }));
+    report.invalid = files.filter((f) => !f.valid).map((f) => ({ file: f.file, reason: f.reason || "unknown" }));
   }
   process.stdout.write(JSON.stringify(report));
 }
-" 2>/dev/null
+' 2>/dev/null
       )
       [ -n "$factory_json" ] || optional "factory report unavailable (node import failed)"
     fi
