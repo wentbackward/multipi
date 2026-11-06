@@ -41,19 +41,28 @@ tmp=""
 STAGE_LOG=""
 RUN_PGID_FILE=""
 MODULES_SRC=""
-# Invoked only via the EXIT/INT/TERM traps below (shellcheck cannot trace trap-by-name).
+# stop_run_group: SIGTERM the system-under-test process group (SIGKILL after 2 s) from the
+# pgid recorded at run start. Idempotent and quiet: a no-op when the group is unknown or
+# already reaped, so it is safe from the EXIT trap and from repeated calls.
+# Invoked via cleanup, which the traps invoke (shellcheck cannot trace trap-by-name).
 # shellcheck disable=SC2329
-cleanup() {
-  # Every exit path stops the system-under-test group (SIGTERM, SIGKILL after 2 s) and drops
-  # the stage's temp dir. The group id file is stage-owned state, not a log.
-  if [ -n "$MODULES_SRC" ] && [ -n "$RUN_PGID_FILE" ] && [ -f "$RUN_PGID_FILE" ]; then
-    SCEN_SRC="$MODULES_SRC" node --input-type=module -e '
+stop_run_group() {
+  [ -n "$MODULES_SRC" ] && [ -n "$RUN_PGID_FILE" ] && [ -f "$RUN_PGID_FILE" ] || return 0
+  SCEN_SRC=$MODULES_SRC node --input-type=module -e '
 const { stopGroup } = await import(process.env.SCEN_SRC + "/scenario-run.ts");
 const fs = await import("node:fs");
 const pgid = Number(fs.readFileSync(process.argv[1], "utf8").trim());
 if (Number.isInteger(pgid) && pgid > 0) await stopGroup(pgid);
 ' "$RUN_PGID_FILE" >/dev/null 2>&1 || true
-  fi
+}
+
+# Invoked only via the EXIT/INT/TERM traps below (shellcheck cannot trace trap-by-name).
+# shellcheck disable=SC2329
+cleanup() {
+  # Every exit path stops the system-under-test group and drops the stage's temp dir. The
+  # group id file is stage-owned state, not a log. All explicit exits (green, every red,
+  # dl_die) funnel through this trap — there is no second stop site in the stage.
+  stop_run_group
   [ -n "$tmp" ] && rm -rf -- "$tmp"
   return 0
 }
@@ -295,15 +304,8 @@ fs.appendFileSync(p.resultsFile, JSON.stringify(rec) + "\n");
 done
 unset MULTIPI_SCENARIO_FILE MULTIPI_SCENARIO_ID MULTIPI_SCENARIO_TARGET
 
-# --- stage end: stop the system group (SIGTERM, SIGKILL after 2 s) ------------------
-if [ -f "$RUN_PGID_FILE" ]; then
-  SCEN_SRC=$MODULES_SRC node --input-type=module -e '
-const { stopGroup } = await import(process.env.SCEN_SRC + "/scenario-run.ts");
-const fs = await import("node:fs");
-const pgid = Number(fs.readFileSync(process.argv[1], "utf8").trim());
-if (Number.isInteger(pgid) && pgid > 0) await stopGroup(pgid);
-' "$RUN_PGID_FILE" >/dev/null 2>&1 || true
-fi
+# The system-under-test group keeps running until this stage exits; the EXIT trap above
+# stops it (stop_run_group) — no second stop site here.
 
 # --- 4./5./6. score, seal, decide (math in node, the verdict lines in THIS script) ---
 agg_params=$(
