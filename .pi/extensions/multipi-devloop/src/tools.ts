@@ -353,6 +353,7 @@ function spawnAndTrack(
 		appendSystemPrompt: role.filePath,
 		tools: role.tools,
 		model: role.model,
+		role: role.name,
 		cwd: opts.worktree,
 		signal: controller.signal,
 		silenceMs: ctx.cfg.childSilenceMinutes * 60_000,
