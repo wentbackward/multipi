@@ -664,6 +664,8 @@ case "\$rule" in
              printf '{"id":"%s","satisfied":0.4,"required":true,"evidence":"SENTINEL-EVID-13","missing":"the alert stayed active"}\n' "\$id"
            fi ;;
   pass)    printf '{"id":"%s","satisfied":0.9,"required":true,"evidence":"SENTINEL-EVID-13 all fine","missing":""}\n' "\$id" ;;
+  half)    printf '{"id":"%s","satisfied":0.8,"required":true,"evidence":"SENTINEL-EVID-13 marginal","missing":""}\n' "\$id" ;;
+  full)    printf '{"id":"%s","satisfied":1.0,"required":true,"evidence":"SENTINEL-EVID-13 all fine","missing":""}\n' "\$id" ;;
   fail)    printf '{"id":"%s","satisfied":0.2,"required":true,"evidence":"SENTINEL-EVID-13","missing":"the alert stayed active"}\n' "\$id" ;;
   badjson) echo "the judge gave up, no verdict" ;;
   wrongid) printf '{"id":"some-other-scenario","satisfied":1.0,"required":true,"evidence":"e","missing":""}\n' ;;
@@ -794,6 +796,40 @@ expect "the passing scenario stayed at one judge run" "1" "$(cat "$work/judge-co
   pass "results hold one line per judge run (2 + 1)" || fail "results line count wrong"
 grep -q '"scenario":"t1-a","run":2' "$ss_logs/train-scenario-results.jsonl" &&
   pass "the second judge run is recorded" || fail "second run missing from results"
+
+# The min_satisfaction floor as the DECIDING factor (not a co-factor of an unsatisfied
+# scenario): every scenario at/above pass, mean below the floor -> red with ZERO
+# per-scenario lines; the companion at mean exactly ON the floor -> green (inclusive),
+# and its below-pass SCORED scenario is worded "below floor" so the green line cannot
+# read contradictory.
+reset_ss
+ss_cfg "$work/run-ok.sh" "bash $work/judge.sh"
+write_ss t1-a.md t1-a "Floor decider A" true
+write_ss t2-b.md t2-b "Floor decider B" false
+echo pass >"$work/judge-rules/t1-a"; echo half >"$work/judge-rules/t2-b"
+out=$(stage); rc=$?
+echo "$out"
+expect "the min_satisfaction floor alone decides red (no scenario below pass)" "1" "$rc"
+expect "the floor-red summary line is pinned" "scenarios red: mean 0.85 (2 judged, 0 unsatisfied)" \
+  "$(printf '%s\n' "$out" | tail -1)"
+[ "$(printf '%s\n' "$out" | grep -c '^scenario .* unsatisfied (')" = 0 ] &&
+  pass "no per-scenario unsatisfied line (the floor, not a scenario, is red)" ||
+  fail "an unsatisfied scenario line appeared although every scenario met pass"
+
+reset_ss
+ss_cfg "$work/run-ok.sh" "bash $work/judge.sh"
+write_ss fl-00.md fl-00 "No verdict" false
+echo badjson >"$work/judge-rules/fl-00"
+for i in 01 02 03 04 05 06 07 08 09; do
+  req=false; [ "$i" = 01 ] && req=true
+  write_ss "fl-$i.md" "fl-$i" "Full $i" "$req"
+  echo full >"$work/judge-rules/fl-$i"
+done
+out=$(stage); rc=$?
+echo "$out"
+expect "mean exactly on the floor is green (the comparison is inclusive)" "0" "$rc"
+expect "the floor-green summary words a below-pass scored scenario 'below floor'" \
+  "scenarios green: mean 0.90 (10 judged, 1 below floor)" "$(printf '%s\n' "$out" | tail -1)"
 
 # Verdict failure handling: every bad shape scores 0 with its error in the results file,
 # and each unsatisfied non-sealed scenario gets one red line.
