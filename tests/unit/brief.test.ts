@@ -129,3 +129,44 @@ test("analyst brief: focus mode embeds the operator feedback verbatim", () => {
 	assert.ok(brief.includes("the alert email arrived TWICE"), "feedback verbatim");
 	assert.ok(!brief.includes("## Ticket: <imperative title") === false, "still has the plan format");
 });
+
+// --- the first wall (spec §3): briefs never name the store ------------------
+
+// Realistic layout from a fixture config that DEFINES a store: the state dir
+// holds worktrees/, notes/ and the sibling scenarios/ (the store). The briefs
+// name two of the three; the store must stay unmentionable.
+const STATE = "/state/proj";
+const STORE_PATH = `${STATE}/scenarios`;
+
+function assertNoStore(brief: string, label: string): void {
+	assert.ok(!/scenario store/i.test(brief), `${label} brief names the store`);
+	assert.ok(!brief.includes(STORE_PATH), `${label} brief names the store path`);
+}
+
+test("implementer brief never names the store, even when the config defines one", () => {
+	const brief = assembleImplementerBrief({
+		ticket: 9, title: "Guard role children",
+		worktree: `${STATE}/worktrees/proj/issue-9`, branch: "feat/9-guard-role-children",
+		notes: `${STATE}/notes/pr-feat_9-guard-role-children.md`,
+		fastCheck: "npx tsc --noEmit", heavy: "/opt/multipi/scripts/heavy.sh",
+		remote: "origin", baseBranch: "main", portRange: [8621, 8630],
+		reviewNote: "dependency is stacked on an unmerged branch",
+	});
+	assert.ok(brief.includes(`${STATE}/worktrees/proj/issue-9`), "worktree still named");
+	assertNoStore(brief, "implementer");
+});
+
+test("reviewer brief never names the store, even when the config defines one", () => {
+	const brief = assembleReviewerBrief({
+		branch: "feat/9-x", baseBranch: "main", remote: "origin",
+		worktree: `${STATE}/worktrees/proj/issue-9`, ticket: 9, fastCheck: "npx tsc --noEmit",
+	});
+	assert.ok(brief.includes(`${STATE}/worktrees/proj/issue-9`), "worktree still named");
+	assertNoStore(brief, "reviewer");
+});
+
+test("verifier brief never names the store, even when the config defines one", () => {
+	const brief = assembleVerifierBrief({ task: "Audit the merged output of ticket 9", worktree: `${STATE}/worktrees/proj/issue-9` });
+	assert.ok(brief.includes(`${STATE}/worktrees/proj/issue-9`), "worktree still named");
+	assertNoStore(brief, "verifier");
+});
