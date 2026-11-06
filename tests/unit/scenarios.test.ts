@@ -83,6 +83,31 @@ test("rejects a scenario missing id", () => {
 	});
 });
 
+test("rejects path-traversal ids (id: ../../xwalk/outside/evil) with a named reason", () => {
+	withStore(
+		{ "evil.md": VALID.replace("t12-close-position-clears-alert", "../../xwalk/outside/evil") },
+		(_dir, files) => {
+			assert.equal(files[0].valid, false, "the traversal vector must not be a valid scenario");
+			assert.match(files[0].reason ?? "", /invalid id/, "named reason identifies the bad id");
+			// counts as invalid so the stage's store gate sees it
+			assert.equal(storeCounts(files).invalid, 1);
+		},
+	);
+	// other shapes outside the pinned charset are rejected the same way
+	for (const bad of ["a/b", "a b", "a\tb", "a:b", "id..", "../up"]) {
+		withStore({ "bad.md": VALID.replace("t12-close-position-clears-alert", bad) }, (_dir, files) => {
+			assert.equal(files[0].valid, false, `id ${JSON.stringify(bad)} must be invalid`);
+			assert.match(files[0].reason ?? "", /invalid id/);
+		});
+	}
+	// and every id inside the pinned charset still validates
+	for (const good of ["a.b_c-9", "holdout-1", "x".repeat(100)]) {
+		withStore({ "ok.md": VALID.replace("t12-close-position-clears-alert", good) }, (_dir, files) => {
+			assert.equal(files[0].valid, true, `id ${JSON.stringify(good)} must stay valid: ${files[0].reason ?? ""}`);
+		});
+	}
+});
+
 test("rejects a scenario missing title", () => {
 	withStore({ "no-title.md": VALID.replace(/^title: .*$\n/m, "") }, (_dir, files) => {
 		assert.equal(files[0].valid, false);
