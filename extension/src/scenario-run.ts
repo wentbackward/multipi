@@ -92,24 +92,32 @@ export async function spawnSystemRun(opts: {
 
 	const nextTargetLine = (): string | null => {
 		const buf = Buffer.alloc(65536);
-		let total = 0;
+		// Append PER READ: `buf` is overwritten on every readSync call, so combining several
+		// reads into one `subarray(0, total)` both drops the earlier bytes and exposes stale
+		// buffer garbage beyond the last partial fill as if it were output.
 		while (true) {
-			const bytesRead = readSync(fd, buf, 0, buf.length, cursor); // number; 0 at EOF
-			if (bytesRead === 0) break;
-			cursor += bytesRead;
-			total += bytesRead;
+			const n = readSync(fd, buf, 0, buf.length, cursor); // number; 0 at EOF
+			if (n === 0) break;
+			cursor += n;
+			pending += buf.subarray(0, n).toString("utf8");
 		}
-		if (total === 0) return scan(pending);
-		pending += buf.subarray(0, total).toString("utf8");
-		return scan(pending);
+		const line = scan(pending);
+		if (line === null) {
+			// Memo (review of #13): only complete lines were empty, so drop them and keep the
+			// trailing unfinished line — pending (and every poll's split) stays bounded by the
+			// longest unfinished line instead of the whole banner. O(n) total, was O(n²).
+			const nl = pending.lastIndexOf("\n");
+			pending = nl === -1 ? pending : pending.slice(nl + 1);
+		}
+		return line;
 		// Only COMPLETE lines count: the segment after the last \n may be mid-write and is
 		// re-scanned on the next poll once its newline (or more) has arrived.
 		function scan(text: string): string | null {
 			const segs = text.split(/\r?\n/);
 			const upto = /\r?\n$/.test(text) ? segs.length : segs.length - 1;
 			for (let i = 0; i < upto; i++) {
-				const line = segs[i].trim();
-				if (line !== "") return line;
+				const l = segs[i].trim();
+				if (l !== "") return l;
 			}
 			return null;
 		}
