@@ -2,7 +2,7 @@
 // dark-factory spec §5.1/§5.2). Real spawns of fake `sleep`/`echo` commands — offline, no network.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -48,6 +48,28 @@ test("spawnSystemRun exports the first non-empty printed line as the target", as
 	}
 });
 
+test("a verbose blank banner with a mid-write line still yields the right first-line target", async () => {
+	// Review vector for the scan memo: a server that spews thousands of EMPTY lines before
+	// speaking. The scan must (a) keep resuming an unterminated line across polls ("par" +
+	// "tial\n" = "partial") and (b) keep its working buffer bounded — it must not accumulate
+	// the whole banner and re-split it on every poll (O(n²) in banner size).
+	const dir = scratch();
+	try {
+		const r = await spawnSystemRun({
+			command:
+				`head -c 200000 /dev/zero | tr '\\0' '\\n'; printf 'par'; sleep 0.3; printf 'tial\\n'; ` +
+				`echo "http://127.0.0.1:8622/target"; sleep 30`,
+			runSeconds: 15,
+			logFile: path.join(dir, "run.log"),
+		});
+		assert.equal(r.ok, true, `expected ok, got ${JSON.stringify(r)}`);
+		if (!r.ok) return;
+		assert.equal(r.target, "partial", "first non-empty COMPLETE line wins; the mid-write is joined");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("a run that exits before printing is a red reason, not a hang", async () => {
 	const dir = scratch();
 	try {
@@ -59,6 +81,49 @@ test("a run that exits before printing is a red reason, not a hang", async () =>
 		assert.equal(r.ok, false, `expected failure, got ${JSON.stringify(r)}`);
 		if (r.ok) return;
 		assert.match(r.reason, /exited before printing/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("a >64KB first poll keeps every byte: no dropped middle, no stale-buffer line", async () => {
+	// Deterministic form of the banner race: pre-populate the run log (spawnSystemRun appends
+	// and scans from the start) with 200KB of empty lines ending in an UNTERMINATED "par".
+	// The first poll therefore reads >64KB in several readSync iterations. A reader that
+	// combines those reads wrong either drops the tail or exposes stale buffer bytes as a
+	// phantom newline — both were reachable pre-fix (observed target "par" from a log whose
+	// line 200001 was "partial").
+	const dir = scratch();
+	try {
+		const log = path.join(dir, "run.log");
+		writeFileSync(log, "\n".repeat(200000) + "par");
+		const r = await spawnSystemRun({
+			command: "sleep 0.2; printf 'tial\\n'; echo target-line; sleep 30",
+			runSeconds: 10,
+			logFile: log,
+		});
+		assert.equal(r.ok, true, `expected ok, got ${JSON.stringify(r)}`);
+		if (!r.ok) return;
+		assert.equal(r.target, "partial", "the mid-write joins across the 64KB boundary");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("a CRLF target whose \\r and \\n arrive in separate writes is not lost", async () => {
+	// The scan-memo trims pending to the trailing unfinished line whenever nothing complete
+	// was found; it must therefore keep a trailing "\r" that belongs to an unfinished line,
+	// or the CRLF target vanishes when the "\n" lands in a later poll.
+	const dir = scratch();
+	try {
+		const r = await spawnSystemRun({
+			command: `echo -n "http://127.0.0.1:8623/crlf"; printf '\\r'; sleep 0.3; printf '\\n'; sleep 30`,
+			runSeconds: 10,
+			logFile: path.join(dir, "run.log"),
+		});
+		assert.equal(r.ok, true, `expected ok, got ${JSON.stringify(r)}`);
+		if (!r.ok) return;
+		assert.equal(r.target, "http://127.0.0.1:8623/crlf");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
