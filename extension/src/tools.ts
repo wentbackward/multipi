@@ -403,7 +403,7 @@ function spawnAndTrack(
 	}).then((res) => {
 		controllers.delete(key);
 		const now = Date.now();
-	const status = res.aborted ? "interrupted" : classifyReport(role.name, res.finalText);
+		const status = res.aborted ? "interrupted" : classifyReport(role.name, res.finalText);
 		childreg.updateChild(key, { status, endedAt: now }, { at: now, kind: "end", text: `finished (${status}, $${res.usage.cost.toFixed(2)})` });
 		return res;
 	});
