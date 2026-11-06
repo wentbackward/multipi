@@ -49,6 +49,9 @@ emit "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":
 if [ -n "${FAKE_PI_ECHO_ENV:-}" ]; then
   printf "%s" "${MULTIPI_CHILD:-unset}" >"$FAKE_PI_ECHO_ENV"
 fi
+if [ -n "${FAKE_PI_ECHO_ROLE:-}" ]; then
+  printf "%s" "${MULTIPI_CHILD_ROLE:-unset}" >"$FAKE_PI_ECHO_ROLE"
+fi
 if [ -n "${FAKE_PI_ECHO_TASK:-}" ]; then
   task=${task#?}
   esc=${task//\"/\\\"}
