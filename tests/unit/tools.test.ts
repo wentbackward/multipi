@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { makeTools, evaluateSettle, buildContext, cancelImpl } from "../../extension/src/tools.ts";
 import { makeFixture } from "../fixtures.ts";
@@ -98,6 +98,24 @@ test("dispatch(implementer) runs the child, opens the PR, labels in-review", asy
 		const labels = (existsSync(path.join(fx.dir, "gh", "labels", String(n))) ? execFileSync("cat", [path.join(fx.dir, "gh", "labels", String(n))]).toString().trim().split("\n") : []);
 		assert.ok(labels.includes("dl/in-progress") && labels.includes("dl/in-review"), JSON.stringify(labels));
 	} finally { fx.cleanup(); }
+});
+
+test("dispatch stamps the child with its role (MULTIPI_CHILD_ROLE via the spawn env)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", checks: [{ name: "unit", command: "true", heavy: false }], format: null, format_extensions: null, fast_check: "true" }));
+	setupEnv(fx);
+	const roleFile = path.join(fx.dir, "role.txt");
+	process.env.FAKE_PI_ECHO_ROLE = roleFile;
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Role plumbing check");
+		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		assert.equal(res.isError ?? false, false, textOf(res));
+		assert.ok(existsSync(roleFile), "the child saw the FAKE_PI_ECHO_ROLE seam");
+		assert.equal(readFileSync(roleFile, "utf8"), "implementer", "child env carried its role name");
+	} finally {
+		delete process.env.FAKE_PI_ECHO_ROLE;
+		fx.cleanup();
+	}
 });
 
 test("dispatch refuses a second implementer on the same ticket while one is in flight", async () => {
