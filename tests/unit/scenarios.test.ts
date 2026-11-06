@@ -5,7 +5,7 @@ import test from "node:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { scanStore, storeCounts, isSealed, parseVerdict, type ScenarioFile } from "../../extension/src/scenarios.ts";
+import { scanStore, storeCounts, isSealed, parseVerdict, foldJudgeRun, type ScenarioFile } from "../../extension/src/scenarios.ts";
 
 const VALID = `---
 id: t12-close-position-clears-alert
@@ -283,4 +283,33 @@ test("parseVerdict rejects malformed JSON, arrays, and missing fields", () => {
 	assert.equal(parseVerdict(JSON.stringify(verdict({ evidence: undefined })), id).ok, false);
 	assert.equal(parseVerdict(JSON.stringify(verdict({ missing: undefined })), id).ok, false);
 	assert.equal(parseVerdict("", id).ok, false);
+});
+
+// --- foldJudgeRun (spec §5.2: the whole verdict policy in one place) ---
+test("foldJudgeRun: exit 0 delegates to parseVerdict (valid stays valid, invalid stays invalid)", () => {
+	const id = "t12-close-position-clears-alert";
+	const good = foldJudgeRun("chatter\n" + JSON.stringify(verdict()) + "\n", id, 0);
+	assert.equal(good.ok, true);
+	if (good.ok) assert.equal(good.verdict.satisfied, 0.95);
+	const bad = foldJudgeRun("no json here", id, 0);
+	assert.equal(bad.ok, false);
+	if (!bad.ok) assert.match(bad.reason, /[Jj][Ss][Oo][Nn]/);
+});
+
+test("foldJudgeRun: a non-zero judge exit discards even a WELL-FORMED verdict (never green-lights)", () => {
+	const id = "t12-close-position-clears-alert";
+	const r = foldJudgeRun(JSON.stringify(verdict()), id, 3);
+	assert.equal(r.ok, false, "a healthy-looking verdict from an unhealthy judge must score 0");
+	if (!r.ok) {
+		assert.match(r.reason, /judge exited 3/);
+		assert.match(r.reason, /discarded/);
+	}
+});
+
+test("foldJudgeRun: a non-zero judge exit wraps the parse reason on a bad transcript", () => {
+	const id = "t12-close-position-clears-alert";
+	const r = foldJudgeRun("about to die", id, 3);
+	assert.equal(r.ok, false);
+	if (!r.ok) assert.match(r.reason, /^judge exited 3; /);
+	if (!r.ok) assert.match(r.reason, /not a JSON verdict/);
 });
