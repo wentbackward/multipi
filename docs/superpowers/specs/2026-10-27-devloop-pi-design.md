@@ -378,11 +378,16 @@ child pid) so their entire descendant tree is signallable as one unit:
   never fire while the child is long dead. `close` remains the fast path; a 150 ms
   post-exit fallback settles (and sweeps) if the pipes stay held.
 
-**Review classification (bug fix).** Dispatch entries are classified on the ROLE'S contract:
-reviewers end with `VERDICT: APPROVE` / `VERDICT: CHANGES REQUIRED` (both a finished job →
-`done`; a reviewer report without a verdict is `crashed`), all other roles on
-`STATUS: DONE` / `STATUS: BLOCKED`. Previously every successful review was recorded
-`crashed` (observed live in two projects); state consumers must never be lied to.
+**Report classification.** Dispatch entries are classified ONE UNIFORM way, anchored on the
+report's LAST non-empty line checked against the role's contract: implementer / scenario-writer /
+analyst / verifier end with `STATUS: DONE` / `STATUS: BLOCKED` (blocked → `blocked`), the
+code-reviewer ends with `VERDICT: APPROVE` / `VERDICT: CHANGES [REQUIRED]` (both a finished
+job → `done`). Marker mentions anywhere else in the body (quotes, documented contracts) can
+never decide; a report lacking a terminal marker is `crashed`. History: reviews were first
+classified on the implementer's `STATUS` contract (every successful review recorded `crashed`,
+observed live in two projects), then on WHOLE-TEXT scans (an analyst plan quoting
+`STATUS: BLOCKED` as documentation was recorded `blocked`, observed live 2026-11-06, ticket
+#22); state consumers must never be lied to.
 
 **Worktree lifecycle.** `worktree_dir` (config; default `~/.multipi/<repo>/worktrees/<repo>`,
 absolute / `~/` / relative-to-repo-parent) holds all issue worktrees
