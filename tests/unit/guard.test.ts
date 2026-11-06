@@ -134,11 +134,12 @@ test("ignores tools outside the guarded set even when they name the store", () =
 const GENV = (stateHome: string) => ({ HOME: "/h", MULTIPI_HOME: stateHome } as NodeJS.ProcessEnv);
 
 test("initGuard: scenarios block present turns the guard on with the resolved store dir", () => {
-	const fx = makeFixture(JSON.stringify({ factory: "collaborative", scenarios: { dir: `/abs/${fx.dir}/store` } }));
+	const store = mkdtempSync(path.join(tmpdir(), "multipi-guard-store-"));
+	const fx = makeFixture(JSON.stringify({ factory: "collaborative", scenarios: { dir: store } }));
 	try {
 		const g = initGuard(fx.repo, GENV(`${fx.dir}/state`));
 		assert.equal(g.enabled, true);
-		assert.equal(g.storeDir, `/abs/${fx.dir}/store`);
+		assert.equal(g.storeDir, store);
 	} finally { fx.cleanup(); }
 });
 
