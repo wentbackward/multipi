@@ -134,7 +134,7 @@ export async function spawnSystemRun(opts: {
 		if (line !== null) {
 			// Hand the group back to the stage (it stops it at stage end): without unref the
 			// still-running server would pin this runner's event loop for its whole lifetime.
-			proc.unref?.();
+			proc.unref();
 			return { ok: true, pgid, target: line };
 		}
 		if (!groupAlive(pgid)) return { ok: false, reason: "run exited before printing a target" };
