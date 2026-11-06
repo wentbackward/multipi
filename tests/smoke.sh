@@ -618,6 +618,305 @@ echo "$out" | grep -q '^MISSING extension runtime probe (import check did not ru
 
 rm -rf "$EXT" node_modules "$work/bin-nonode" "$work/bin-badnode"
 
+# --- scenario-stage.sh (dark-factory spec §5) ------------------------------------
+# The stage is a script that decides green/red itself: run the system in its own process
+# group (first line = target), judge every scenario with a CANNED bash judge (deterministic,
+# no network), rejudge once (better run counts), seal, score. The leak sentinels in the
+# scenario bodies and judge evidence must never reach the stage's stdout.
+store_dir="$work/home/project/scenarios"
+rm -rf "$store_dir" && mkdir -p "$store_dir" "$work/judge-rules"
+ss_logs="$work/home/project/logs"
+
+# write_ss FILE ID TITLE REQUIRED: a scenario file whose body carries the leak sentinel.
+write_ss() {
+  printf -- '---\nid: %s\ntitle: %s\nrequired: %s\n---\n## Steps\ndo the SENTINEL-SCENE-13 thing\n' "$2" "$3" "$4" >"$store_dir/$1"
+}
+
+# ss_cfg RUNCMD [JUDGECMD [JUDGE_SECS [RUN_SECS [SEALED]]]]: a project config whose scenarios
+# block drives the stage. An empty JUDGECMD omits the judge key (default pi judge).
+ss_cfg() {
+  local js=${3:-5} rs=${4:-5} seal=${5:-0} judge_entry=""
+  [ -n "${2:-}" ] && judge_entry=", \"judge\": \"$2\""
+  cat >.devloop.json <<EOF
+{
+  "base_branch": "main",
+  "fast_check": "test ! -e fast-fail",
+  "checks": [{"name": "unit", "command": "./check.sh", "summary": "passed|failed"}],
+  "heavy": {"slots": 2, "port_env": "SMOKE_PORT", "port_base": 9100, "port_step": 10, "poll_seconds": 1},
+  "scenarios": {"run_seconds": $rs, "judge_seconds": $js, "pass": 0.8, "min_satisfaction": 0.9, "sealed": $seal, "run": "$1"$judge_entry}
+}
+EOF
+}
+
+# Canned judge: deterministic verdicts keyed by $work/judge-rules/<id>; counts its own
+# invocations per id; records the env seams it received. Evidence carries the leak sentinel.
+cat >"$work/judge.sh" <<EOF
+#!/bin/sh
+WORK=$work
+id="\$MULTIPI_SCENARIO_ID"
+cnt="\$WORK/judge-count-\$id"; n=\$(cat "\$cnt" 2>/dev/null || echo 0); n=\$((n + 1)); echo \$n >"\$cnt"
+echo "\$id|\$MULTIPI_SCENARIO_TARGET|\$MULTIPI_SCENARIO_FILE" >"\$WORK/judge-seams-\$id"
+rule=\$(cat "\$WORK/judge-rules/\$id" 2>/dev/null || echo pass)
+case "\$rule" in
+  rerun)   if [ "\$n" -ge 2 ]; then
+             printf '{"id":"%s","satisfied":1.0,"required":true,"evidence":"second run ok SENTINEL-EVID-13","missing":""}\n' "\$id"
+           else
+             printf '{"id":"%s","satisfied":0.4,"required":true,"evidence":"SENTINEL-EVID-13","missing":"the alert stayed active"}\n' "\$id"
+           fi ;;
+  pass)    printf '{"id":"%s","satisfied":0.9,"required":true,"evidence":"SENTINEL-EVID-13 all fine","missing":""}\n' "\$id" ;;
+  fail)    printf '{"id":"%s","satisfied":0.2,"required":true,"evidence":"SENTINEL-EVID-13","missing":"the alert stayed active"}\n' "\$id" ;;
+  badjson) echo "the judge gave up, no verdict" ;;
+  wrongid) printf '{"id":"some-other-scenario","satisfied":1.0,"required":true,"evidence":"e","missing":""}\n' ;;
+  range)   printf '{"id":"%s","satisfied":1.5,"required":true,"evidence":"e","missing":""}\n' "\$id" ;;
+  exit3)   echo "about to die" >&2; exit 3 ;;
+esac
+exit 0
+EOF
+
+# System-under-test stand-ins: cooperative and TERM-resistant sleepers, a silent and an
+# immediate-exit run. The leader pid lands in a file so the "no sleeper survives" assertion
+# can kill -0 the exact process.
+cat >"$work/run-ok.sh" <<EOF
+#!/bin/sh
+echo "target-line-13"
+echo \\$\$ >"$work/run-leader.pid"
+exec sleep 30
+EOF
+cat >"$work/run-stubborn.sh" <<EOF
+#!/bin/sh
+echo "target-stubborn-13"
+echo \\$\$ >"$work/run-leader.pid"
+trap '' TERM
+exec sleep 30
+EOF
+cat >"$work/run-silent.sh" <<EOF
+#!/bin/sh
+echo \\$\$ >"$work/run-leader.pid"
+trap '' TERM
+exec sleep 30
+EOF
+cat >"$work/run-exit.sh" <<EOF
+#!/bin/sh
+exit 9
+EOF
+# Contract-checking stand-in for the default judge's pi binary: verifies -p, the
+# scenario-judge role flag and all three env seams, then emits one valid verdict.
+cat >"$work/fakepi" <<'EOF'
+#!/bin/sh
+[ "$1" = "-p" ] || exit 7
+prev=""; role=no
+for a in "$@"; do
+  [ "$prev" = "--append-system-prompt" ] && case "$a" in *scenario-judge.md) role=yes ;; esac
+  prev="$a"
+done
+[ "$role" = "yes" ] || exit 8
+[ -n "$MULTIPI_SCENARIO_ID" ] && [ -n "$MULTIPI_SCENARIO_FILE" ] && [ -n "$MULTIPI_SCENARIO_TARGET" ] || exit 9
+printf '{"id":"%s","satisfied":0.95,"required":true,"evidence":"fake ok SENTINEL-EVID-13","missing":""}\n' "$MULTIPI_SCENARIO_ID"
+exit 0
+EOF
+chmod +x "$work/fakepi" "$work/run-ok.sh" "$work/run-stubborn.sh" "$work/run-silent.sh" "$work/run-exit.sh"
+
+stage() { bash "$plugin/scripts/scenario-stage.sh" 2>&1; }
+reset_ss() { # fresh counters/seams/rules and store between cases
+  rm -f "$work"/judge-count-* "$work"/judge-seams-* "$work"/judge-rules/* "$work/run-leader.pid" "$work/judge-cap.pid"
+  rm -rf "$store_dir" && mkdir -p "$store_dir"
+}
+
+# Usage and config errors.
+out=$(bash "$plugin/scripts/scenario-stage.sh" bogus 2>&1); rc=$?
+expect "stage with an argument is a usage error" "2" "$rc"
+echo "$out" | grep -q "usage: scenario-stage.sh" && pass "stage prints its usage" || fail "no stage usage message"
+mv .devloop.json .devloop.json.ss-bak
+out=$(stage); rc=$?
+expect "stage without a config is a usage/config error" "2" "$rc"
+mv .devloop.json.ss-bak .devloop.json
+
+# Store off: skipped, exit 0, nothing started.
+mkcfg ''
+reset_ss
+out=$(stage); rc=$?
+expect "stage exits 0 when the store is off" "0" "$rc"
+expect "store off prints the skipped line" "scenarios skipped" "$out"
+
+# Green baseline: configured judge template (canned bash), TERM-resistant run proves the
+# stage-end SIGKILL escalation, all seams and log files asserted, leak sentinels must not
+# appear on the stage stdout.
+reset_ss
+ss_cfg "$work/run-stubborn.sh" "bash $work/judge.sh"
+write_ss t1-a.md t1-a "Alpha works" true
+write_ss t2-b.md t2-b "Beta works" false
+echo pass >"$work/judge-rules/t1-a"; echo pass >"$work/judge-rules/t2-b"
+out=$(stage); rc=$?
+echo "$out"
+expect "stage is green when all verdicts pass" "0" "$rc"
+expect "green summary line is pinned" "scenarios green: mean 0.90 (2 judged, 0 unsatisfied)" "$out"
+expect "the run's first line reaches the judges as MULTIPI_SCENARIO_TARGET" \
+  "target-stubborn-13" "$(cut -d'|' -f2 "$work/judge-seams-t1-a")"
+expect "the scenario file seam names the store file" \
+  "$store_dir/t1-a.md" "$(cut -d'|' -f3 "$work/judge-seams-t1-a")"
+grep -q "SENTINEL-EVID-13" "$ss_logs/train-scenario-judge/t1-a-1/transcript.log" &&
+  pass "the configured judge template runs the canned script (transcript kept)" ||
+  fail "no judge transcript from the canned judge"
+expect "a passing scenario is judged exactly once" "1 1" \
+  "$(cat "$work/judge-count-t1-a") $(cat "$work/judge-count-t2-b")"
+[ -d "$ss_logs/train-scenario-judge/t1-a-1" ] && [ -f "$ss_logs/train-scenarios.log" ] &&
+  [ -f "$ss_logs/train-scenario-results.jsonl" ] && [ -f "$ss_logs/train-scenarios-run.log" ] &&
+  pass "all four stage logs exist in the logs dir" || fail "a stage log is missing"
+grep -q "target-stubborn-13" "$ss_logs/train-scenarios-run.log" &&
+  pass "the system output lands in train-scenarios-run.log" || fail "run log wrong"
+grep -q '"scenario":"t1-a","run":1,"sealed":false' "$ss_logs/train-scenario-results.jsonl" &&
+  grep '"scenario":"t1-a","run":1' "$ss_logs/train-scenario-results.jsonl" | grep -q '"valid":true' &&
+  pass "results line carries scenario/run/sealed/valid/result" || fail "results line shape wrong"
+leader=$(cat "$work/run-leader.pid" 2>/dev/null)
+[ -n "$leader" ] && ! kill -0 "$leader" 2>/dev/null &&
+  pass "no TERM-resistant sleeper survives stage end (kill -0 fails)" ||
+  fail "the run's process group survived the stage"
+printf '%s' "$out" | grep -q "SENTINEL-SCENE-13" &&
+  fail "scenario text leaked onto stage stdout" || pass "no scenario text on stage stdout"
+printf '%s' "$out" | grep -q "SENTINEL-EVID-13" &&
+  fail "judge evidence leaked onto stage stdout" || pass "no judge evidence on stage stdout"
+printf '%s' "$out" | grep -qF "$store_dir" &&
+  fail "the store path leaked onto stage stdout" || pass "no store path on stage stdout"
+
+# Rejudge-once: run 1 scores below pass, run 2 passes -> green, BETTER run counts, exactly
+# two judge runs for that scenario, one for the already-passing one.
+reset_ss
+ss_cfg "$work/run-ok.sh" "bash $work/judge.sh"
+write_ss t1-a.md t1-a "Alpha works" true
+write_ss t2-b.md t2-b "Beta works" false
+echo rerun >"$work/judge-rules/t1-a"; echo pass >"$work/judge-rules/t2-b"
+out=$(stage); rc=$?
+expect "rejudge once: better run counts -> green" "0" "$rc"
+expect "the mean uses the better (second) run" "scenarios green: mean 0.95 (2 judged, 0 unsatisfied)" "$out"
+expect "the below-pass scenario was judged exactly twice" "2" "$(cat "$work/judge-count-t1-a")"
+expect "the passing scenario stayed at one judge run" "1" "$(cat "$work/judge-count-t2-b")"
+[ "$(wc -l <"$ss_logs/train-scenario-results.jsonl" | tr -d ' ')" = 3 ] &&
+  pass "results hold one line per judge run (2 + 1)" || fail "results line count wrong"
+grep -q '"scenario":"t1-a","run":2' "$ss_logs/train-scenario-results.jsonl" &&
+  pass "the second judge run is recorded" || fail "second run missing from results"
+
+# Verdict failure handling: every bad shape scores 0 with its error in the results file,
+# and each unsatisfied non-sealed scenario gets one red line.
+reset_ss
+ss_cfg "$work/run-ok.sh" "bash $work/judge.sh"
+write_ss t1-a.md t1-a "Low score" true
+write_ss t2-b.md t2-b "No JSON" false
+write_ss t3-c.md t3-c "Wrong id" false
+write_ss t4-d.md t4-d "Out of range" false
+write_ss t5-e.md t5-e "Dies anyway" false
+echo fail    >"$work/judge-rules/t1-a"
+echo badjson >"$work/judge-rules/t2-b"
+echo wrongid >"$work/judge-rules/t3-c"
+echo range   >"$work/judge-rules/t4-d"
+echo exit3   >"$work/judge-rules/t5-e"
+out=$(stage); rc=$?
+echo "$out"
+expect "invalid and failing verdicts make the stage red" "1" "$rc"
+expect "every unsatisfied scenario gets its own line" "5" \
+  "$(printf '%s\n' "$out" | grep -c '^scenario .* unsatisfied (')"
+printf '%s' "$out" | grep -qF "scenario t1-a unsatisfied (0.20, required): the alert stayed active" &&
+  pass "low-score line carries score, tag and the missing text" || fail "low-score line wrong"
+printf '%s' "$out" | grep -qF "scenario t2-b unsatisfied (0.00, scored): last line is not a JSON verdict" &&
+  pass "non-JSON transcript is named with its parse error" || fail "non-JSON line wrong"
+printf '%s' "$out" | grep -qF "scenario t4-d unsatisfied (0.00, scored): verdict satisfied out of range 0..1" &&
+  pass "out-of-range score is rejected" || fail "range rejection missing"
+grep '"scenario":"t3-c"' "$ss_logs/train-scenario-results.jsonl" | grep -q "id mismatch" &&
+  pass "wrong-id verdict is rejected with its error" || fail "wrong-id not rejected"
+grep '"scenario":"t5-e"' "$ss_logs/train-scenario-results.jsonl" | grep -q '"exitCode":3' &&
+  pass "the non-zero judge exit is recorded" || fail "judge exit code not recorded"
+grep '"scenario":"t5-e"' "$ss_logs/train-scenario-results.jsonl" | grep -q '"valid":false' &&
+  pass "the dying judge's run is scored invalid" || fail "dying judge scored valid"
+expect "red summary line is pinned" "scenarios red: mean 0.04 (5 judged, 5 unsatisfied)" \
+  "$(printf '%s\n' "$out" | tail -1)"
+
+# judge_seconds cap: a TERM-resistant judge is killed (kill -0 fails) and the run is red
+# with the cap overrun recorded.
+reset_ss
+write_ss t1-a.md t1-a "Slow judge" true
+echo pass >"$work/judge-rules/t1-a"
+cat >"$work/judge-cap.sh" <<EOF
+#!/bin/sh
+echo \\$\$ >"$work/judge-cap.pid"
+trap '' TERM
+exec sleep 30
+EOF
+ss_cfg "$work/run-ok.sh" "bash $work/judge-cap.sh" 1
+out=$(stage); rc=$?
+expect "a judge cap overrun is red" "1" "$rc"
+printf '%s' "$out" | grep -qF "scenario t1-a unsatisfied (0.00, required): judge_seconds cap (1s) exceeded" &&
+  pass "the cap overrun is recorded as the scenario error" || fail "cap overrun not recorded"
+cap_pid=$(cat "$work/judge-cap.pid" 2>/dev/null)
+[ -n "$cap_pid" ] && ! kill -0 "$cap_pid" 2>/dev/null &&
+  pass "no TERM-resistant judge survives the cap (kill -0 fails)" || fail "judge survived the cap"
+
+# run failures: silence past run_seconds and exiting before printing are both red, and the
+# run's group is stopped either way.
+reset_ss
+ss_cfg "$work/run-silent.sh" "bash $work/judge.sh" 5 1
+write_ss t1-a.md t1-a "Never heard of it" true
+out=$(stage); rc=$?
+expect "a silent run is red" "1" "$rc"
+expect "the silence reason is printed" \
+  "scenarios red: system run failed (run silent for 1s past its first-line wait)" "$out"
+sl_pid=$(cat "$work/run-leader.pid" 2>/dev/null)
+[ -n "$sl_pid" ] && ! kill -0 "$sl_pid" 2>/dev/null &&
+  pass "the silent run's sleeper was killed" || fail "silent run's group survived"
+
+reset_ss
+ss_cfg "$work/run-exit.sh" "bash $work/judge.sh"
+write_ss t1-a.md t1-a "Dies on boot" true
+out=$(stage); rc=$?
+expect "a run that exits before printing is red" "1" "$rc"
+expect "the early-exit reason is printed" \
+  "scenarios red: system run failed (run exited before printing a target)" "$out"
+
+# Invalid store files: red with the COUNT only — never a name, never the store path.
+reset_ss
+ss_cfg "$work/run-ok.sh" "bash $work/judge.sh"
+write_ss t1-a.md t1-a "Valid one" true
+printf -- '---\nid: t9-x\n' >"$store_dir/t9-x.md" # unclosed frontmatter
+out=$(stage); rc=$?
+expect "invalid store files are red" "1" "$rc"
+expect "the invalid-file line carries the count, not names" \
+  "scenarios red: 1 invalid scenario file(s)" "$out"
+printf '%s' "$out" | grep -qF "t9-x" &&
+  fail "an invalid file was named on stage stdout" || pass "invalid file not named"
+
+# Sealed share 1.0: every scenario is sealed — judged and counted, never named.
+reset_ss
+ss_cfg "$work/run-ok.sh" "bash $work/judge.sh" 5 5 1.0
+write_ss t1-a.md t1-a "Secret required" true
+write_ss t2-b.md t2-b "Secret scored" false
+echo fail >"$work/judge-rules/t1-a"; echo pass >"$work/judge-rules/t2-b"
+out=$(stage); rc=$?
+echo "$out"
+expect "an unsatisfied sealed REQUIRED scenario is red" "1" "$rc"
+printf '%s' "$out" | grep -qE 't1-a|t2-b' &&
+  fail "a sealed scenario was named on stage stdout" || pass "sealed scenarios are never named"
+expect "the sealed summary line is pinned" "scenarios sealed: 2 judged, 1 unsatisfied" \
+  "$(printf '%s\n' "$out" | grep 'scenarios sealed')"
+expect "the red summary counts sealed scenarios" "scenarios red: mean 0.55 (2 judged, 1 unsatisfied)" \
+  "$(printf '%s\n' "$out" | tail -1)"
+
+# Default judge: no judge key -> pi -p with the scenario-judge role, MULTIPI_PI_BIN honoured.
+reset_ss
+ss_cfg "$work/run-ok.sh" ""
+write_ss t1-a.md t1-a "Fake-pi judged" true
+echo pass >"$work/judge-rules/t1-a" # not read; fakepi ignores rules
+out=$(MULTIPI_PI_BIN="$work/fakepi" bash "$plugin/scripts/scenario-stage.sh" 2>&1); rc=$?
+expect "default judge runs pi -p (via MULTIPI_PI_BIN) with the scenario-judge role" "0" "$rc"
+expect "the default judge's verdict scored green" "scenarios green: mean 0.95 (1 judged, 0 unsatisfied)" "$out"
+
+# A store-on config without scenarios.run is a config error, not a red verdict.
+mkcfg '"scenarios": {"judge": "bash '$work'/judge.sh"}'
+reset_ss
+out=$(stage); rc=$?
+expect "a store without scenarios.run is a usage/config error" "2" "$rc"
+echo "$out" | grep -q "scenarios.run is not configured" &&
+  pass "the missing run command is named" || fail "missing-run message absent"
+mkcfg '' # restore the base fixture config
+rm -rf "$store_dir"
+
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
 MULTIPI_PLUGIN_DIR="$plugin" env -u MULTIPI_CHILD node --input-type=module -e '
 const pi = { registered: [], handlers: {}, commands: [], registerTool(t) { this.registered.push(t.name); }, registerCommand(n) { this.commands.push(n); }, on(ev, h) { this.handlers[ev] = h; } };
