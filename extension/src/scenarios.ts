@@ -146,6 +146,20 @@ function isJsonObject(line: string): boolean {
 	}
 }
 
+/**
+ * Fold ONE judge run into a verdict (spec §5.2, verdict policy in one place): parse the
+ * transcript with parseVerdict, then apply the exit-code rule — a judge that exits non-zero
+ * scores 0 EVEN WHEN a well-formed verdict line exists: an unhealthy judge never green-lights.
+ * The exit code rides the reason string ("judge exited N; …") so the results line stays
+ * id-only and the stage stays free of verdict logic.
+ */
+export function foldJudgeRun(output: string, expectedId: string, exitCode: number): VerdictResult {
+	const v = parseVerdict(output, expectedId);
+	if (exitCode === 0) return v;
+	const prefix = `judge exited ${exitCode}; `;
+	return { ok: false, reason: v.ok ? prefix + "verdict discarded (non-zero exit)" : prefix + v.reason };
+}
+
 // --- frontmatter (spec §2 file format) ---
 
 interface Frontmatter {

@@ -250,8 +250,9 @@ process.stdout.write(JSON.stringify(await spawnJudge(JSON.parse(process.argv[1])
       j_code=$(json_get exitCode <<<"$judge_out")
     fi
     # One results line per judge run: scenario, run, sealed, valid, result/error. The node
-    # one-shot also parses the transcript with the SHARED parseVerdict (scenarios.ts) and
-    # prints the winning score ("" when the verdict is invalid) — no verdict logic in bash.
+    # one-shot also folds the run with the SHARED foldJudgeRun (scenarios.ts: parse + the
+    # non-zero-exit rule) and prints the winning score ("" when the verdict is invalid) —
+    # no verdict logic in bash.
     sealed_bool=false
     [ "$sseal" = "true" ] && sealed_bool=true
     spawn_err_json=null
@@ -263,7 +264,7 @@ process.stdout.write(JSON.stringify(await spawnJudge(JSON.parse(process.argv[1])
     score=$(
       node --input-type=module -e '
 const fs = await import("node:fs");
-const { parseVerdict } = await import(process.env.SCEN_SRC + "/scenarios.ts");
+const { foldJudgeRun } = await import(process.env.SCEN_SRC + "/scenarios.ts");
 const p = JSON.parse(process.argv[1]);
 const fold = (s) => String(s).replace(/\s+/g, " ").trim();
 const rec = { scenario: p.id, run: p.run, sealed: p.sealed, exitCode: p.exitCode ?? null };
@@ -271,14 +272,8 @@ if (p.spawnError !== null) {
   rec.valid = false;
   rec.error = fold(p.spawnError);
 } else {
-  const v = parseVerdict(fs.readFileSync(p.transcript, "utf8"), p.id);
-  // A non-zero judge exit scores 0 even when a well-formed verdict line exists:
-  // an unhealthy judge never green-lights (spec §5.2).
-  if (p.exitCode !== 0) {
-    rec.valid = false;
-    const ex = "judge exited " + p.exitCode + "; ";
-    rec.error = v.ok ? ex + "verdict discarded (non-zero exit)" : ex + fold(v.reason);
-  } else if (v.ok) {
+  const v = foldJudgeRun(fs.readFileSync(p.transcript, "utf8"), p.id, p.exitCode);
+  if (v.ok) {
     rec.valid = true;
     rec.result = {
       id: v.verdict.id, satisfied: v.verdict.satisfied, required: v.verdict.required,
