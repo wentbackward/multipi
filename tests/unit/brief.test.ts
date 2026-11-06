@@ -132,9 +132,10 @@ test("analyst brief: focus mode embeds the operator feedback verbatim", () => {
 
 // --- the first wall (spec §3): briefs never name the store ------------------
 
-// Realistic layout from a fixture config that DEFINES a store: the state dir
-// holds worktrees/, notes/ and the sibling scenarios/ (the store). The briefs
-// name two of the three; the store must stay unmentionable.
+// Realistic layout: the state dir holds worktrees/ and notes/ (which the briefs name)
+// plus a sibling scenarios/ dir that stands in for the store. The assemblers take
+// no config argument, so the store path enters as a counter-example only — it must
+// appear in NO input field and in NO output.
 const STATE = "/state/proj";
 const STORE_PATH = `${STATE}/scenarios`;
 
@@ -143,7 +144,7 @@ function assertNoStore(brief: string, label: string): void {
 	assert.ok(!brief.includes(STORE_PATH), `${label} brief names the store path`);
 }
 
-test("implementer brief never names the store, even when the config defines one", () => {
+test("implementer brief never names the scenario store or its path", () => {
 	const brief = assembleImplementerBrief({
 		ticket: 9, title: "Guard role children",
 		worktree: `${STATE}/worktrees/proj/issue-9`, branch: "feat/9-guard-role-children",
@@ -156,7 +157,7 @@ test("implementer brief never names the store, even when the config defines one"
 	assertNoStore(brief, "implementer");
 });
 
-test("reviewer brief never names the store, even when the config defines one", () => {
+test("reviewer brief never names the scenario store or its path", () => {
 	const brief = assembleReviewerBrief({
 		branch: "feat/9-x", baseBranch: "main", remote: "origin",
 		worktree: `${STATE}/worktrees/proj/issue-9`, ticket: 9, fastCheck: "npx tsc --noEmit",
@@ -165,7 +166,7 @@ test("reviewer brief never names the store, even when the config defines one", (
 	assertNoStore(brief, "reviewer");
 });
 
-test("verifier brief never names the store, even when the config defines one", () => {
+test("verifier brief never names the scenario store or its path", () => {
 	const brief = assembleVerifierBrief({ task: "Audit the merged output of ticket 9", worktree: `${STATE}/worktrees/proj/issue-9` });
 	assert.ok(brief.includes(`${STATE}/worktrees/proj/issue-9`), "worktree still named");
 	assertNoStore(brief, "verifier");

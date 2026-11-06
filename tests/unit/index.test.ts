@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
-import { writeFileSync, mkdtempSync } from "node:fs";
+import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import devloopExtension from "../../extension/index.ts";
 import { GUARD_REFUSAL } from "../../extension/src/guard.ts";
@@ -91,36 +91,39 @@ test("extension registers 6 tools, 4 hooks and the /devloop-agents command for a
 // --- the guard matrix (spec §3): what a child may register ------------------
 
 test("child without a role registers NOTHING — no tools, hooks, or commands", () => {
-	const fx = makeFixture(JSON.stringify({ factory: "dark", scenarios: { dir: storePath() } }));
+	const store = storePath();
+	const fx = makeFixture(JSON.stringify({ factory: "dark", scenarios: { dir: store } }));
 	try {
 		const { tools, hooks, commands } = loadChild(undefined, fx.repo);
 		assert.equal(tools.length, 0, "no tools in a child");
 		assert.equal(hooks.length, 0, "no hooks in a child");
 		assert.equal(commands.length, 0, "no commands in a child");
-	} finally { fx.cleanup(); }
+	} finally { fx.cleanup(); rmSync(store, { recursive: true }); }
 });
 
 for (const role of ["implementer", "code-reviewer", "verifier"]) {
 	test(`child of guarded role '${role}' with the store on registers exactly ONE tool_call hook and nothing else`, () => {
-		const fx = makeFixture(JSON.stringify({ factory: "dark", scenarios: { dir: storePath() } }));
+		const store = storePath();
+		const fx = makeFixture(JSON.stringify({ factory: "dark", scenarios: { dir: store } }));
 		try {
 			const { tools, hooks, commands } = loadChild(role, fx.repo);
 			assert.deepEqual(hookNames(hooks), ["tool_call"], "exactly one hook, and it is the block-capable tool_call");
 			assert.equal(tools.length, 0, "no tools: a guarded child still cannot drive the loop");
 			assert.equal(commands.length, 0, "no UI: no /devloop-agents");
-		} finally { fx.cleanup(); }
+		} finally { fx.cleanup(); rmSync(store, { recursive: true }); }
 	});
 }
 
 for (const role of ["analyst", "scenario-writer", "scenario-judge"]) {
 	test(`child of UNGUARDED role '${role}' with the store on registers nothing (it must reach the store freely)`, () => {
-		const fx = makeFixture(JSON.stringify({ factory: "dark", scenarios: { dir: storePath() } }));
+		const store = storePath();
+		const fx = makeFixture(JSON.stringify({ factory: "dark", scenarios: { dir: store } }));
 		try {
 			const { tools, hooks, commands } = loadChild(role, fx.repo);
 			assert.equal(tools.length, 0);
 			assert.equal(hooks.length, 0);
 			assert.equal(commands.length, 0);
-		} finally { fx.cleanup(); }
+		} finally { fx.cleanup(); rmSync(store, { recursive: true }); }
 	});
 }
 
@@ -153,7 +156,8 @@ async function callGuardHook(hooks: HookRec[], repo: string, toolName: string, i
 }
 
 test("FAIL CLOSED: unparseable .devloop.json — hook present, EVERY guarded call refused with the generic text", async () => {
-	const fx = makeFixture(JSON.stringify({ factory: "dark", scenarios: { dir: storePath() } }));
+	const store = storePath();
+	const fx = makeFixture(JSON.stringify({ factory: "dark", scenarios: { dir: store } }));
 	try {
 		writeFileSync(fx.config, "{ this is not json");
 		const { tools, hooks, commands } = loadChild("implementer", fx.repo);
@@ -171,7 +175,7 @@ test("FAIL CLOSED: unparseable .devloop.json — hook present, EVERY guarded cal
 			assert.equal(res?.block, true, `fail-closed refuses ${name}`);
 			assert.equal(res?.reason, GUARD_REFUSAL, "refusal names the guard, nothing else");
 		}
-	} finally { fx.cleanup(); }
+	} finally { fx.cleanup(); rmSync(store, { recursive: true }); }
 });
 
 test("ACTIVE GUARD: store known — in-store calls blocked, everything else allowed", async () => {
@@ -199,5 +203,5 @@ test("ACTIVE GUARD: store known — in-store calls blocked, everything else allo
 			const res = (await callGuardHook(hooks, fx.repo, name, input)) as { block?: boolean } | null | undefined;
 			assert.ok(res == null || res.block !== true, `allowed: ${name}`);
 		}
-	} finally { fx.cleanup(); }
+	} finally { fx.cleanup(); rmSync(store, { recursive: true }); }
 });
