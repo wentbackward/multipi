@@ -16,7 +16,9 @@
 #
 # Green iff every REQUIRED scenario (sealed included) scores >= pass AND the mean over all
 # judged scenarios >= min_satisfaction. Sealed scenarios (isSealed: pinned sha256 share of the
-# id) are judged and counted but NEVER named.
+# id) are judged and counted but NEVER named. On GREEN, a non-required scenario below pass is
+# counted as "<k> below floor" (it cannot flip the verdict, so calling it "unsatisfied" would
+# read contradictory); on RED, the same count is "<k> unsatisfied" and each is named above.
 #
 # Documented env seams (spec §5.2): MULTIPI_SCENARIO_FILE / MULTIPI_SCENARIO_ID /
 # MULTIPI_SCENARIO_TARGET are exported to every judge; MULTIPI_PI_BIN selects the pi binary of
@@ -365,7 +367,13 @@ while [ "$u" -lt "$u_count" ]; do
 done
 [ "$s_judged" -gt 0 ] && say "scenarios sealed: $s_judged judged, $s_unsat unsatisfied"
 if [ "$green" = "true" ]; then
-  say "scenarios green: mean $mean_fmt ($judged judged, $u_count unsatisfied)"
+  # A non-required scenario below pass cannot flip green, so the count is "below floor",
+  # never "unsatisfied" — see the header's wording contract.
+  if [ "$u_count" -gt 0 ]; then
+    say "scenarios green: mean $mean_fmt ($judged judged, $u_count below floor)"
+  else
+    say "scenarios green: mean $mean_fmt ($judged judged, $u_count unsatisfied)"
+  fi
   exit 0
 fi
 say "scenarios red: mean $mean_fmt ($judged judged, $u_count unsatisfied)"
