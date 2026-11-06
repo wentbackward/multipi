@@ -109,8 +109,22 @@ function git(args: string[], cwd: string): void {
 	execFileSync("git", args, { cwd, stdio: "pipe" });
 }
 
-function parseReportStatus(report: string): "done" | "blocked" {
-	return /STATUS:\s*BLOCKED/.test(report) ? "blocked" : "done";
+/**
+ * Terminal-line classification of a role report — the one uniform rule for every role.
+ * Only the report's LAST non-empty line decides, and it must match the role's contract:
+ *  - implementer / scenario-writer / analyst / verifier: `STATUS: DONE` | `STATUS: BLOCKED`
+ *  - code-reviewer: `VERDICT: APPROVE` | `VERDICT: CHANGES [REQUIRED]` (a finished review → done)
+ * Marker mentions anywhere else in the body (quotes, documented contracts) can never decide;
+ * a report lacking a terminal marker keeps the crashed semantics (ticket #22).
+ */
+export function classifyReport(role: string, report: string): "done" | "blocked" | "crashed" {
+	const last = report.split("\n").map((l) => l.trim()).reverse().find((l) => l !== "") ?? "";
+	if (role === "code-reviewer") {
+		return /^VERDICT:\s*(APPROVE\b|CHANGES(?:\s+REQUIRED)?\b)/.test(last) ? "done" : "crashed";
+	}
+	if (/^STATUS:\s*BLOCKED\b/.test(last)) return "blocked";
+	if (/^STATUS:\s*DONE\b/.test(last)) return "done";
+	return "crashed";
 }
 
 interface DispatchParams {
@@ -291,7 +305,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 	// Outcome-driven side effects: PR + labels. The report contract (STATUS line) decides, not the
 	// transport's stop reason — a child that delivered DONE but exited oddly still did the job.
 	let extra = "";
-	const verdict = parseReportStatus(res.finalText);
+	const verdict = classifyReport(role.name, res.finalText);
 	if (verdict === "done" && !res.aborted) {
 		try {
 			const out = execFileSync("bash", [path.join(ctx.scriptsDir, "open-pr.sh"), branch], {
@@ -388,7 +402,7 @@ function spawnAndTrack(
 	}).then((res) => {
 		controllers.delete(key);
 		const now = Date.now();
-		const status = res.aborted ? "interrupted" : /STATUS:\s*BLOCKED/.test(res.finalText) ? "blocked" : /STATUS:\s*DONE/.test(res.finalText) ? "done" : "crashed";
+	const status = res.aborted ? "interrupted" : classifyReport(role.name, res.finalText);
 		childreg.updateChild(key, { status, endedAt: now }, { at: now, kind: "end", text: `finished (${status}, $${res.usage.cost.toFixed(2)})` });
 		return res;
 	});
@@ -408,18 +422,10 @@ export function finishEntry(ctx: ToolContext, key: string, entry: DispatchEntry,
 		entry.report = res.finalText || res.stderr || res.errorMessage || "";
 		entry.stopReason = res.stopReason;
 		if (res.errorMessage) entry.error = res.errorMessage;
-		if (res.aborted || signal?.aborted) entry.status = "interrupted";
-		else if (entry.role === "code-reviewer") {
-			// The reviewer's contract is VERDICT: APPROVE / CHANGES REQUIRED — not STATUS: DONE.
-			// Classifying on the implementer's contract recorded every finished review as
-			// "crashed" (observed live in two projects: full reports, stopReason=stop).
-			if (/VERDICT:\s*(APPROVE|CHANGES)/.test(res.finalText)) entry.status = "done";
-			else if (/STATUS:\s*BLOCKED/.test(res.finalText)) entry.status = "blocked";
-			else entry.status = "crashed";
-		}
-		else if (/STATUS:\s*BLOCKED/.test(res.finalText)) entry.status = "blocked";
-		else if (/STATUS:\s*DONE/.test(res.finalText)) entry.status = "done";
-		else entry.status = "crashed";
+		// One uniform rule for every role: the last non-empty line decides, against the role's
+		// contract (STATUS for implementer/analyst/verifier/scenario-writer, VERDICT for the
+		// reviewer). Marker quotes in the body never decide; no terminal marker -> crashed (#22).
+		entry.status = res.aborted || signal?.aborted ? "interrupted" : classifyReport(entry.role, res.finalText);
 		// Keep the live pid recorded at spawn time (the entry object still carries the 0 placeholder).
 		state[key] = { ...entry, pid: state[key]?.pid ?? entry.pid };
 	});
