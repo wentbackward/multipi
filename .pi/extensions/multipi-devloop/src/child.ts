@@ -39,6 +39,8 @@ export interface SpawnOpts {
 	tools?: string[];
 	model?: string;
 	thinking?: string;
+	/** One-shot role name; stamped as MULTIPI_CHILD_ROLE next to MULTIPI_CHILD=1 (role guard, spec §3). */
+	role?: string;
 	cwd: string;
 	env?: NodeJS.ProcessEnv;
 	signal?: AbortSignal;
@@ -183,12 +185,17 @@ export function spawnPi(opts: SpawnOpts): Promise<ChildResult> {
 		try {
 			// detached: the child leads its own process group (its pgid == its pid),
 			// so the tree is signallable as one unit. See "Process-tree discipline" above.
+			// MULTIPI_CHILD_ROLE is always set explicitly: a stale value in the
+			// orchestrator's env must never leak into a role-less child.
+			const childEnv: NodeJS.ProcessEnv = { ...process.env, ...opts.env, MULTIPI_CHILD: "1" };
+			delete childEnv.MULTIPI_CHILD_ROLE;
+			if (opts.role) childEnv.MULTIPI_CHILD_ROLE = opts.role;
 			proc = spawn(command, fullArgs, {
 				cwd: opts.cwd,
 				shell: false,
 				detached: true,
 				stdio: ["ignore", "pipe", "pipe"],
-				env: { ...process.env, ...opts.env, MULTIPI_CHILD: "1" },
+				env: childEnv,
 			});
 		} catch (e) {
 			res.exitCode = 1;

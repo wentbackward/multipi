@@ -3,6 +3,7 @@ import type { Component, TUI } from "@earendil-works/pi-tui";
 import { matchesKey } from "@earendil-works/pi-tui";
 import * as childreg from "./src/childreg.ts";
 import { registerChildProcessGuards } from "./src/child.ts";
+import { GUARDED_ROLES, GUARD_REFUSAL, initGuard, callTouchesStore } from "./src/guard.ts";
 import { makeTools, evaluateSettle, formatEditedFile } from "./src/tools.ts";
 
 const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issue labels: open -> dl/in-progress (a child is working) -> dl/in-review (PR open) -> dl/approved (review VERDICT: APPROVE) -> dl/gated (batch gate green) -> dl/merged (squash-merged; then close the issue). dl/blocked marks tickets needing a human decision. Workflow: dispatch role agents with devloop.dispatch (one ticket per implementer; independent tickets in parallel, up to the slot cap); when reports land, review, then gate ALL dl/approved branches together with devloop.gate (in a deliberate merge order), and merge the green train with devloop.merge (same order). Check progress any time with devloop.status. When the operator asks to pause or stop the loop, call devloop.pause (it interrupts all children, writes HANDOFF.md, and comments the tickets), then settle. On a fresh session, step 0 of the devloop skill reads a HANDOFF.md if present and re-dispatches the interrupted children. Stop only when no open ticket is startable (unblocked with closed or in-flight dependencies) — the stop-gate enforces this for you.`;
@@ -10,17 +11,25 @@ const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issu
 /**
  * multipi dev-loop extension.
  *
- * Registers the devloop.* control-plane tools and two hooks:
+ * Orchestrator sessions register the devloop.* control-plane tools and two hooks:
  *  - agent_before_settle: the three-way stop gate (red fast check / dirty tree / startable tickets).
  *  - tool_result: format-on-edit after successful write/edit calls.
+ * Child sessions (MULTIPI_CHILD) register NOTHING — except a child of a guarded role with the
+ * scenario store on, which registers the guard-only mode: exactly ONE block-capable tool_call
+ * hook refusing calls that touch the store (spec §3). No tools, no stop-gate, no UI either way.
  * The factory body stays allocation-light: no timers, no processes, no reads at load time —
- * everything is resolved lazily per invocation from the context's cwd.
+ * everything is resolved lazily per invocation from the context's cwd (the guard is the
+ * exception by design: it must know the store path BEFORE the first tool call).
  */
 export default function devloopExtension(pi: ExtensionAPI): void {
 	// A one-shot role child (spawnPi sets MULTIPI_CHILD) must not load the loop: registering the
 	// tools would let a child drive the loop itself, and the stop-gate hook would keep a child
 	// that delivered its report from ever settling (it is not the orchestrator).
-	if (process.env.MULTIPI_CHILD) return;
+	if (process.env.MULTIPI_CHILD) {
+		const role = process.env.MULTIPI_CHILD_ROLE;
+		if (role && (GUARDED_ROLES as readonly string[]).includes(role)) registerStoreGuard(pi, process.cwd());
+		return;
+	}
 	// When this orchestrator exits, no spawned child tree survives (best-effort; see child.ts).
 	registerChildProcessGuards();
 	for (const tool of makeTools(DEVLOOP_INSTRUCTIONS)) {
@@ -165,6 +174,25 @@ function ensureTicker(): void {
 		if (childreg.runningChildren().length > 0) barTui?.requestRender();
 	}, 1000);
 	ticker.unref?.();
+}
+
+/**
+ * Guard-only child mode (spec §3): exactly one block-capable tool_call hook that refuses calls
+ * naming the scenario store. The store path comes from the child's own committed .devloop.json
+ * (no env seam carries it); an unparseable config or unresolvable store path fails closed —
+ * every guarded call gets the generic refusal.
+ */
+function registerStoreGuard(pi: ExtensionAPI, childCwd: string): void {
+	const g = initGuard(childCwd);
+	if (!g.enabled) return; // store off ⇒ register nothing, ever
+	pi.on("tool_call", async (event, ctx: ExtensionContext) => {
+		const name = (event as { toolName?: string }).toolName ?? "";
+		const input = ((event as { input?: unknown }).input ?? {}) as Record<string, unknown>;
+		// Fail closed: an unknowable store dir refuses EVERY guarded call.
+		if (!g.storeDir || callTouchesStore(g.storeDir, ctx.cwd, name, input)) {
+			return { block: true, reason: GUARD_REFUSAL };
+		}
+	});
 }
 
 function registerAgentVisibility(pi: ExtensionAPI): void {
