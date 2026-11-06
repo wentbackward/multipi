@@ -187,7 +187,9 @@ for cand in "$DL_ROOT/.pi/agents/scenario-judge.md" "$scripts_dir/../agents/scen
 done
 if [ -z "$judge_template" ]; then
   [ -n "$ROLE_FILE" ] || dl_die "scenario-judge role file not found (agents/ incomplete)"
-  JUDGE_CMD_DEFAULT="$PI_BIN -p --no-session --append-system-prompt $ROLE_FILE Judge the scenario."
+  # $ROLE_FILE is quoted FOR THE INNER SHELL: JUDGE_CMD_DEFAULT is executed via `bash -c`
+  # by the judge spawner, so spaces in the resolved path must not split the flag's argument.
+  JUDGE_CMD_DEFAULT="$PI_BIN -p --no-session --append-system-prompt \"$ROLE_FILE\" Judge the scenario."
 else
   JUDGE_CMD_DEFAULT=""
 fi
