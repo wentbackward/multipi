@@ -184,7 +184,7 @@ test("ACTIVE GUARD: store known — in-store calls blocked, everything else allo
 		const blocked: [string, Record<string, unknown>][] = [
 			["read", { path: `${store}/s/one.md` }],
 			["bash", { command: `cd ${store} && cat one.md` }],
-			["bash", { command: `cat ${store}/s/*.md` }],
+			["bash", { command: `ls ${store}*` }],
 		];
 		for (const [name, input] of blocked) {
 			const res = (await callGuardHook(hooks, fx.repo, name, input)) as { block?: boolean; reason?: string } | undefined;
