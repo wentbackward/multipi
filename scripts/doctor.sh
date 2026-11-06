@@ -32,7 +32,8 @@ elif [ ! -f "$DL_CONFIG" ]; then
   missing "$DL_CONFIG (run the devloop setup skill)"
 else
   ok "config $DL_CONFIG"
-  if [ -n "$(json_get "" <"$DL_CONFIG")" ]; then ok "valid JSON"; else missing "valid JSON in $DL_CONFIG"; fi
+  cfg_valid=0
+  if [ -n "$(json_get "" <"$DL_CONFIG")" ]; then ok "valid JSON"; cfg_valid=1; else missing "valid JSON in $DL_CONFIG"; fi
   if [ "$(cfg_len checks)" -gt 0 ]; then ok "$(cfg_len checks) gate checks"; else missing "\"checks\" in $DL_CONFIG"; fi
   if git -C "$DL_ROOT" remote get-url "$DL_REMOTE" >/dev/null 2>&1; then ok "remote $DL_REMOTE"; else missing "git remote $DL_REMOTE"; fi
   echo "        base branch   $DL_BASE"
@@ -40,6 +41,70 @@ else
   echo "        notes         $(dl_notes_dir)"
   echo "        logs          $(dl_logs_dir)"
   echo "        heavy slots   $(cfg heavy.slots 2), memory cap $(cfg heavy.memory_max none)"
+  # Factory mode and store health (dark-factory spec §2): the report is computed by
+  # importing the pure modules (loadConfig/scenariosOn/resolvePaths from config.ts,
+  # scanStore/storeCounts from scenarios.ts) so doctor shares exactly one notion of
+  # on/off, path resolution, and scenario validity with the gate. Node prints one JSON
+  # object; doctor applies the spec's note-vs-MISSING rules and does the tallying.
+  if [ "$cfg_valid" -eq 1 ]; then
+    factory_src=""
+    for cand in "$DL_ROOT/.pi/extensions/multipi-devloop/src" "$scripts_dir/../extension/src"; do
+      if [ -f "$cand/config.ts" ] && [ -f "$cand/scenarios.ts" ]; then factory_src=$cand; break; fi
+    done
+    factory_json=""
+    if [ -z "$factory_src" ]; then
+      optional "factory report unavailable (scenario modules not found)"
+    elif ! command -v node >/dev/null 2>&1; then
+      optional "factory report skipped (node not found)"
+    else
+      factory_json=$(
+        node --input-type=module -e "
+const { loadConfig, scenariosOn, resolvePaths } = await import('$factory_src/config.ts');
+const { scanStore, storeCounts } = await import('$factory_src/scenarios.ts');
+const cfg = loadConfig(process.cwd());
+if (cfg) {
+  const on = scenariosOn(cfg);
+  const source = cfg.scenarios === undefined ? (on ? 'preset' : 'default') : 'explicit';
+  const report = { mode: cfg.factory, on, source };
+  if (on) {
+    const store = resolvePaths(cfg).scenariosDir;
+    const files = scanStore(store);
+    const counts = storeCounts(files);
+    report.store = store;
+    report.total = counts.total;
+    report.required = counts.required;
+    report.invalid = files.filter((f) => !f.valid).map((f) => ({ file: f.file, reason: f.reason || 'unknown' }));
+  }
+  process.stdout.write(JSON.stringify(report));
+}
+" 2>/dev/null
+      )
+      [ -n "$factory_json" ] || optional "factory report unavailable (node import failed)"
+    fi
+    if [ -n "$factory_json" ]; then
+      f_mode=$(json_get mode <<<"$factory_json")
+      f_on=$(json_get on <<<"$factory_json")
+      f_source=$(json_get source <<<"$factory_json")
+      echo "        factory $f_mode, scenarios $([ "$f_on" = "true" ] && echo on || echo off) ($f_source)"
+      if [ "$f_on" = "true" ]; then
+        f_store=$(json_get store <<<"$factory_json")
+        f_total=$(json_get total <<<"$factory_json")
+        f_required=$(json_get required <<<"$factory_json")
+        echo "        store         $f_store ($f_total scenarios, $f_required required)"
+        inv_count=$(json_len invalid <<<"$factory_json")
+        inv_i=0
+        while [ "$inv_i" -lt "$inv_count" ]; do
+          missing "scenario $(json_get "invalid.$inv_i.file" <<<"$factory_json"): $(json_get "invalid.$inv_i.reason" <<<"$factory_json")"
+          inv_i=$((inv_i + 1))
+        done
+        if [ ! -d "$f_store" ]; then
+          optional "scenario store not created yet: $f_store"
+        elif [ "$f_mode" = "dark" ] && [ "$f_required" -eq 0 ]; then
+          missing "factory dark: no valid required scenario in $f_store (seed the store)"
+        fi
+      fi
+    fi
+  fi
   if [ -f "$DL_ROOT/AGENTS.md" ]; then ok "AGENTS.md"; else missing "AGENTS.md (run the devloop setup skill)"; fi
   if [ -f "$DL_ROOT/docs/DECISIONS.md" ]; then ok "docs/DECISIONS.md"; else optional "no docs/DECISIONS.md"; fi
 fi
