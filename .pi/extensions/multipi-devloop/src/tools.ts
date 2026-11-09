@@ -114,8 +114,11 @@ function git(args: string[], cwd: string): void {
 	execFileSync("git", args, { cwd, stdio: "pipe" });
 }
 
-/** Default delay for the single retry when GitHub's issue list lags a just-created ticket. */
-export const LIST_LAG_RETRY_MS_DEFAULT = 1500;
+/** Default delay for the single retry when GitHub's issue list lags a just-created ticket.
+ * Module-private: `listLagRetryMs` is the only consumer, and a named constant the tests
+ * could not reach anyway (the wait is driven by the documented MULTIPI_LIST_LAG_RETRY_MS
+ * seam) is not public API. */
+const LIST_LAG_RETRY_MS_DEFAULT = 1500;
 
 /**
  * The one bounded list-lag retry wait. Documented env seam `MULTIPI_LIST_LAG_RETRY_MS` (ms):
