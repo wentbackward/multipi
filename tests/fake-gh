@@ -20,8 +20,11 @@
 #   issue edit <n> --add-label <l>
 #   issue close <n> [--comment <c>]
 #
-# JSON strings escape backslash, double quote and newline only — smoke bodies
-# are single-line without quotes (a deliberate, documented limit of the fake).
+# JSON strings escape backslash and double quote; the issue BODY in
+# `issue list --json` spans the remainder of the issue file, and its newlines
+# are encoded as \n (line-join applied AFTER the quoting, so escaped
+# backslashes survive). All other values stay single-line (a deliberate,
+# documented limit of the fake).
 set -u
 dir=${FAKE_GH_DIR:?FAKE_GH_DIR not set}
 mkdir -p "$dir" "$dir/issues" "$dir/issues-closed" "$dir/labels"
@@ -124,7 +127,9 @@ case "${1:-} ${2:-}" in
           printf '{"number":%s}\n' "$f"
         else
           title=$(sed -n 1p "$src/$f")
-          body=$(sed -n 2p "$src/$f")
+          # The body is the REMAINDER of the file (multi-line round-trips): quote it first,
+          # then encode newlines as literal \n so the JSON value stays on one line.
+          body=$(jesc "$(sed -n '2,$p' "$src/$f")" | awk '{printf "%s%s", (NR>1?"\\n":""), $0}')
           labs="[]"
           if [ -f "$dir/labels/$f" ]; then
             labs=$(awk '{printf "%s{\"name\":\"%s\"}", (NR>1?",":""), $0}' "$dir/labels/$f")
