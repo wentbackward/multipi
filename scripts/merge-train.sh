@@ -8,7 +8,9 @@
 # commits onto the current <remote>/<base>, verify the tree equals the gated train-<branch> tree, push it to
 # the branch (with a lease on the head that was gated), create the PR if missing (title and body from the
 # notes file), squash-merge exactly that head (--match-head-commit), confirm the PR is MERGED and delete
-# the remote branch.
+# the remote branch. When every row of the train is merged, the train's train-<branch> bookkeeping refs are
+# deleted (they are load-bearing only while the train is in flight; an interrupted train keeps its refs so
+# the resume can replay against the gated heads without re-gating).
 #
 # Exit: 0 all merged, 2 usage/config, 3 replay conflict, 4 tree differs from the gated one (re-gate),
 # 5 notes file missing, 6 branch changed since the gate, 7 PR not merged, 8 not gated green.
@@ -125,6 +127,14 @@ for branch in "$@"; do
     fi
   fi
   previous=$branch
+done
+# Every row of the train is now merged (rows not passed as args were already merged before this
+# run, and this loop only exits 0 after marking the rest): the loop that created the
+# train-<branch> refs owns their deletion. All rows of the TRAIN FILE are deleted, not just
+# this run's args — a resume only sees the pending branches, and the earlier rows' refs would
+# leak forever otherwise. Deletion is quiet and tolerant: a ref that vanished by hand is no news.
+awk '{print $1}' "$train_file" | while IFS= read -r branch; do
+  git -C "$DL_ROOT" branch -q -D "train-$branch" >/dev/null 2>&1 || true
 done
 rm -f "$train_file"
 echo "notes kept in $(dl_notes_dir)"
