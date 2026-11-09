@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync, chmodSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket } from "../../extension/src/tools.ts";
 import { makeFixture } from "../fixtures.ts";
@@ -740,6 +740,59 @@ test("dispatch(implementer) (store on, covered by a valid t<n>- scenario): proce
 		const labels = readFileSync(path.join(fx.dir, "gh", "labels", String(n)), "utf8").trim().split("\n");
 		assert.ok(labels.includes("dl/in-progress") && labels.includes("dl/in-review"), JSON.stringify(labels));
 	} finally { fx.cleanup(); }
+});
+
+/** Lock the scenario store dir (permission 0) so scanStore gets the unreadable-store error path. */
+function lockStoreDir(fx: ReturnType<typeof makeFixture>): string {
+	const d = path.join(fx.dir, "home", "proj", "scenarios");
+	chmodSync(d, 0);
+	return d;
+}
+function unlockStoreDir(d: string): void {
+	chmodSync(d, 0o755);
+}
+
+test("stop gate (store on, store unreadable): covers nothing — fail-closed, the gate settles without crashing", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	let storeDir = "";
+	const origError = console.error;
+	let gateErrors = "";
+	try {
+		console.error = (msg: unknown) => { gateErrors += String(msg) + "\n"; };
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Covered but store locked");
+		seedScenario(fx, `t${n}-covers-it`); // covered while the store is readable
+		storeDir = lockStoreDir(fx);
+		const d = await evaluateSettle(ctx.cwd);
+		assert.equal(d, undefined, "an unreadable store is treated as no coverage: nothing startable, the gate settles (fail-closed)");
+		assert.ok(!gateErrors.includes("devloop stop-gate error"), "the gate settled cleanly — no swallowed store-scan throw: " + gateErrors);
+	} finally {
+		console.error = origError;
+		if (storeDir) unlockStoreDir(storeDir);
+		fx.cleanup();
+	}
+});
+
+test("dispatch(implementer) (store on, store unreadable): refuses as not startable — unreadable store = nothing covered (fail-closed)", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	let storeDir = "";
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Locked store ticket");
+		seedScenario(fx, `t${n}-would-cover-it`); // covered while the store is readable
+		storeDir = lockStoreDir(fx);
+		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		assert.equal(res.isError, true, textOf(res));
+		const t = textOf(res);
+		assert.match(t, new RegExp(`ticket #${n} is not startable`), t);
+		assert.match(t, new RegExp(`t${n}-`), "the refusal names the t<ticket>- prefix that cannot be confirmed covered");
+		assert.ok(!existsSync(path.join(fx.dir, "home", "proj", "worktrees")), "no worktree for a refused dispatch");
+	} finally {
+		if (storeDir) unlockStoreDir(storeDir);
+		fx.cleanup();
+	}
 });
 
 test("stop gate (store off): coverage fields absent — a store-less config behaves exactly as before", async () => {
