@@ -130,12 +130,23 @@ function commandTouchesStore(store: string, cwd: string, command: string, env: N
 	let effCwd = cwd;
 	for (const seg of segments) {
 		const toks = seg.split(/\s+/).filter(Boolean).map(cleanTok);
+		// A subshell paren does not hide the commands inside it from the reader of this line:
+		// strip a leading `(` token (or an attached one, `(cd`), then the rest of the segment
+		// is read exactly like the unparenthesised form.
+		while (toks.length > 0 && toks[0] === "(") toks.shift();
+		if (toks.length > 0 && toks[0].startsWith("(")) toks[0] = toks[0].slice(1);
 		if (toks.length === 0) continue;
 		// A cd moves the base dir for the rest of the command; landing inside the store is a touch.
-		if (toks[0] === "cd" && toks.length >= 2 && !toks[1].startsWith("-")) {
-			const target = expandHome(toks[1], env);
-			if (pathTouchesStore(store, effCwd, target, env)) return true;
-			effCwd = path.resolve(effCwd, target);
+		// -X-style flags before the target (cd -P, cd --) are options, not the target — skipping
+		// them matters for RELATIVE targets, which the token loop below cannot see.
+		if (toks[0] === "cd") {
+			let i = 1;
+			while (i < toks.length && toks[i].startsWith("-")) i++; // `cd -` has no resolvable target
+			if (i < toks.length) {
+				const target = expandHome(toks[i], env);
+				if (pathTouchesStore(store, effCwd, target, env)) return true;
+				effCwd = path.resolve(effCwd, target);
+			}
 		}
 		for (const tok of toks) {
 			if (isPathLike(tok) && pathTouchesStore(store, effCwd, tok, env)) return true;
