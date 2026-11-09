@@ -132,9 +132,16 @@ done
 # run, and this loop only exits 0 after marking the rest): the loop that created the
 # train-<branch> refs owns their deletion. All rows of the TRAIN FILE are deleted, not just
 # this run's args — a resume only sees the pending branches, and the earlier rows' refs would
-# leak forever otherwise. Deletion is quiet and tolerant: a ref that vanished by hand is no news.
+# leak forever otherwise. A ref that vanished by hand is no news; a ref git REFUSES to
+# delete (e.g. checked out somewhere) is printed, not swallowed — the residue must be
+# diagnosable, not a silent permanent leak.
 awk '{print $1}' "$train_file" | while IFS= read -r branch; do
-  git -C "$DL_ROOT" branch -q -D "train-$branch" >/dev/null 2>&1 || true
+  git -C "$DL_ROOT" rev-parse -q --verify "refs/heads/train-$branch" >/dev/null || continue
+  if ! del_err=$(git -C "$DL_ROOT" branch -q -D "train-$branch" 2>&1 >/dev/null); then
+    reason=$(printf '%s' "$del_err" | tr '\n' ' ' | sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/^ //' -e 's/ $//')
+    [ -n "$reason" ] || reason="no diagnostic captured"
+    echo "KEPT train-$branch (delete refused: $reason)"
+  fi
 done
 rm -f "$train_file"
 echo "notes kept in $(dl_notes_dir)"
