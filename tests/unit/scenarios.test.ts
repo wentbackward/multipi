@@ -5,7 +5,7 @@ import test from "node:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { scanStore, storeCounts, isSealed, parseVerdict, foldJudgeRun, coveredTicketNumbers, type ScenarioFile } from "../../extension/src/scenarios.ts";
+import { scanStore, storeCounts, isSealed, parseVerdict, foldJudgeRun, coveredTicketNumbers, coveredTicketsFromScan, type ScenarioFile } from "../../extension/src/scenarios.ts";
 
 const VALID = `---
 id: t12-close-position-clears-alert
@@ -301,6 +301,40 @@ test("coveredTicketNumbers: empty store covers nothing", () => {
 	withStore({}, (_dir, files) => {
 		assert.deepEqual(coveredTicketNumbers(files), []);
 	});
+});
+
+// --- coveredTicketsFromScan: the ScanResult -> covered-tickets seam (spec §4 startability) ---
+
+test("coveredTicketsFromScan: an ok result passes its valid files' tickets through", () => {
+	withStore(
+		{
+			"a.md": VALID.replace("t12-close-position-clears-alert", "t12-first"),
+			"broken.md": VALID.replace("t12-close-position-clears-alert", "t41-broken").replace(/^required: .*$\n/m, ""),
+		},
+		(_dir, _files) => {
+			assert.deepEqual(coveredTicketsFromScan({ ok: true, files: _files }), [12], "valid t12- covers; the invalid t41- file never does");
+		},
+	);
+});
+
+test("coveredTicketsFromScan: an error result covers NOTHING (fail-closed) — unreadable store ≠ wildcard", () => {
+	// Direct construction of the error result (defect-class reason only):
+	assert.deepEqual(coveredTicketsFromScan({ ok: false, reason: "store is unreadable (EACCES)" }), []);
+	// And via the real path: a readable store with an unreadable dir entry yields the error result,
+	// which must not cover the ticket its (now unverifiable) files would have covered:
+	const dir = mkdtempSync(path.join(tmpdir(), "np-scenarios-"));
+	try {
+		const locked = path.join(dir, "locked");
+		mkdirSync(locked);
+		writeFileSync(path.join(dir, "ok.md"), VALID.replace("t12-close-position-clears-alert", "t12-still-here"));
+		chmodSync(locked, 0);
+		const r = scanStore(dir);
+		assert.equal(r.ok, false, "the unreadable subdir makes the whole store scan fail");
+		assert.deepEqual(coveredTicketsFromScan(r), [], "even a t12- file sitting in the readable part covers nothing once the scan failed");
+	} finally {
+		chmodSync(path.join(dir, "locked"), 0o755);
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 // --- isSealed: pinned digest contract (spec §5.5) ---
