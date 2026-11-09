@@ -134,6 +134,9 @@ GH_REPO=example-owner/upstream fork_gh 'gh issue list --state open --json number
   fail "explicit GH_REPO lost to the derived pin (logged: $(tail -1 "$work/gh-fork/calls.log"))"
 expect "an explicitly exported GH_REPO survives dl_load_config" "example-owner/upstream" \
   "$(GH_REPO=example-owner/upstream fork_cfg 'printf %s "${GH_REPO:-}"')"
+grep -qF "GH_REPO" "$plugin/AGENTS.md" && grep -qFi "fork trap" "$plugin/AGENTS.md" &&
+  pass "AGENTS.md documents the GH_REPO fork-trap pin" ||
+  fail "AGENTS.md does not document the GH_REPO fork-trap pin"
 if [ -n "$github_repo_save" ]; then export GH_REPO="$github_repo_val"; fi
 
 # --- paths.sh -----------------------------------------------------------------
