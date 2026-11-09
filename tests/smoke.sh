@@ -1695,7 +1695,8 @@ expect "an unknown flag is a usage error" "2" "$?"
 # Absorbed #32 should-fix: the tracker's gh-error temp file must not outlive the run.
 # Scoping TMPDIR lands every mktemp of the script in an auditable dir (the normal
 # path deletes it; an EXIT trap owns it against a mid-run death).
-grep -Eq "trap 'rm -f .\\\$gh_err_file..' EXIT" "$plugin/scripts/cleanup-worktrees.sh" &&
+trap_line="trap 'rm -f \"\$gh_err_file\"' EXIT"
+grep -qF "$trap_line" "$plugin/scripts/cleanup-worktrees.sh" &&
   pass "an EXIT trap owns the gh-error temp file (a mid-run death cannot leak it)" ||
   fail "no EXIT trap for the gh-error temp file in cleanup-worktrees.sh"
 rm -rf "$work/ctmp" && mkdir -p "$work/ctmp"
@@ -1751,7 +1752,7 @@ grep -qiF "scenario-writer" "$skill_md" &&
 grep -qiF "ordinary pipeline" "$skill_md" &&
   pass "the runbook merges through the ordinary pipeline" ||
   fail "the runbook does not say the switch merges through the ordinary pipeline"
-grep -qiE "never ask\[s\]? the human to read a diff" "$skill_md" &&
+grep -qiE "never ask[s]? the human to read a diff" "$skill_md" &&
   pass "the dark-mode rule: the orchestrator never asks the human to read a diff" ||
   fail "the dark-mode diff rule is missing"
 for surface in "scenario title" "gate outcome" "verifier report" "dl/blocked"; do
