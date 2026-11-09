@@ -131,10 +131,13 @@ function commandTouchesStore(store: string, cwd: string, command: string, env: N
 	for (const seg of segments) {
 		const toks = seg.split(/\s+/).filter(Boolean).map(cleanTok);
 		// A subshell paren does not hide the commands inside it from the reader of this line:
-		// strip a leading `(` token (or an attached one, `(cd`), then the rest of the segment
-		// is read exactly like the unparenthesised form.
-		while (toks.length > 0 && toks[0] === "(") toks.shift();
-		if (toks.length > 0 && toks[0].startsWith("(")) toks[0] = toks[0].slice(1);
+		// strip ALL leading parens — standalone `(` tokens and those attached to the first
+		// token, repeated for nested subshells `((cd ...))` — then the rest of the segment is
+		// read exactly like the unparenthesised form.
+		while (toks.length > 0 && toks[0].startsWith("(")) {
+			if (toks[0] === "(") toks.shift();
+			else toks[0] = toks[0].slice(1);
+		}
 		if (toks.length === 0) continue;
 		// A cd moves the base dir for the rest of the command; landing inside the store is a touch.
 		// -X-style flags before the target (cd -P, cd --) are options, not the target — skipping

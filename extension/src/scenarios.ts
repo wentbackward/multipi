@@ -40,8 +40,9 @@ export interface Verdict {
 
 /**
  * Outcome of scanStore: a scanned list, or a NAMED reason when the store cannot be read
- * (regular file at the store path, unreadable dir). A MISSING dir is still `ok: true` with an
- * empty list — missing is a note, not a failure; the doctor and the stage decide what to print.
+ * (regular file at the store path, unreadable dir, or one unreadable .md file). A MISSING
+ * dir is still `ok: true` with an empty list — missing is a note, not a failure; the doctor
+ * and the stage decide what to print.
  */
 export type ScanResult = { ok: true; files: ScenarioFile[] } | { ok: false; reason: string };
 
@@ -73,30 +74,39 @@ export function scanStore(storeDir: string): ScanResult {
 			}
 		};
 		walk(storeDir, "", readdirSync(storeDir, { withFileTypes: true }));
-	} catch (e) {
-		const code = (e as NodeJS.ErrnoException).code ?? "";
-		// The reason carries the defect CLASS, never the store PATH or an fs error string
-		// (those embed the path) — the stage may print the reason and the store path must not
-		// reach a train's stdout (smoke-pinned no-leak rule).
-		const reason =
-			code === "ENOTDIR" ? "store path is not a directory (ENOTDIR)" : `store dir is unreadable (${code || "unknown error"})`;
-		return { ok: false, reason };
-	}
 
-	mdFiles.sort();
-	const files = mdFiles.map((rel) => validateFile(rel, readFileSync(path.join(storeDir, rel), "utf8")));
-	const seen = new Set<string>();
-	for (const f of files) {
-		if (!f.id || seen.has(f.id)) {
-			if (f.id && f.valid) {
-				f.valid = false;
-				f.reason = "duplicate id";
+		mdFiles.sort();
+		// The per-file reads live INSIDE this try: one unreadable file in a readable store is
+		// the same defect class as an unreadable dir (the store cannot be fully read) — an
+		// error result, never an EACCES throw (review round 1).
+		const files = mdFiles.map((rel) => validateFile(rel, readFileSync(path.join(storeDir, rel), "utf8")));
+		const seen = new Set<string>();
+		for (const f of files) {
+			if (!f.id || seen.has(f.id)) {
+				if (f.id && f.valid) {
+					f.valid = false;
+					f.reason = "duplicate id";
+				}
+				continue;
 			}
-			continue;
+			seen.add(f.id);
 		}
-		seen.add(f.id);
+		return { ok: true, files };
+	} catch (e) {
+		return { ok: false, reason: scanFailureReason(e) };
 	}
-	return { ok: true, files };
+}
+
+/**
+ * Named reason for a failed store scan: the defect CLASS only — never the store path or an
+ * fs error string (those embed the path): the stage may print the reason and the store path
+ * must not reach a train's stdout (smoke-pinned no-leak rule).
+ */
+function scanFailureReason(e: unknown): string {
+	const code = (e as NodeJS.ErrnoException).code ?? "";
+	return code === "ENOTDIR"
+		? "store path is not a directory (ENOTDIR)"
+		: `store is unreadable (${code || "unknown error"})`;
 }
 
 /** total / required (valid files only) / invalid counts. */
