@@ -19,13 +19,14 @@
 #            tracker's open+closed issue set — a bare number that matches no
 #            ticket (chore/2026-backup) is not one and falls into STALE.
 # Classification is FAIL-CLOSED: a tracker query may fail without saying "does
-# not exist", and the SAME rule applies to the local age probe — an unreadable
-# commit age is unclassifiable, never "ancient". If gh is missing or
-# unauthenticated, or EITHER issue-list fetch or a per-branch pr query fails
-# mid-run, or `git log` cannot read the last commit, the worktree is KEPT
-# ("cannot classify") — removal always demands a POSITIVE classification. A
-# failed issue-list fetch also prints a one-line WARN carrying gh's stderr, so
-# an unattended dark cycle's log says WHY everything was kept.
+# not exist", and the SAME rule applies to the local probes — an unreadable commit age
+# and a FAILED `git status` probe are unclassifiable, never "ancient" or "clean". If gh
+# is missing or unauthenticated, or EITHER issue-list fetch or a per-branch pr query
+# fails mid-run, or `git log` cannot read the last commit, or `git status --porcelain`
+# fails, the worktree is KEPT ("cannot classify") — removal always demands a POSITIVE
+# classification. A failed issue-list fetch or a per-branch pr query also prints a
+# one-line WARN carrying gh's stderr, so an unattended dark cycle's log says WHY
+# everything was kept.
 # Always KEPT (printed with the reason, in both modes):
 #   - the main worktree (never listed) and the gate worktree, plus detached heads
 #     (not ticket worktrees),
@@ -81,11 +82,16 @@ if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then have_gh
 open_raw=""
 closed_raw=""
 tracker_ok=0
-gh_err_file=""
+gh_err_file=$(mktemp) || dl_die "mktemp failed"
 warn_tracker_fetch() { # warn_tracker_fetch WHAT — one WARN line carrying gh's stderr
   why=$(tr '\n' ' ' <"$gh_err_file" | sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/^ //' -e 's/ $//')
   [ -n "$why" ] || why="no diagnostic captured"
   echo "WARN  tracker fetch failed ($1): $why"
+}
+warn_pr_query() { # warn_pr_query BRANCH — one WARN line carrying gh's stderr
+  why=$(tr '\n' ' ' <"$gh_err_file" | sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/^ //' -e 's/ $//')
+  [ -n "$why" ] || why="no diagnostic captured"
+  echo "WARN  pr query failed ($1): $why"
 }
 if [ "$have_gh" -eq 1 ]; then
   # --limit 500 per state: the snapshot cap. Degradation (tickets beyond it fall
@@ -93,7 +99,6 @@ if [ "$have_gh" -eq 1 ]; then
   # "cleanup-worktrees.sh tracks the issue-list FETCH success".
   # Fetch failures are DIAGNOSED, not just absorbed: a failed fetch still keeps
   # everything (tracker_ok stays 0), and the WARN says why it failed.
-  gh_err_file=$(mktemp) || dl_die "mktemp failed"
   if open_raw=$(gh issue list --state open --json number --limit 500 2>"$gh_err_file"); then
     if closed_raw=$(gh issue list --state closed --json number --limit 500 2>"$gh_err_file"); then
       tracker_ok=1
@@ -103,8 +108,6 @@ if [ "$have_gh" -eq 1 ]; then
   else
     warn_tracker_fetch "issue list --state open"
   fi
-  rm -f "$gh_err_file"
-  gh_err_file=""
 fi
 # nums_of: layout-agnostic — real gh emits ONE compact array line, and future
 # clients may pretty-print; every "number" field yields one line.
@@ -122,7 +125,8 @@ pr_states_of() { # pr_states_of BRANCH -> raw PR state list; rc != 0 on query fa
   # failure — pr view reports both with the same rc and would blur them.
   # --state all is LOAD-BEARING: the real gh CLI defaults to open, which would
   # hide every MERGED PR and strand the closed-and-merged arm in the age gate.
-  gh pr list --head "$1" --state all --json state 2>/dev/null
+  # Stderr goes to $gh_err_file so the caller can WARN it (diagnostics, not silence).
+  gh pr list --head "$1" --state all --json state 2>"$gh_err_file"
 }
 
 removed=0
@@ -164,7 +168,14 @@ while IFS=$'\t' read -r wt br; do
   if git rev-parse --verify -q "$DL_REMOTE/$br" >/dev/null 2>&1; then
     keep "$wt" "branch $br still on $DL_REMOTE"; continue
   fi
-  if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+  if ! dirty=$(git -C "$wt" status --porcelain 2>/dev/null); then
+    # The dirty probe obeys the fail-closed rule too: a FAILED `git status` is
+    # unclassifiable, NEVER "clean" — empty output of a failed invocation is a
+    # negative signal, not evidence of an empty worktree.
+    keep "$wt" "status probe failed — cannot classify"
+    continue
+  fi
+  if [ -n "$dirty" ]; then
     keep "$wt" "dirty — uncommitted work"; continue
   fi
   # Clean, branch gone from the remote: classify the tracked work via the tracker.
@@ -175,7 +186,11 @@ while IFS=$'\t' read -r wt br; do
   if [ -n "$num" ] && num_in_set "$open_set" "$num"; then
     keep "$wt" "open issue #$num"; continue
   fi
-  states=$(pr_states_of "$br") || { keep "$wt" "pr query failed — cannot classify"; continue; }
+  if ! states=$(pr_states_of "$br"); then
+    warn_pr_query "$br"
+    keep "$wt" "pr query failed — cannot classify"
+    continue
+  fi
   case $states in
     *OPEN*) keep "$wt" "open PR for $br"; continue ;;
     *MERGED*) take "$wt" "$br" "closed: merged-and-closed"; continue ;;
@@ -205,6 +220,7 @@ done < <(git worktree list --porcelain | awk '
   $1 == "worktree" { wt = substr($0, 10) }
   $1 == "branch"   { print wt "\t" substr($0, 8) }
   $1 == "detached" { print wt "\t" }')
+rm -f "$gh_err_file"
 git worktree prune >/dev/null 2>&1 || true
 echo "cleanup: $removed removed, $dryrun dry-run, $kept kept"
 exit 0
