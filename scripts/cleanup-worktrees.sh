@@ -82,7 +82,7 @@ if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then have_gh
 open_raw=""
 closed_raw=""
 tracker_ok=0
-gh_err_file=$(mktemp) || dl_die "mktemp failed"
+gh_err_file=""
 warn_tracker_fetch() { # warn_tracker_fetch WHAT — one WARN line carrying gh's stderr
   why=$(tr '\n' ' ' <"$gh_err_file" | sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/^ //' -e 's/ $//')
   [ -n "$why" ] || why="no diagnostic captured"
@@ -100,8 +100,9 @@ if [ "$have_gh" -eq 1 ]; then
   # Fetch failures are DIAGNOSED, not just absorbed: a failed fetch still keeps
   # everything (tracker_ok stays 0), and the WARN says why it failed.
   gh_err_file=$(mktemp) || dl_die "mktemp failed"
-  # An EXIT trap owns the temp file from birth: a mid-run death (signal, a later
-  # die) must not leak it. The normal path removes the file and resets the trap.
+  # An EXIT trap owns the temp file for the rest of the run — the later per-candidate
+  # pr queries redirect into it too, so it must stay valid until exit; the trap
+  # removes it on any path (clean exit, die, signal). A mid-run death cannot leak it.
   trap 'rm -f "$gh_err_file"' EXIT
 
   if open_raw=$(gh issue list --state open --json number --limit 500 2>"$gh_err_file"); then
@@ -113,9 +114,6 @@ if [ "$have_gh" -eq 1 ]; then
   else
     warn_tracker_fetch "issue list --state open"
   fi
-  rm -f "$gh_err_file"
-  gh_err_file=""
-  trap - EXIT
 
 fi
 # nums_of: layout-agnostic — real gh emits ONE compact array line, and future
