@@ -35,6 +35,14 @@ bootstrap another project, the **`devloop-setup` skill**.
 
 - Fast check: `npx tsc --noEmit`. Full checks (unit, smoke, shellcheck) run once per train in the
   gate — never per branch while implementing.
+- **Fork trap**: `dl_load_config` (scripts/lib/common.sh) pins and exports `GH_REPO` to the
+  configured origin (github.com URLs only; scp/https/ssh forms, optional port and `.git`
+  suffix; a caller-exported `GH_REPO` always wins — the same preset rule as the factory
+  toggle), so bare `gh` calls in any loop script resolve against the fork's tracker, not
+  the parent (the extension pins `--repo` the same way). Installed copies living in forks
+  rely on the plugin source carrying this block: a local per-repo patch of it (as carried
+  by the oneshot test repo and the crisis monitor repo) is redundant — drop it on the next
+  `install.sh` upgrade.
 - Label vocabulary: `dl/in-progress` → `dl/in-review` → `dl/approved` → `dl/gated` → `dl/merged`
   (+ `dl/blocked`). The labels ARE the state; keep them truthful.
 - `scripts/doctor.sh` diagnoses; `scripts/install.sh <repo>` installs the loop into a project.

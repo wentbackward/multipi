@@ -4,7 +4,10 @@
 # PRs live in $FAKE_GH_DIR as flat files: <head-slug>.title / .body / .state
 # (slug: branch name with "/" replaced by "_"). A squash merge is a real
 # `git merge --squash` into a fresh clone of the bare origin, honouring
-# --match-head-commit when given. Every call is appended to calls.log.
+# --match-head-commit when given. Every call is appended to calls.log as
+# `gh repo=<effective> <args>` — the effective repo this call would hit: the --repo
+# flag, else $GH_REPO, else `-` (the git-remote guess the real CLI falls back to is
+# not emulated offline).
 #
 # Issues live in $FAKE_GH_DIR/issues (open) and issues-closed, one file per
 # number (line 1 title, line 2 body); labels in labels/<n>.
@@ -44,11 +47,20 @@
 set -u
 dir=${FAKE_GH_DIR:?FAKE_GH_DIR not set}
 mkdir -p "$dir" "$dir/issues" "$dir/issues-closed" "$dir/labels"
-echo "gh $*" >>"$dir/calls.log"
+gh_repo="${GH_REPO:--}"
+prev_arg=""
+for a in "$@"; do
+  [ "$prev_arg" = "--repo" ] && gh_repo=$a
+  prev_arg=$a
+done
+printf 'gh repo=%s%s\n' "$gh_repo" "${*:+ $*}" >>"$dir/calls.log"
 key() { printf '%s' "${1//\//_}"; }
 jesc() { printf '%s' "${1:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
 # global --repo FLAG VALUE: the extension pins the repo explicitly; the fake ignores it
+# beyond recording the EFFECTIVE repo (flag > $GH_REPO env > "-"). Documented limit:
+# only the space form --repo VALUE is recognised (all loop callers use it); the
+# --repo=VALUE form would be recorded as unset.
 if [ "${1:-}" = "--repo" ]; then shift 2; fi
 
 # documented failure seams (see header): simulate a transient tracker failure

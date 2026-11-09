@@ -93,6 +93,58 @@ expect "dl_state is under MULTIPI_HOME/<repo>" \
 cfg_out 'dl_die boom' >/dev/null 2>&1
 expect "dl_die exits 2 with a message" "2" "$?"
 
+# --- GH_REPO pin (fork trap): a fork-shaped fixture ------------------------------
+# In a FORK the origin URL points at the fork, not the parent tracker, and a bare
+# `gh` call guesses from the git remote — it can resolve against the parent.
+# dl_load_config must pin GH_REPO to the configured origin (github.com URLs only,
+# scp/https/ssh forms, .git stripped); a caller-exported GH_REPO wins (preset rule).
+# fake-gh records the effective repo of every call in calls.log, so "the pin lands"
+# is proved on the repo a bare gh call would actually hit.
+github_repo_save="${GH_REPO+x}"; github_repo_val="${GH_REPO:-}"
+unset GH_REPO
+git init -q --bare "$work/fork-origin.git"
+git clone -q "$work/fork-origin.git" "$work/forkproj" 2>/dev/null
+( cd "$work/forkproj" && echo fork >fork.txt && git add . && git commit -qm "chore: start" && git push -q origin main )
+echo '{}' >"$work/forkproj/.devloop.json"
+fork_cfg() { bash -c "cd \"$work/forkproj\" && . \"$plugin/scripts/lib/common.sh\" && dl_load_config required && $1"; }
+fork_gh() { FAKE_GH_DIR="$work/gh-fork" bash -c "cd \"$work/forkproj\" && . \"$plugin/scripts/lib/common.sh\" && dl_load_config required && $1"; }
+set_fork_origin() { git -C "$work/forkproj" remote set-url origin "$1"; }
+fork_form() { case $1 in http://*) echo http ;; https://*) echo https ;; ssh://*) echo ssh ;; git@*) echo "scp (git@)" ;; esac; }
+set_fork_origin "https://github.com/example-owner/example-fork.git"
+expect "a fork-shaped https origin pins GH_REPO to the fork slug (.git stripped)" \
+  "example-owner/example-fork" "$(fork_cfg 'printf %s "${GH_REPO:-}"')"
+for url in "git@github.com:example-owner/example-fork.git" \
+           "ssh://git@github.com/example-owner/example-fork" \
+           "http://github.com/example-owner/example-fork.git" \
+           "ssh://git@github.com:22/example-owner/example-fork.git"; do
+  set_fork_origin "$url"
+  expect "GH_REPO derives from the $(fork_form "$url") origin form ($url)" \
+    "example-owner/example-fork" "$(fork_cfg 'printf %s "${GH_REPO:-}"')"
+done
+set_fork_origin "https://git.example/group/project.git"
+expect "GH_REPO is not pinned for a non-github.com origin" "" "$(fork_cfg 'printf %s "${GH_REPO:-}"')"
+# Host-anchored negatives (the rationale the DECISIONS entry names): a lookalike
+# host must not pin, and a github.com-suffix domain is not github.com.
+set_fork_origin "git@notgithub.com:example-owner/example-fork"
+expect "GH_REPO is not pinned for a git@notgithub.com origin" "" "$(fork_cfg 'printf %s "${GH_REPO:-}"')"
+set_fork_origin "https://github.com.example.com/example-owner/example-fork"
+expect "GH_REPO is not pinned for a github.com.example.com origin" "" "$(fork_cfg 'printf %s "${GH_REPO:-}"')"
+set_fork_origin "https://github.com/example-owner/example-fork.git"
+fork_gh 'gh issue list --state open --json number' >/dev/null
+[ "$(tail -1 "$work/gh-fork/calls.log")" = "gh repo=example-owner/example-fork issue list --state open --json number" ] &&
+  pass "a bare gh call after dl_load_config resolves against the fork, not the parent" ||
+  fail "the pin did not land on the gh call (logged: $(tail -1 "$work/gh-fork/calls.log"))"
+GH_REPO=example-owner/upstream fork_gh 'gh issue list --state open --json number' >/dev/null
+[ "$(tail -1 "$work/gh-fork/calls.log")" = "gh repo=example-owner/upstream issue list --state open --json number" ] &&
+  pass "an explicitly exported GH_REPO beats the derived pin (on the gh call)" ||
+  fail "explicit GH_REPO lost to the derived pin (logged: $(tail -1 "$work/gh-fork/calls.log"))"
+expect "an explicitly exported GH_REPO survives dl_load_config" "example-owner/upstream" \
+  "$(GH_REPO=example-owner/upstream fork_cfg 'printf %s "${GH_REPO:-}"')"
+grep -qF "GH_REPO" "$plugin/AGENTS.md" && grep -qFi "fork trap" "$plugin/AGENTS.md" &&
+  pass "AGENTS.md documents the GH_REPO fork-trap pin" ||
+  fail "AGENTS.md does not document the GH_REPO fork-trap pin"
+if [ -n "$github_repo_save" ]; then export GH_REPO="$github_repo_val"; fi
+
 # --- paths.sh -----------------------------------------------------------------
 paths_run() { (cd "$work/project" && bash "$plugin/scripts/$@"); }
 paths_run_rc() { (cd "$work/project" && bash "$plugin/scripts/$@" >/dev/null 2>&1); echo $?; }
