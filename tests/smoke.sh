@@ -314,6 +314,18 @@ git checkout -q main # the merge-train cases expect the main checkout on main
 # Leave the doctor/stage sections their pristine expectations: no store dir, no rules.
 rm -rf "$gate_store" "$work/gate-rules"
 
+# The co-train #32 probe pin (gate candidate-probe symmetry) leaves its feat/11-probe
+# fixture branch behind (local + origin): sweep both copies at the end of the section
+# so the fixture never accumulates, and pin the absence.
+git branch -q -D feat/11-probe >/dev/null 2>&1 || true
+git push -q origin --delete feat/11-probe >/dev/null 2>&1 || true
+[ -z "$(git branch --list feat/11-probe)" ] &&
+  pass "the probe pin's feat/11-probe fixture is swept (local)" ||
+  fail "the probe pin's feat/11-probe fixture survives locally"
+git ls-remote --exit-code origin feat/11-probe >/dev/null 2>&1 &&
+  fail "the probe pin's feat/11-probe fixture survives on origin" ||
+  pass "the probe pin's feat/11-probe fixture is swept (origin)"
+
 # --- fake-gh + open-pr.sh -----------------------------------------------------
 out=$(bash "$plugin/scripts/open-pr.sh" 2>&1)
 expect "open-pr with no branch is a usage error" "2" "$?"
@@ -511,6 +523,59 @@ printf '%s\n' "$out" | grep -qF "KEPT train-feat/10-e (delete refused: error: si
   pass "the refused ref really survives the merge run" ||
   fail "the sim-refused ref vanished anyway"
 git -C "$gate" branch -q -D train-feat/10-e
+# --- merge-train.sh: fail-closed dirty probe (absorbed from the #32 review) ----
+# A ticket worktree whose `git status` CANNOT RUN must be KEPT with a loud note —
+# empty-on-failure is never read as clean (the merge-time analogue of
+# cleanup-worktrees.sh's "status probe failed" rule). A git shim fails only `status`;
+# the merge itself completes, and the worktree + branch must survive.
+git checkout -q -B feat/16-mp origin/main
+echo m16 >m16.txt && git add m16.txt && git commit -q -m "feat: m16 (Refs #16)" &&
+  git push -q -u origin feat/16-mp
+git checkout -q main
+printf 'feat: m16 (#16)\n\nCloses #16\n' >"$("$plugin/scripts/paths.sh" notes feat/16-mp)"
+bash "$plugin/scripts/gate-train.sh" feat/16-mp >/dev/null 2>&1
+expect "the dirty-probe branch gates green" "0" "$?"
+mwd="$work/home/project/worktrees/project"
+git worktree add -q "$mwd/issue-16-mp" feat/16-mp
+statusshim_dir="$work/git-status-shim"
+statusshim_real=$(command -v git)
+mkdir -p "$statusshim_dir"
+cat >"$statusshim_dir/git" <<EOF
+#!/usr/bin/env bash
+# Fail ONLY top-level git status (plain, or with a leading -C <dir> arg); every
+# other invocation passes through to the real git, arguments untouched.
+# (No command-substitution metachars in this comment: it lives in an unquoted
+# heredoc, so they would be executed when the shim file is generated.)
+args=("\$@")
+subcmd="\${args[0]:-}"
+[ "\$subcmd" = "-C" ] && subcmd="\${args[2]:-}"
+if [ "\$subcmd" = "status" ]; then
+  echo "fatal: simulated status probe failure" >&2
+  exit 1
+fi
+exec "$statusshim_real" "\$@"
+EOF
+chmod +x "$statusshim_dir/git"
+out=$(PATH="$statusshim_dir:$PATH" bash "$plugin/scripts/merge-train.sh" feat/16-mp 2>&1)
+rc=$?
+echo "$out"
+expect "the merge completes despite a failing status probe" "0" "$rc"
+printf '%s\n' "$out" | grep -qF "KEPT worktree $mwd/issue-16-mp — status probe failed" &&
+  pass "a failing status probe keeps the worktree with a loud note" ||
+  fail "no status-probe-failed keep line (the probe read the failure as clean?)"
+[ -d "$mwd/issue-16-mp" ] &&
+  pass "the unclassifiable worktree survives the merge" ||
+  fail "the unclassifiable worktree was destroyed at merge time"
+[ -n "$(git branch --list feat/16-mp)" ] &&
+  pass "the unclassifiable worktree's branch survives" ||
+  fail "the unclassifiable worktree's branch was deleted"
+# Tidy the fixture (smoke's own worktree; this is test-cleanup, not a deletion of
+# anything the script owns). No -q: git 2.53's `worktree remove` takes no -q, and the
+# next section's kept-count pins would break on the leak.
+git worktree remove "$mwd/issue-16-mp"
+git branch -q -D feat/16-mp
+git checkout -q main
+
 
 # --- doctor.sh ----------------------------------------------------------------
 out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
@@ -1627,6 +1692,18 @@ git worktree remove -q "$wt_base/issue-default-30d"; git branch -q -D feat/defau
 cw --bogus >/dev/null 2>&1
 expect "an unknown flag is a usage error" "2" "$?"
 
+# Absorbed #32 should-fix: the tracker's gh-error temp file must not outlive the run.
+# Scoping TMPDIR lands every mktemp of the script in an auditable dir (the normal
+# path deletes it; an EXIT trap owns it against a mid-run death).
+grep -Eq "trap 'rm -f .\\\$gh_err_file..' EXIT" "$plugin/scripts/cleanup-worktrees.sh" &&
+  pass "an EXIT trap owns the gh-error temp file (a mid-run death cannot leak it)" ||
+  fail "no EXIT trap for the gh-error temp file in cleanup-worktrees.sh"
+rm -rf "$work/ctmp" && mkdir -p "$work/ctmp"
+out=$(TMPDIR="$work/ctmp" cw)
+[ -z "$(ls -A "$work/ctmp" 2>/dev/null)" ] &&
+  pass "the tracker temp file leaves no TMPDIR litter after a clean run" ||
+  fail "the tracker temp file leaked into TMPDIR: $(ls -A "$work/ctmp" | tr '\n' ' ')"
+
 # The per-cycle step is pinned in the devloop skill (both copies, in sync).
 grep -q 'cleanup-worktrees.sh --apply' "$plugin/skills/devloop/SKILL.md" &&
   grep -qF '"dark"' "$plugin/skills/devloop/SKILL.md" &&
@@ -1637,6 +1714,60 @@ grep -q 'cleanup-worktrees.sh --apply' "$plugin/.pi/skills/devloop/SKILL.md" &&
   fail "the .pi skill copy is missing the dark per-cycle cleanup step"
 diff -q "$plugin/skills/devloop/SKILL.md" "$plugin/.pi/skills/devloop/SKILL.md" >/dev/null &&
   pass "the skill copies stay in sync" || fail "the skill copies diverged"
+
+# --- AGENTS.md + SKILL.md: the dark-factory documentation (ticket #16) ----------
+# The documented seams, config keys, the guard's honest limits and the runbook are
+# rg-asserted here: prose that decays silently is how loops lose their contracts.
+agents_md="$plugin/AGENTS.md"
+for seam in MULTIPI_CHILD_ROLE MULTIPI_SCENARIO_FILE MULTIPI_SCENARIO_ID MULTIPI_SCENARIO_TARGET MULTIPI_LIST_LAG_RETRY_MS; do
+  grep -qF "$seam" "$agents_md" && pass "AGENTS.md names the $seam env seam" ||
+    fail "AGENTS.md is missing the $seam env seam"
+done
+for key in '"factory"' '"scenarios"' 'cleanup.stale_days'; do
+  grep -qF "$key" "$agents_md" && pass "AGENTS.md names the $key config key" ||
+    fail "AGENTS.md is missing the $key config key"
+done
+grep -qEi "scripts? the agent writes" "$agents_md" &&
+  pass "AGENTS.md names the agent-written-script guard limit" ||
+  fail "AGENTS.md does not name the agent-written-script guard limit"
+grep -qEi "assembled at run time" "$agents_md" &&
+  pass "AGENTS.md names the runtime-assembled-path guard limit" ||
+  fail "AGENTS.md does not name the runtime-assembled-path guard limit"
+grep -qEi "recursive (search|walk) of an ancestor" "$agents_md" &&
+  pass "AGENTS.md names the ancestor-recursion guard limit" ||
+  fail "AGENTS.md does not name the ancestor-recursion guard limit"
+grep -qF "OS user" "$agents_md" && grep -qF "not v1" "$agents_md" &&
+  pass "AGENTS.md names the strong-isolation escalation (OS user, not v1)" ||
+  fail "AGENTS.md does not document the strong-isolation escalation"
+skill_md="$plugin/skills/devloop/SKILL.md"
+grep -qi "going dark" "$skill_md" &&
+  pass "the skill carries the going-dark runbook" || fail "the skill has no going-dark runbook"
+grep -qiF "record the switch in docs/DECISIONS.md" "$skill_md" &&
+  pass "the runbook records the switch in DECISIONS.md" ||
+  fail "the runbook does not record the switch in DECISIONS.md"
+grep -qiF "scenario-writer" "$skill_md" &&
+  pass "the runbook dispatches the scenario-writer for the open tickets" ||
+  fail "the runbook does not dispatch the scenario-writer"
+grep -qiF "ordinary pipeline" "$skill_md" &&
+  pass "the runbook merges through the ordinary pipeline" ||
+  fail "the runbook does not say the switch merges through the ordinary pipeline"
+grep -qi "never ask the human to read a diff" "$skill_md" &&
+  pass "the dark-mode rule: the orchestrator never asks the human to read a diff" ||
+  fail "the dark-mode diff rule is missing"
+for surface in "scenario title" "gate outcome" "verifier report" "dl/blocked"; do
+  grep -qiF "$surface" "$skill_md" && pass "the dark review surface is named: $surface" ||
+    fail "the dark review surface is missing: $surface"
+done
+for leak in train-scenario-results.jsonl train-scenario-judge train-scenarios-run.log; do
+  grep -qF "$leak" "$skill_md" && pass "the log-hygiene rule names $leak" ||
+    fail "the log-hygiene rule does not name $leak"
+done
+grep -qi "never forwarded to an implementer" "$skill_md" &&
+  pass "the log-hygiene rule forbids forwarding stage logs to coding roles" ||
+  fail "the log-hygiene never-forward rule is missing"
+grep -qi "only the \`missing\`" "$skill_md" &&
+  pass "the log-hygiene rule: only the missing text travels" ||
+  fail "the log-hygiene rule does not say only the missing text travels"
 
 mkcfg '' # restore the base fixture config
 rm -rf "$store_dir"
