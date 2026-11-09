@@ -178,8 +178,9 @@ Going dark is a normal config change on a branch — a preset, not a new pipelin
    the codebase. A ticket is startable only when its scenarios exist, so the board must be seeded
    first — that is what makes the self-seed → write scenarios → implement pipeline safe to leave alone.
 3. Record the switch in docs/DECISIONS.md (date, the preset, the reason) and merge through the
-   ordinary pipeline — review, gate, merge. Nothing dark-specific about the merge; the first dark
-   gate is simply the moment the scenario stage activates.
+   ordinary pipeline — review, gate, merge. Nothing dark-specific about the merge. (The gate OF the
+   flip branch still reads the main-root config with main checked out, so it is collaborative: the
+   first gate AFTER the switch merges is the moment the scenario stage activates.)
 
 While the factory is dark, where the human looks changes — and so does yours. The human reviews
 the scenario title lists (in the issues), the gate outcomes, the verifier reports and the parked

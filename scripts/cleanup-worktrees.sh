@@ -102,7 +102,8 @@ if [ "$have_gh" -eq 1 ]; then
   gh_err_file=$(mktemp) || dl_die "mktemp failed"
   # An EXIT trap owns the temp file for the rest of the run — the later per-candidate
   # pr queries redirect into it too, so it must stay valid until exit; the trap
-  # removes it on any path (clean exit, die, signal). A mid-run death cannot leak it.
+  # removes it on every trapped path (clean exit, die, delivered signal); SIGKILL outruns any
+  # trap, and a leaked temp file in that case is the OS's to reclaim, not a correctness hole.
   trap 'rm -f "$gh_err_file"' EXIT
 
   if open_raw=$(gh issue list --state open --json number --limit 500 2>"$gh_err_file"); then
