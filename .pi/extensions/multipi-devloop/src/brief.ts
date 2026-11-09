@@ -275,9 +275,19 @@ export function parseScenarioLines(report: string): ScenarioLine[] {
 	return out;
 }
 
-/** The comment posted on the ticket: titles only (id, title, required, new/changed) — never the bodies. */
+/**
+ * Keep only the scenario lines belonging to `ticket` (id prefix `t<ticket>-`; the hyphen in
+ * the prefix keeps e.g. `t7-` from matching `t71-`). A writer that reports a foreign id
+ * cannot thereby pollute the ticket's dark-mode review list.
+ */
+export function scenarioLinesForTicket(ticket: number, lines: ScenarioLine[]): ScenarioLine[] {
+	const prefix = `t${ticket}-`;
+	return lines.filter((l) => l.id.startsWith(prefix));
+}
+
+/** The comment posted on the ticket: titles only (id, title, required, new/changed) — never the bodies. Foreign ids are dropped. */
 export function buildScenarioComment(ticket: number, lines: ScenarioLine[]): string {
-	const rows = lines.map((l) => `- ${l.id} \u2014 ${l.title} (${l.kind}, ${l.state})`).join("\n");
+	const rows = scenarioLinesForTicket(ticket, lines).map((l) => `- ${l.id} \u2014 ${l.title} (${l.kind}, ${l.state})`).join("\n");
 	return `Scenarios for ticket #${ticket} (titles only \u2014 this list is what is reviewed in dark mode; the bodies live in the scenario store):\n\n${rows}`;
 }
 

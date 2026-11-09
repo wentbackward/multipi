@@ -487,30 +487,32 @@ test("dispatch(scenario-writer) runs the child at the repo root (no worktree, no
 test("dispatch(scenario-writer) DONE posts the scenario TITLES (id, title, required, new/changed) — never the bodies — on the ticket", async () => {
 	const fx = scenarioWriterFx();
 	setupEnv(fx);
-	fakeReport(fx, [
-		"Wrote the scenarios for the ticket.",
-		"",
-		"t9-cache-hit — Cache hit returns the stored value (required, new) — SECRET-BODY-ALPHA must never leave the store",
-		"t9-cache-miss — A miss recomputes once (scored, changed) SECRET-BODY-BETA must never leave the store",
-		"",
-		"## Questions",
-		"none",
-		"",
-		"STATUS: DONE",
-	].join("\n"));
 	try {
 		const ctx = ctxWithAgents(fx);
 		const n = createIssue(fx, "Cache hit skips recompute", SC_WRITER_BODY);
+		fakeReport(fx, [
+			"Wrote the scenarios for the ticket.",
+			"",
+			`t${n}-cache-hit — Cache hit returns the stored value (required, new) — SECRET-BODY-ALPHA must never leave the store`,
+			`t${n}-cache-miss — A miss recomputes once (scored, changed) SECRET-BODY-BETA must never leave the store`,
+			`t${n + 7}-foreign — A foreign-ticket scenario (scored, new) SECRET-FORBODY-GAMMA must never appear`,
+			"",
+			"## Questions",
+			"none",
+			"",
+			"STATUS: DONE",
+		].join("\n"));
 		const res = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: n });
 		assert.match(textOf(res), /scenario-writer #\d+ .* -> done/, textOf(res));
 		const commentFile = path.join(fx.dir, "gh", "comments", String(n));
 		assert.ok(existsSync(commentFile), "a comment was posted on the ticket");
 		const comment = readFileSync(commentFile, "utf8");
 		for (const needle of [
-			"t9-cache-hit", "Cache hit returns the stored value", "required", "new",
-			"t9-cache-miss", "A miss recomputes once", "scored", "changed",
+			`t${n}-cache-hit`, "Cache hit returns the stored value", "required", "new",
+			`t${n}-cache-miss`, "A miss recomputes once", "scored", "changed",
 		]) assert.ok(comment.includes(needle), `comment missing: ${needle}`);
 		assert.ok(!comment.includes("SECRET-BODY-ALPHA") && !comment.includes("SECRET-BODY-BETA"), "the scenario bodies never leave the store");
+		assert.ok(!comment.includes(`t${n + 7}-foreign`) && !comment.includes("A foreign-ticket scenario"), "a foreign-ticket id cannot pollute the review list");
 		const state = JSON.parse(readFileSync(path.join(fx.dir, "home", "proj", "dispatch.json"), "utf8"));
 		assert.equal(state[`scenario-writer-${n}`].status, "done");
 	} finally {

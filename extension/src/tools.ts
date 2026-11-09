@@ -17,6 +17,7 @@ import {
 	assembleAnalystBrief,
 	assembleScenarioWriterBrief,
 	parseScenarioLines,
+	scenarioLinesForTicket,
 	buildScenarioComment,
 } from "./brief.ts";
 import * as childreg from "./childreg.ts";
@@ -240,9 +241,11 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 		let extra = "";
 		const verdict = classifyReport(role.name, res.finalText);
 		if (verdict === "done" && !res.aborted) {
-			const lines = parseScenarioLines(res.finalText);
+			// Only this ticket's own lines (t<ticket>-) may land on its review list; a writer
+			// reporting a foreign id cannot pollute it.
+			const lines = scenarioLinesForTicket(ticket, parseScenarioLines(res.finalText));
 			if (lines.length === 0) {
-				extra = "\n(no scenario lines in the report; nothing commented)";
+				extra = "\n(no scenario lines for this ticket in the report; nothing commented)";
 			} else {
 				try {
 					addComment(ctx.repoSlug, ticket, buildScenarioComment(ticket, lines));
