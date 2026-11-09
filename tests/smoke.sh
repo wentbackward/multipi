@@ -940,6 +940,19 @@ out=$(stage); rc=$?
 expect "stage exits 0 when the store is off" "0" "$rc"
 expect "store off prints the skipped line" "scenarios skipped" "$out"
 
+# Store path exists as a REGULAR FILE: red at the named defect class (the symmetric stage
+# pin for the doctor's file-store MISSING line) — exit 1, the exact red line, and the store
+# path must not reach the stage's stdout (the no-leak rule).
+reset_ss
+ss_cfg "$work/run-ok.sh" "bash $work/judge.sh"
+rm -rf "$store_dir" && printf 'not a dir\n' >"$store_dir"
+out=$(stage); rc=$?
+expect "a file store makes the stage red" "1" "$rc"
+expect "the storeError red line is pinned" "scenarios red: cannot read the store (store path is not a directory (ENOTDIR))" "$out"
+echo "$out" | grep -qF "$store_dir" &&
+  fail "the store path leaked onto stage stdout for a file store" || pass "no store path on stage stdout for a file store"
+rm -f "$store_dir"
+
 # Green baseline: configured judge template (canned bash), TERM-resistant run proves the
 # stage-end SIGKILL escalation, all seams and log files asserted, leak sentinels must not
 # appear on the stage stdout.

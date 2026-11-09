@@ -101,6 +101,30 @@ test("scanStore returns an error result (not a throw) for an unreadable store di
 	}
 });
 
+test("scanStore returns an error result (not a throw) when a store .md file is unreadable", () => {
+	if (typeof process.getuid === "function" && process.getuid() === 0) return; // root bypasses permission bits
+	const storeDir = mkdtempSync(path.join(tmpdir(), "np-scenarios-"));
+	try {
+		const locked = path.join(storeDir, "locked.md");
+		writeFileSync(locked, "hidden\n");
+		chmodSync(locked, 0);
+		try {
+			const r = scanStore(storeDir);
+			assert.equal(
+				r.ok,
+				false,
+				"one unreadable file in a readable store is an error result, never an EACCES throw",
+			);
+			assert.match(r.reason ?? "", /unreadable|EACCES/i, "the reason names the defect class");
+			assert.ok(!(r.reason ?? "").includes(storeDir), "the reason never carries the store path");
+		} finally {
+			chmodSync(locked, 0o644);
+		}
+	} finally {
+		rmSync(storeDir, { recursive: true, force: true });
+	}
+});
+
 test("scanStore returns an empty ok result for a missing store dir", () => {
 	const missing = path.join(mkdtempSync(path.join(tmpdir(), "np-scenarios-")), "not-there");
 	assert.deepEqual(scanStore(missing), { ok: true, files: [] });
