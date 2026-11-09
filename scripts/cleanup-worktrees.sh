@@ -10,7 +10,8 @@
 # and whose tracked work is done or abandoned. An OPEN ISSUE for the branch always
 # wins over every removal reason (a merged-but-not-yet-closed ticket keeps its
 # worktree — "closed" means merged-and-CLOSED):
-#   CLOSED : a PR is MERGED (work has landed), or the branch's ticket exists but
+#   CLOSED : a PR is MERGED (work has landed, found via `pr list --state all`
+#            because gh defaults to open), or the branch's ticket exists but
 #            is not open (not planned) and no PR is live —
 #   STALE  : no live PR, no open issue, and the last commit is older than
 #            cleanup.stale_days (default 14, read via `cfg cleanup.stale_days 14`).
@@ -77,6 +78,9 @@ open_raw=""
 closed_raw=""
 tracker_ok=0
 if [ "$have_gh" -eq 1 ]; then
+  # --limit 500 per state: the snapshot cap. Degradation (tickets beyond it fall
+  # back to STALE) is logged in docs/DECISIONS.md, 2026-11-09 entry
+  # "cleanup-worktrees.sh tracks the issue-list FETCH success".
   open_raw=$(gh issue list --state open --json number --limit 500 2>/dev/null) &&
     closed_raw=$(gh issue list --state closed --json number --limit 500 2>/dev/null) &&
     tracker_ok=1
@@ -95,7 +99,9 @@ num_in_set() { # num_in_set SET NUM
 pr_states_of() { # pr_states_of BRANCH -> raw PR state list; rc != 0 on query failure
   # A LIST (not pr view) is the query: exit 0 with [] is "no PR", non-zero is a
   # failure — pr view reports both with the same rc and would blur them.
-  gh pr list --head "$1" --json state 2>/dev/null
+  # --state all is LOAD-BEARING: the real gh CLI defaults to open, which would
+  # hide every MERGED PR and strand the closed-and-merged arm in the age gate.
+  gh pr list --head "$1" --state all --json state 2>/dev/null
 }
 
 removed=0
@@ -154,7 +160,7 @@ while IFS=$'\t' read -r wt br; do
     *MERGED*) take "$wt" "$br" "closed: merged-and-closed"; continue ;;
   esac
   if [ -n "$num" ] && num_in_set "$closed_set" "$num"; then
-    take "$wt" "$br" "closed: ticket closed without a PR"; continue
+    take "$wt" "$br" "closed: no live PR"; continue
   fi
   # No live PR, and the branch number is no ticket on the tracker (or there is
   # none at all): the STALE bucket, age-gated by cleanup.stale_days.
