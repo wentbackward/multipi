@@ -109,10 +109,20 @@ if (!scenariosOn(cfg)) { process.stdout.write(JSON.stringify({ on: false })); pr
 const s = cfg.scenarios && typeof cfg.scenarios === "object" ? cfg.scenarios : {};
 const p = resolvePaths(cfg);
 const scanned = scanStore(p.scenariosDir);
+// The config keys ride along in EVERY case, storeError included: the "run is not
+// configured" check (a config defect, which outranks any store-state verdict) must still
+// run first, and a storeError must not masquerade as a missing run command.
+const cfgKeys = {
+  on: true, mode: cfg.factory,
+  run: s.run ?? null, runSeconds: s.runSeconds ?? 120,
+  judge: s.judge ?? null, judgeSeconds: s.judgeSeconds ?? 600,
+  pass: s.pass ?? 0.8, minSatisfaction: s.minSatisfaction ?? 0.9, sealed: s.sealed ?? 0.2,
+};
 if (!scanned.ok) {
-  // Store exists but is unreadable (regular file, permissions): carry the defect-class
-  // reason up (it never names the store path) and let the gate decide the verdict line.
-  process.stdout.write(JSON.stringify({ on: true, mode: cfg.factory, storeError: scanned.reason }));
+  // Store exists but is unreadable (regular file, permissions, unreadable .md file):
+  // carry the defect-class reason up (it never names the store path) and let the gate
+  // decide the verdict line.
+  process.stdout.write(JSON.stringify({ ...cfgKeys, storeError: scanned.reason }));
   process.exit(0);
 }
 const files = scanned.files;
@@ -124,10 +134,7 @@ const scenarios = files.filter((f) => f.valid).map((f) => ({
   sealed: isSealed(f.id, s.sealed ?? 0.2),
 }));
 process.stdout.write(JSON.stringify({
-  on: true, mode: cfg.factory,
-  run: s.run ?? null, runSeconds: s.runSeconds ?? 120,
-  judge: s.judge ?? null, judgeSeconds: s.judgeSeconds ?? 600,
-  pass: s.pass ?? 0.8, minSatisfaction: s.minSatisfaction ?? 0.9, sealed: s.sealed ?? 0.2,
+  ...cfgKeys,
   total: counts.total, required: counts.required, invalid: counts.invalid,
   scenarios,
 }));
