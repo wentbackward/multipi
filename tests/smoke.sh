@@ -1055,34 +1055,53 @@ mkcfg '' # restore the base fixture config
 rm -rf "$store_dir"
 
 # --- cleanup-worktrees.sh (dark-factory spec §6/§7) --------------------------
-# Consent semantics: WITHOUT --apply the script only lists removal candidates as
-# DRYRUN and deletes nothing; WITH --apply it removes CLOSED worktrees (ticket
-# closed, branch gone from the remote) and STALE ones (no PR, no open issue,
-# last commit older than cleanup.stale_days). Keep-invariants (gate/main kept,
-# dirty kept, branch-still-on-remote kept, open issue kept) hold in both modes;
-# the scenario store is owner data and survives.
+# Consent semantics + fail-closed classification. WITHOUT --apply the script only
+# lists removal candidates as DRYRUN and deletes nothing; WITH --apply it removes
+# CLOSED worktrees (a PR is MERGED, or the branch's ticket is closed without a PR)
+# and STALE ones (no live PR, no open issue, last commit older than
+# cleanup.stale_days). A branch NUMBER counts as a ticket only when that number
+# is in the tracker's open+closed issue set — chore/2026-backup is a year, not
+# ticket 2026, unless the tracker says otherwise, and is never ticket-protected.
+# Every tracker query failure KEEPS the worktree ("cannot classify"); a failure
+# is never read as "does not exist". Keep-invariants (gate/main kept, dirty kept,
+# branch-still-on-remote kept, open issue kept) hold in both modes; the scenario
+# store is owner data and survives.
 mkcfg '"cleanup": {"stale_days": 2}'
 cw() { bash "$plugin/scripts/cleanup-worktrees.sh" "$@" 2>&1; }
 gt_dir="$work/home/project/worktrees/project/gate"
 wt_base="$work/home/project/worktrees/project"
 
-# Tracker fixtures: a closed, an open and a dirty ticket (number -> branch name).
+# Tracker fixtures: one closed ticket and three open ones. Deliberately NO issue
+# 2026/2027/42 — those bare numbers must not count as tickets.
 cl_n=$(gh issue create "closed ticket" "closed body" | sed -nE 's#.*/issues/([0-9]+)$#\1#p')
 op_n=$(gh issue create "open ticket" "open body" | sed -nE 's#.*/issues/([0-9]+)$#\1#p')
+op2_n=$(gh issue create "second open ticket" "open body 2" | sed -nE 's#.*/issues/([0-9]+)$#\1#p')
 dt_n=$(gh issue create "dirty ticket" "dirty body" | sed -nE 's#.*/issues/([0-9]+)$#\1#p')
 gh issue close "$cl_n" >/dev/null
 
-# Candidates: CLOSED (clean, branch off the remote, ticket closed) and STALE (no PR,
-# no open issue, last commit 3 days old > the 2-day limit — GIT_COMMITTER_DATE).
+# Candidates (all clean, branch off the remote): one CLOSED, three STALE (last
+# commit years old via GIT_COMMITTER_DATE, far past the 2-day limit).
 git worktree add -q "$wt_base/issue-$cl_n" -b "feat/$cl_n-closed" origin/main
 git worktree add -q "$wt_base/issue-stale-old" -b feat/stale-old origin/main
 GIT_COMMITTER_DATE="2020-01-05T00:00:00Z" \
   git -C "$wt_base/issue-stale-old" commit -q --allow-empty -m "chore: old commit"
+# Numeric-looking branch whose number is ABSENT from the tracker: STALE.
+git worktree add -q "$wt_base/issue-2026-backup" -b chore/2026-backup origin/main
+GIT_COMMITTER_DATE="2020-01-05T00:00:00Z" \
+  git -C "$wt_base/issue-2026-backup" commit -q --allow-empty -m "chore: old backup commit"
+# Stale candidate whose WORKTREE PATH CONTAINS SPACES (porcelain parsing must be safe).
+git worktree add -q "$wt_base/issue 42 spaced" -b feat/42-spaced-old origin/main
+GIT_COMMITTER_DATE="2020-01-05T00:00:00Z" \
+  git -C "$wt_base/issue 42 spaced" commit -q --allow-empty -m "chore: old spaced-path commit"
 # Keep cases (all survive --apply):
 git worktree add -q "$wt_base/issue-stale-young" -b feat/stale-young origin/main
 GIT_COMMITTER_DATE="$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)" \
   git -C "$wt_base/issue-stale-young" commit -q --allow-empty -m "chore: young commit"
+git worktree add -q "$wt_base/issue-2027-backup" -b chore/2027-backup origin/main
+GIT_COMMITTER_DATE="$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)" \
+  git -C "$wt_base/issue-2027-backup" commit -q --allow-empty -m "chore: young backup commit"
 git worktree add -q "$wt_base/issue-$op_n" -b "feat/$op_n-open" origin/main
+git worktree add -q "$wt_base/issue-$op2_n" -b "feat/$op2_n-open2" origin/main
 git worktree add -q "$wt_base/issue-$dt_n" -b "feat/$dt_n-dirty" origin/main
 echo scratch >"$wt_base/issue-$dt_n/scratch.txt"
 git worktree add -q "$wt_base/issue-remote" -b feat/remote-kept origin/main
@@ -1092,6 +1111,16 @@ lag_n=$(gh issue create "merged but issue still open" "lag body" | sed -nE 's#.*
 git worktree add -q "$wt_base/issue-$lag_n" -b "feat/$lag_n-merged" origin/main
 gh pr create --head "feat/$lag_n-merged" --base main --title "feat: lag ($lag_n)" >/dev/null
 echo MERGED >"$FAKE_GH_DIR/feat_${lag_n}-merged.state"
+
+# The tracker feed is ONE compact array line (real-CLI shape), and every open
+# ticket in it protects its worktree. Four tickets are open right now.
+raw_list=$(gh issue list --state open --json number)
+expect "fake gh issue list is one compact line (real-CLI shape)" \
+  "1" "$(printf '%s\n' "$raw_list" | wc -l | tr -d ' ')"
+[ "${raw_list:0:1}" = "[" ] && [ "${raw_list: -1}" = "]" ] &&
+  pass "the issue list is a single JSON array" || fail "the issue list is not one JSON array"
+expect "the compact line carries all four open numbers" \
+  "4" "$(printf '%s' "$raw_list" | grep -oE '"number"[[:space:]]*:[[:space:]]*[0-9]+' | wc -l | tr -d ' ')"
 
 # DRYRUN mode: candidates listed, nothing deleted.
 out=$(cw); rc=$?
@@ -1103,16 +1132,28 @@ printf '%s\n' "$out" | grep -q "^DRYRUN $wt_base/issue-$cl_n  (closed: ticket cl
 printf '%s\n' "$out" | grep -q "^DRYRUN $wt_base/issue-stale-old  (stale: " &&
   pass "the stale worktree is listed as DRYRUN with a stale reason" ||
   fail "no stale DRYRUN line"
+printf '%s\n' "$out" | grep -q "^DRYRUN $wt_base/issue-2026-backup  (stale: " &&
+  pass "chore/2026-backup with no tracker ticket 2026 is STALE, never ticket-protected" ||
+  fail "the untracked number 2026 was treated as a ticket or dodged the age gate"
+printf '%s\n' "$out" | grep -qF "DRYRUN $wt_base/issue 42 spaced  (stale:" &&
+  pass "the spaced-path candidate is classified and listed" ||
+  fail "the spaced-path worktree was not listed (porcelain parsing lost it)"
 [ "$(printf '%s\n' "$out" | grep -c '^REMOVED')" = 0 ] &&
   pass "the dry run removes nothing" || fail "the dry run removed something"
-[ "$(printf '%s\n' "$out" | grep -c '^DRYRUN')" = 2 ] &&
-  pass "exactly the two candidates are listed" || fail "dry-run candidate count wrong"
+[ "$(printf '%s\n' "$out" | grep -c '^DRYRUN')" = 4 ] &&
+  pass "exactly the four candidates are listed" || fail "dry-run candidate count wrong"
 printf '%s\n' "$out" | grep -q "^KEPT  $gt_dir  (gate worktree)" &&
   pass "the gate worktree is kept" || fail "the gate worktree was not kept"
 [ -n "$(printf '%s\n' "$out" | grep "^KEPT  $wt_base/issue-stale-young")" ] &&
   pass "a too-young worktree is kept (idle < stale_days)" || fail "the young worktree was not kept"
+[ -n "$(printf '%s\n' "$out" | grep "^KEPT  $wt_base/issue-2027-backup")" ] &&
+  pass "a too-young untracked-number worktree is kept (age-gated)" ||
+  fail "the young untracked-number worktree was not kept"
 printf '%s\n' "$out" | grep -q "^KEPT  $wt_base/issue-$op_n  (open issue #$op_n)" &&
   pass "a worktree whose branch has an open issue is kept" || fail "the open-issue worktree was not kept"
+printf '%s\n' "$out" | grep -q "^KEPT  $wt_base/issue-$op2_n  (open issue #$op2_n)" &&
+  pass "every open ticket in the compact list protects its worktree" ||
+  fail "a second open ticket did not protect its worktree"
 printf '%s\n' "$out" | grep -q "^KEPT  $wt_base/issue-$dt_n  (dirty" &&
   pass "a dirty worktree is kept" || fail "the dirty worktree was not kept"
 printf '%s\n' "$out" | grep -q "^KEPT  $wt_base/issue-remote  (branch feat/remote-kept still on origin)" &&
@@ -1123,9 +1164,43 @@ printf '%s\n' "$out" | grep -q "^KEPT  $wt_base/issue-$lag_n  (open issue #$lag_
 printf '%s' "$out" | grep -qF " $work/project" &&
   fail "the main worktree was listed" || pass "the main worktree is never listed"
 [ -d "$wt_base/issue-$cl_n" ] && [ -d "$wt_base/issue-stale-old" ] &&
+  [ -d "$wt_base/issue-2026-backup" ] && [ -d "$wt_base/issue 42 spaced" ] &&
   pass "the dry run leaves the candidate worktrees in place" || fail "the dry run touched a candidate"
 expect "the dry-run summary counts removed/dry-run/kept" \
-  "cleanup: 0 removed, 2 dry-run, 6 kept" "$(printf '%s\n' "$out" | tail -1)"
+  "cleanup: 0 removed, 4 dry-run, 8 kept" "$(printf '%s\n' "$out" | tail -1)"
+
+# Fail-closed (review must-fix 1a): a FAILED issue-list fetch is read as
+# "cannot classify", never as "the ticket does not exist" — no candidates arise.
+export FAKE_GH_FAIL_ISSUE_LIST=1
+out=$(cw)
+echo "$out"
+unset FAKE_GH_FAIL_ISSUE_LIST
+[ "$(printf '%s\n' "$out" | grep -c '^DRYRUN')" = 0 ] &&
+  [ "$(printf '%s\n' "$out" | grep -c '^REMOVED')" = 0 ] &&
+  pass "an issue-list failure produces no removal candidates" ||
+  fail "an issue-list failure produced candidates (fail-open!)"
+printf '%s\n' "$out" | grep -qF "KEPT  $wt_base/issue-stale-old  (tracker unreachable — cannot classify)" &&
+  pass "under an issue-list failure the stale candidate is KEPT (cannot classify)" ||
+  fail "the stale candidate was not kept as unclassifiable"
+printf '%s\n' "$out" | grep -qF "KEPT  $wt_base/issue-2026-backup  (tracker unreachable — cannot classify)" &&
+  pass "under an issue-list failure the untracked-number candidate is KEPT" ||
+  fail "the untracked-number candidate was not kept as unclassifiable"
+expect "the issue-list-failure summary lists nothing for removal" \
+  "cleanup: 0 removed, 0 dry-run, 12 kept" "$(printf '%s\n' "$out" | tail -1)"
+
+# Fail-closed (review must-fix 1b): a FAILED pr query is not read as "no PR".
+export FAKE_GH_FAIL_PR_LIST=1
+out=$(cw)
+unset FAKE_GH_FAIL_PR_LIST
+[ "$(printf '%s\n' "$out" | grep -c '^DRYRUN')" = 0 ] &&
+  [ "$(printf '%s\n' "$out" | grep -c '^REMOVED')" = 0 ] &&
+  pass "a pr-query failure produces no removal candidates" ||
+  fail "a pr-query failure produced candidates (fail-open!)"
+printf '%s\n' "$out" | grep -qF "KEPT  $wt_base/issue-$cl_n  (pr query failed — cannot classify)" &&
+  pass "under a pr-query failure the closed-ticket candidate is KEPT (cannot classify)" ||
+  fail "the closed-ticket candidate was not kept as unclassifiable"
+expect "the pr-query-failure summary lists nothing for removal" \
+  "cleanup: 0 removed, 0 dry-run, 12 kept" "$(printf '%s\n' "$out" | tail -1)"
 
 # The scenario store is owner data: populate it, then --apply must leave every file.
 mkdir -p "$store_dir"
@@ -1133,35 +1208,71 @@ write_scen c1-delta.md c1-delta "Delta works" true
 write_scen c2-omega.md c2-omega "Omega works" false
 store_count_before=$(find "$store_dir" -mindepth 1 -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')
 
-# --apply mode: removes exactly the closed and the stale worktree, keeps everything else.
+# --apply mode: removes exactly the four candidates, keeps everything else.
 out=$(cw --apply); rc=$?
 echo "$out"
 expect "cleanup --apply exits 0" "0" "$rc"
-[ "$(printf '%s\n' "$out" | grep -c '^REMOVED')" = 2 ] &&
-  pass "exactly the two candidates are removed" || fail "--apply removed the wrong set"
-printf '%s\n' "$out" | grep -q "^REMOVED $wt_base/issue-$cl_n" &&
-  pass "the closed worktree is removed" || fail "the closed worktree was not removed"
-printf '%s\n' "$out" | grep -q "^REMOVED $wt_base/issue-stale-old" &&
-  pass "the stale worktree is removed" || fail "the stale worktree was not removed"
-[ ! -d "$wt_base/issue-$cl_n" ] && [ ! -d "$wt_base/issue-stale-old" ] &&
-  pass "the removed worktrees are gone from disk" || fail "a removed worktree dir remains"
-[ -z "$(git branch --list "feat/$cl_n-closed")" ] && [ -z "$(git branch --list feat/stale-old)" ] &&
+[ "$(printf '%s\n' "$out" | grep -c '^REMOVED')" = 4 ] &&
+  pass "exactly the four candidates are removed" || fail "--apply removed the wrong set"
+ok=1
+for cand in "issue-$cl_n" "issue-stale-old" "issue-2026-backup" "issue 42 spaced"; do
+  printf '%s\n' "$out" | grep -qF "REMOVED $wt_base/$cand" || ok=0
+done
+[ "$ok" = 1 ] && pass "each candidate worktree got a REMOVED line" || fail "a candidate worktree has no REMOVED line"
+[ -z "$(git branch --list "feat/$cl_n-closed" feat/stale-old chore/2026-backup feat/42-spaced-old)" ] &&
   pass "the removed branches are deleted locally" || fail "a removed branch remains"
-[ -d "$wt_base/issue-$op_n" ] && [ -d "$wt_base/issue-$dt_n" ] &&
-  [ -d "$wt_base/issue-stale-young" ] && [ -d "$wt_base/issue-remote" ] && [ -d "$wt_base/issue-$lag_n" ] &&
-  [ -d "$gt_dir" ] &&
+[ ! -d "$wt_base/issue-$cl_n" ] && [ ! -d "$wt_base/issue-stale-old" ] &&
+  [ ! -d "$wt_base/issue-2026-backup" ] && [ ! -d "$wt_base/issue 42 spaced" ] &&
+  pass "the removed worktrees are gone from disk" || fail "a removed worktree dir remains"
+[ -d "$wt_base/issue-$op_n" ] && [ -d "$wt_base/issue-$op2_n" ] && [ -d "$wt_base/issue-$dt_n" ] &&
+  [ -d "$wt_base/issue-stale-young" ] && [ -d "$wt_base/issue-2027-backup" ] &&
+  [ -d "$wt_base/issue-remote" ] && [ -d "$wt_base/issue-$lag_n" ] && [ -d "$gt_dir" ] &&
   pass "the kept worktrees survive --apply" || fail "--apply removed a kept worktree"
 store_count_after=$(find "$store_dir" -mindepth 1 -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')
 [ "$store_count_before" = "$store_count_after" ] && [ -f "$store_dir/c1-delta.md" ] &&
   [ -f "$store_dir/c2-omega.md" ] &&
   pass "every scenario store file survives --apply" || fail "the scenario store was damaged"
 expect "the applied summary counts removed/dry-run/kept" \
-  "cleanup: 2 removed, 0 dry-run, 6 kept" "$(printf '%s\n' "$out" | tail -1)"
+  "cleanup: 4 removed, 0 dry-run, 8 kept" "$(printf '%s\n' "$out" | tail -1)"
 
 # Idempotent: a second --apply finds nothing to do.
 out=$(cw --apply)
-expect "a second --apply changes nothing (idempotent)" "cleanup: 0 removed, 0 dry-run, 6 kept" \
+expect "a second --apply changes nothing (idempotent)" "cleanup: 0 removed, 0 dry-run, 8 kept" \
   "$(printf '%s\n' "$out" | tail -1)"
+
+# Failed local branch delete (review folded 4): the worktree goes, and the
+# SURVIVING BRANCH is reported — never swallowed.
+real_git=$(command -v git)
+shim_dir="$work/git-shim"
+mkdir -p "$shim_dir"
+cat >"$shim_dir/git" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "branch" ] && [ "\${2:-}" = "-q" ] && [ "\${3:-}" = "-D" ]; then
+  echo "fatal: simulated local branch delete failure" >&2
+  exit 1
+fi
+exec "$real_git" "\$@"
+EOF
+chmod +x "$shim_dir/git"
+git worktree add -q "$wt_base/issue-branchdel" -b feat/branchdel-old origin/main
+GIT_COMMITTER_DATE="2020-01-05T00:00:00Z" \
+  git -C "$wt_base/issue-branchdel" commit -q --allow-empty -m "chore: old commit"
+out=$(PATH="$shim_dir:$PATH" cw --apply)
+echo "$out"
+printf '%s\n' "$out" | grep -qF "REMOVED $wt_base/issue-branchdel" &&
+  pass "the stale worktree is still removed when the branch delete fails" ||
+  fail "the worktree was not removed under the branch-delete failure"
+printf '%s\n' "$out" | grep -qF "WARN  feat/branchdel-old: local branch delete FAILED" &&
+  pass "the surviving branch is reported, not swallowed" ||
+  fail "no WARN line for the surviving branch"
+[ ! -d "$wt_base/issue-branchdel" ] &&
+  pass "the worktree dir is gone despite the branch-delete failure" ||
+  fail "the worktree dir remains"
+[ -n "$(git branch --list feat/branchdel-old)" ] &&
+  pass "the undeletable branch really survives" || fail "the branch vanished anyway"
+expect "the branch-delete-failure summary" \
+  "cleanup: 1 removed, 0 dry-run, 8 kept" "$(printf '%s\n' "$out" | tail -1)"
+git branch -q -D feat/branchdel-old  # tidy the simulated survivor
 
 # Operator errors: an unknown flag is a usage error.
 cw --bogus >/dev/null 2>&1
