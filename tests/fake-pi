@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 # Stand-in for: pi -p --no-session --mode json [--append-system-prompt F] [--tools ...] [--model M] TASK...
 # FAKE_PI_MODE: ok (default) | fail | slow. Streams the NDJSON events the real pi emits in JSON mode.
+# FAKE_PI_ECHO_TASK=F: append a final assistant message "TASK WAS: <task>", and ALSO write
+#                     the task verbatim to F (the brief the child got, inspectable as a file;
+#                     FAKE_PI_REPORT, if set, still emits after this and wins as finalText).
+# FAKE_PI_REPORT=F: append one more, FINAL assistant message holding F's content — the child's
+#                  report (finalText) is driven by it (contract tests for DONE/BLOCKED outcomes).
 set -u
 mode=${FAKE_PI_MODE:-ok}
 sleep_s=${FAKE_PI_SLEEP:-0.1}
 task=""
 for a in "$@"; do task="$task $a"; done
 emit() { printf '%s\n' "$1"; }
+# Escape a value for embedding in a JSON string (backslash, quote, newline, CR, tab).
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
 if [ "$mode" = slow ]; then
   trap 'exit 143' TERM
   sleep "$sleep_s" &
@@ -54,7 +65,11 @@ if [ -n "${FAKE_PI_ECHO_ROLE:-}" ]; then
 fi
 if [ -n "${FAKE_PI_ECHO_TASK:-}" ]; then
   task=${task#?}
-  esc=${task//\"/\\\"}
-  emit "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"TASK WAS: $esc\"}],\"model\":\"fake/model\",\"stopReason\":\"end\",\"usage\":{\"input\":1,\"output\":1,\"cacheRead\":0,\"cacheWrite\":0,\"cost\":{\"total\":0},\"totalTokens\":2}}}"
+  printf '%s' "$task" >"$FAKE_PI_ECHO_TASK"
+  emit "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"TASK WAS: $(json_escape "$task")\"}],\"model\":\"fake/model\",\"stopReason\":\"end\",\"usage\":{\"input\":1,\"output\":1,\"cacheRead\":0,\"cacheWrite\":0,\"cost\":{\"total\":0},\"totalTokens\":2}}}"
+fi
+# The report seam emits LAST, so it is the child's final message (the dispatch's report).
+if [ -n "${FAKE_PI_REPORT:-}" ]; then
+  emit "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"$(json_escape "$(cat "$FAKE_PI_REPORT")")\"}],\"model\":\"fake/model\",\"stopReason\":\"end\",\"usage\":{\"input\":1,\"output\":1,\"cacheRead\":0,\"cacheWrite\":0,\"cost\":{\"total\":0},\"totalTokens\":2}}}"
 fi
 exit 0

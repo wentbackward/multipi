@@ -192,6 +192,105 @@ STATUS: BLOCKED — <one-line reason>
 `;
 }
 
+// ---- scenario-writer ------------------------------------------------------
+
+export interface ScenarioWriterBriefInput {
+	ticket: number;
+	title: string;
+	/** The ticket body verbatim — its acceptance criteria and the spec sections it cite ride here. */
+	body: string;
+	/** Absolute path of the scenario store dir (outside the repository by design). */
+	storeDir: string;
+	/** Repo root the child runs at; cited spec paths resolve against it. */
+	repoRoot: string;
+}
+
+export function assembleScenarioWriterBrief(i: ScenarioWriterBriefInput): string {
+	return `Work at ${i.repoRoot}. You are writing the HOLDOUT SCENARIOS for ticket #${i.ticket} — the
+end-to-end user scenarios it will later be judged against, before any implementation exists.
+
+## Ticket
+# ${i.ticket}: ${i.title}
+
+${i.body}
+
+## Grounds
+- Scenario store (you write ONLY inside it): ${i.storeDir}
+- Read the spec sections the ticket cites (relative to ${i.repoRoot}) in full before writing.
+
+## Rules (non-negotiable)
+- Write only inside the store. Never create, modify or delete anything outside ${i.storeDir} —
+  no repo files, no worktree, no git mutations, no issues, no labels, no comments, no pushes.
+- Never read the code: a scenario written from the implementation is contaminated — the store is
+  the one thing the judged agents can be surprised by. Your inputs are the ticket, the spec
+  sections it cites, and the existing scenario files in the store (id uniqueness, new vs changed).
+- IF the store lies inside the repository (any part of ${i.storeDir} under ${i.repoRoot}): STOP,
+  write nothing, and end with STATUS: BLOCKED — store lies inside the repository.
+- One scenario per falsifiable behaviour the ticket promises. id: t${i.ticket}-<slug>
+  (convention t<ticket>-<slug>; unique in the store). required: true for the ticket's CORE
+  behaviour — its acceptance criteria; scored (required: false) for supporting behaviours.
+  One Markdown file per scenario: frontmatter id/title/spec/tags/required, then the four body
+  sections (User and goal / Preconditions and fixtures / Steps / Satisfied when in the USER's
+  terms — observable behaviour, not internals). Created scenarios are new; modified ones changed.
+
+## Report
+End your report with the scenario list — TITLES ONLY, one line per scenario; this list lands on
+the issue and is what the human reviews in dark mode (the bodies stay in the store, never in the
+report or the issue):
+
+<id> — <title> (required|scored, new|changed)
+
+Then, as the FINAL line of the report, EXACTLY one of:
+STATUS: DONE
+STATUS: BLOCKED — <one-line reason>
+`;
+}
+
+/** One scenario line of the writer's report contract: `<id> — <title> (<kind>, <state>)`. */
+export interface ScenarioLine {
+	id: string;
+	title: string;
+	kind: "required" | "scored";
+	state: "new" | "changed";
+}
+
+/**
+ * Parse the scenario lines out of a writer report. The id must carry the ticket-number prefix
+ * (`t<n>-`), the separator is an em dash, and the trailing `(<kind>, <state>)` flags the line;
+ * anything after those flags (scenario body text) is discarded — the issue must get titles only.
+ * Malformed lines are ignored; duplicate ids keep the first occurrence.
+ */
+export function parseScenarioLines(report: string): ScenarioLine[] {
+	const line = /^(t\d+-[a-z0-9][a-z0-9-]*)\s+—\s+(.+?)\s*\((required|scored),\s*(new|changed)\)/;
+	const seen = new Set<string>();
+	const out: ScenarioLine[] = [];
+	for (const raw of report.split("\n")) {
+		const m = line.exec(raw.trim());
+		if (!m) continue;
+		const [, id, title, kind, state] = m;
+		if (seen.has(id)) continue;
+		seen.add(id);
+		out.push({ id, title, kind: kind as ScenarioLine["kind"], state: state as ScenarioLine["state"] });
+	}
+	return out;
+}
+
+/**
+ * Keep only the scenario lines belonging to `ticket` (id prefix `t<ticket>-`; the hyphen in
+ * the prefix keeps e.g. `t7-` from matching `t71-`). A writer that reports a foreign id
+ * cannot thereby pollute the ticket's dark-mode review list.
+ */
+export function scenarioLinesForTicket(ticket: number, lines: ScenarioLine[]): ScenarioLine[] {
+	const prefix = `t${ticket}-`;
+	return lines.filter((l) => l.id.startsWith(prefix));
+}
+
+/** The comment posted on the ticket: titles only (id, title, required, new/changed) — never the bodies. Foreign ids are dropped. */
+export function buildScenarioComment(ticket: number, lines: ScenarioLine[]): string {
+	const rows = scenarioLinesForTicket(ticket, lines).map((l) => `- ${l.id} \u2014 ${l.title} (${l.kind}, ${l.state})`).join("\n");
+	return `Scenarios for ticket #${ticket} (titles only \u2014 this list is what is reviewed in dark mode; the bodies live in the scenario store):\n\n${rows}`;
+}
+
 // ---- analyst --------------------------------------------------------------
 export interface AnalystBriefInput {
 	/** Absolute path of the spec to decompose (spec mode). */

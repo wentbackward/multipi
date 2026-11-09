@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry } from "../../extension/src/tools.ts";
+import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket } from "../../extension/src/tools.ts";
 import { makeFixture } from "../fixtures.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -33,7 +33,15 @@ function agentsDir(fx: ReturnType<typeof makeFixture>): string {
 	writeFileSync(path.join(d, "code-reviewer.md"), "---\nname: code-reviewer\ndescription: reviews\ntools: read, bash\n---\nReview. End with VERDICT: APPROVE.\n");
 	writeFileSync(path.join(d, "verifier.md"), "---\nname: verifier\ndescription: audits\ntools: read, bash\n---\nAudit. End with STATUS: DONE.\n");
 	writeFileSync(path.join(d, "analyst.md"), "---\nname: analyst\ndescription: plans tickets\ntools: read, bash\n---\nPlan. End with STATUS: DONE.\n");
+	writeFileSync(path.join(d, "scenario-writer.md"), "---\nname: scenario-writer\ndescription: writes holdout scenarios\ntools: read, write, bash\n---\nWrite scenarios. End with STATUS: DONE.\n");
 	return d;
+}
+
+/** Write a child report to a scratch file and point the FAKE_PI_REPORT seam at it. */
+function fakeReport(fx: ReturnType<typeof makeFixture>, content: string): void {
+	const p = path.join(fx.dir, `report-${Math.random().toString(36).slice(2)}.md`);
+	writeFileSync(p, content);
+	process.env.FAKE_PI_REPORT = p;
 }
 
 function ctxWithAgents(fx: ReturnType<typeof makeFixture>) {
@@ -415,6 +423,217 @@ test("dispatch(analyst) plans from a spec, writes no ticket, records a done entr
 		const state = JSON.parse(execFileSync("cat", [path.join(fx.dir, "home", "proj", "dispatch.json")]).toString());
 		assert.equal(state["analyst-prd-md"].status, "done");
 		assert.equal(state["analyst-prd-md"].worktree, fx.repo);
+	} finally { fx.cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
+// Scenario-writer dispatch (dark-factory spec §4; ticket #11).
+// ---------------------------------------------------------------------------
+
+test("findOpenTicket: one bounded retry recovers a ticket missing on the first list (GitHub list lag)", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	try {
+		const n = createIssue(fx, "Created moments ago");
+		const issuesDir = path.join(fx.dir, "gh", "issues");
+		// Simulate GitHub's list lag: the ticket is hidden from the first list and
+		// reappears well before the bounded retry fires.
+		renameSync(path.join(issuesDir, String(n)), path.join(issuesDir, `.${n}.hidden`));
+		setTimeout(() => renameSync(path.join(issuesDir, `.${n}.hidden`), path.join(issuesDir, String(n))), 400);
+		const t0 = Date.now();
+		const issue = await findOpenTicket("", n);
+		assert.equal(issue?.number, n, "the retry found the ticket");
+		assert.ok(Date.now() - t0 >= 1400, "the retry waited before re-listing");
+	} finally { fx.cleanup(); }
+});
+
+test("findOpenTicket: a genuinely missing ticket is refused after the single retry", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	try {
+		const t0 = Date.now();
+		const issue = await findOpenTicket("", 9999);
+		assert.equal(issue, undefined, "refused, not guessed");
+		assert.ok(Date.now() - t0 >= 1400, "the single retry happened");
+	} finally { fx.cleanup(); }
+});
+
+const SC_WRITER_BODY = [
+	"## Why",
+	"Spec §4 — a ticket is judged by its holdout scenarios.",
+	"",
+	"Reads docs/superpowers/specs/2026-11-01-multipi-dark-factory.md §4.",
+	"",
+	"## Acceptance criteria",
+	"- [ ] CRITERION-CACHE-HIT is met",
+	"- [ ] CRITERION-CACHE-MISS is met",
+].join("\n");
+
+/** Fixture with the scenario store ON (dark preset); store defaults to <state>/scenarios. */
+function scenarioWriterFx() {
+	return makeFixture(JSON.stringify({ base_branch: "main", checks: [{ name: "unit", command: "true", heavy: false }], fast_check: "true", factory: "dark" }));
+}
+
+test("dispatch(scenario-writer) runs the child at the repo root (no worktree, no branch) and the brief carries ticket, criteria, cited spec and store dir", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	const echo = path.join(fx.dir, "echo-task");
+	process.env.FAKE_PI_ECHO_TASK = echo; // the child's final message echoes the brief it received
+	// The brief's LAST line is the literal contract sample `STATUS: BLOCKED — <one-line reason>`;
+	// without an explicit report the terminal-line classifier would take the BLOCKED path by
+	// accident. Drive the outcome with a DONE report and assert it, so the expectation is documented.
+	fakeReport(fx, "Wrote the holdout scenarios into the store.\n\nSTATUS: DONE\n");
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Cache hit skips recompute", SC_WRITER_BODY);
+		const res = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: n });
+		assert.equal(res.isError ?? false, false, textOf(res));
+		// The echoed task IS the brief (written verbatim to the echo file): it must carry the
+		// ticket number, its acceptance criteria, the cited spec section and the store dir.
+		assert.ok(existsSync(echo), "the FAKE_PI_ECHO_TASK seam captured the brief");
+		const t = readFileSync(echo, "utf8");
+		for (const needle of [
+			`# ${n}: Cache hit skips recompute`,
+			"CRITERION-CACHE-HIT", "CRITERION-CACHE-MISS",
+			"docs/superpowers/specs/2026-11-01-multipi-dark-factory.md §4",
+			path.join(fx.dir, "home", "proj", "scenarios"), // the store dir (default under the state dir)
+			fx.repo, // the repo root (cwd of the child)
+		]) assert.ok(t.includes(needle), `brief missing: ${needle}`);
+		// The child runs AT the repo root: no worktree, no branch, recorded under its own key.
+		const state = JSON.parse(readFileSync(path.join(fx.dir, "home", "proj", "dispatch.json"), "utf8"));
+		assert.equal(state[`scenario-writer-${n}`].worktree, fx.repo);
+		assert.equal(state[`scenario-writer-${n}`].branch, undefined);
+		assert.equal(state[`scenario-writer-${n}`].status, "done", "the explicit DONE report decided the outcome");
+		assert.ok(!existsSync(path.join(fx.dir, "home", "proj", "worktrees")), "no issue worktree was created");
+	} finally {
+		delete process.env.FAKE_PI_ECHO_TASK;
+		delete process.env.FAKE_PI_REPORT;
+		fx.cleanup();
+	}
+});
+
+test("dispatch(scenario-writer) DONE posts the scenario TITLES (id, title, required, new/changed) — never the bodies — on the ticket", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Cache hit skips recompute", SC_WRITER_BODY);
+		fakeReport(fx, [
+			"Wrote the scenarios for the ticket.",
+			"",
+			`t${n}-cache-hit — Cache hit returns the stored value (required, new) — SECRET-BODY-ALPHA must never leave the store`,
+			`t${n}-cache-miss — A miss recomputes once (scored, changed) SECRET-BODY-BETA must never leave the store`,
+			`t${n + 7}-foreign — A foreign-ticket scenario (scored, new) SECRET-FORBODY-GAMMA must never appear`,
+			"",
+			"## Questions",
+			"none",
+			"",
+			"STATUS: DONE",
+		].join("\n"));
+		const res = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: n });
+		assert.match(textOf(res), /scenario-writer #\d+ .* -> done/, textOf(res));
+		const commentFile = path.join(fx.dir, "gh", "comments", String(n));
+		assert.ok(existsSync(commentFile), "a comment was posted on the ticket");
+		const comment = readFileSync(commentFile, "utf8");
+		for (const needle of [
+			`t${n}-cache-hit`, "Cache hit returns the stored value", "required", "new",
+			`t${n}-cache-miss`, "A miss recomputes once", "scored", "changed",
+		]) assert.ok(comment.includes(needle), `comment missing: ${needle}`);
+		assert.ok(!comment.includes("SECRET-BODY-ALPHA") && !comment.includes("SECRET-BODY-BETA"), "the scenario bodies never leave the store");
+		assert.ok(!comment.includes(`t${n + 7}-foreign`) && !comment.includes("A foreign-ticket scenario"), "a foreign-ticket id cannot pollute the review list");
+		const state = JSON.parse(readFileSync(path.join(fx.dir, "home", "proj", "dispatch.json"), "utf8"));
+		assert.equal(state[`scenario-writer-${n}`].status, "done");
+	} finally {
+		delete process.env.FAKE_PI_REPORT;
+		fx.cleanup();
+	}
+});
+
+test("dispatch(scenario-writer) BLOCKED labels the ticket dl/blocked and posts no comment", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	fakeReport(fx, [
+		"The store directory resolves inside the repository; refusing to write holdout material in judged ground.",
+		"",
+		"STATUS: BLOCKED — store lies inside the repository",
+	].join("\n"));
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Cache hit skips recompute", SC_WRITER_BODY);
+		const res = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: n });
+		assert.equal(res.isError ?? false, false, textOf(res));
+		assert.match(textOf(res), /scenario-writer #\d+ .* -> blocked/, textOf(res));
+		const labelFile = path.join(fx.dir, "gh", "labels", String(n));
+		assert.ok(existsSync(labelFile), "the label was recorded");
+		assert.ok(readFileSync(labelFile, "utf8").trim().split("\n").includes("dl/blocked"), "dl/blocked applied");
+		assert.ok(!existsSync(path.join(fx.dir, "gh", "comments", String(n))), "no scenario comment on a blocked ticket");
+		const state = JSON.parse(readFileSync(path.join(fx.dir, "home", "proj", "dispatch.json"), "utf8"));
+		assert.equal(state[`scenario-writer-${n}`].status, "blocked");
+	} finally {
+		delete process.env.FAKE_PI_REPORT;
+		fx.cleanup();
+	}
+});
+
+test("dispatch(scenario-writer) DONE with no scenario lines posts no comment", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	fakeReport(fx, "Nothing new to write; the store already covers this ticket.\n\nSTATUS: DONE\n");
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Cache hit skips recompute", SC_WRITER_BODY);
+		const res = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: n });
+		assert.equal(res.isError ?? false, false, textOf(res));
+		assert.match(textOf(res), /scenario-writer #\d+ .* -> done/, textOf(res));
+		assert.ok(!existsSync(path.join(fx.dir, "gh", "comments", String(n))), "no comment without scenario lines");
+		assert.ok(!existsSync(path.join(fx.dir, "home", "proj", "worktrees")), "the writer ran at the repo root, no worktree");
+		const state = JSON.parse(readFileSync(path.join(fx.dir, "home", "proj", "dispatch.json"), "utf8"));
+		assert.equal(state[`scenario-writer-${n}`].status, "done");
+	} finally {
+		delete process.env.FAKE_PI_REPORT;
+		fx.cleanup();
+	}
+});
+
+test("dispatch(scenario-writer) refuses when the scenario store is off in the config", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main" })); // collaborative, no scenarios block
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Cache hit skips recompute", SC_WRITER_BODY);
+		const res = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: n });
+		assert.equal(res.isError, true);
+		assert.match(textOf(res), /scenario store is off/i);
+	} finally { fx.cleanup(); }
+});
+
+test("dispatch(scenario-writer) requires a ticket and finds it among open issues", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const res1 = await call(ctx, "devloop.dispatch", { role: "scenario-writer" });
+		assert.equal(res1.isError, true);
+		assert.match(textOf(res1), /scenario-writer requires `ticket`/);
+		const res2 = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: 9999 });
+		assert.equal(res2.isError, true);
+		assert.match(textOf(res2), /not found among open issues/);
+	} finally { fx.cleanup(); }
+});
+
+test("dispatch(scenario-writer) refuses a second writer on the same ticket while one is in flight", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		mkdirSync(ctx.stateDir, { recursive: true });
+		writeFileSync(
+			path.join(ctx.stateDir, "dispatch.json"),
+			JSON.stringify({ "scenario-writer-77": { pid: process.pid, role: "scenario-writer", worktree: fx.repo, startedAt: 1, status: "running" } }),
+		);
+		const res = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: 77 });
+		assert.equal(res.isError, true);
+		assert.match(textOf(res), /already running/);
 	} finally { fx.cleanup(); }
 });
 

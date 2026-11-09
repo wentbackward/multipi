@@ -3,6 +3,7 @@ import test from "node:test";
 import {
 	branchSlug, worktreePath, portRange,
 	assembleImplementerBrief, assembleReviewerBrief, assembleAnalystBrief, assembleVerifierBrief,
+	assembleScenarioWriterBrief, parseScenarioLines, scenarioLinesForTicket, buildScenarioComment,
 } from "../../extension/src/brief.ts";
 
 const REPO = "/home/u/src/proj";
@@ -128,6 +129,99 @@ test("analyst brief: focus mode embeds the operator feedback verbatim", () => {
 	const brief = assembleAnalystBrief({ focus: "the alert email arrived TWICE", repoRoot: "/repo", planPath: "/p.md" });
 	assert.ok(brief.includes("the alert email arrived TWICE"), "feedback verbatim");
 	assert.ok(!brief.includes("## Ticket: <imperative title") === false, "still has the plan format");
+});
+
+// --- scenario-writer (dark-factory spec §4) ---------------------------------
+
+test("scenario-writer brief carries the ticket, its criteria, the cited spec and the store dir", () => {
+	const brief = assembleScenarioWriterBrief({
+		ticket: 11, title: "Cache hit skips recompute",
+		body: [
+			"## Why", "Spec §4 — a ticket is judged by its holdout scenarios.", "",
+			"Reads docs/superpowers/specs/2026-11-01-multipi-dark-factory.md §4.", "",
+			"## Acceptance criteria", "- [ ] CRITERION-CACHE-HIT is met", "- [ ] CRITERION-CACHE-MISS is met",
+		].join("\n"),
+		storeDir: "/state/proj/scenarios", repoRoot: "/home/u/src/proj",
+	});
+	for (const needle of [
+		"#11", "Cache hit skips recompute",
+		"CRITERION-CACHE-HIT", "CRITERION-CACHE-MISS",                  // the acceptance criteria
+		"docs/superpowers/specs/2026-11-01-multipi-dark-factory.md §4", // the cited spec section
+		"/state/proj/scenarios",                                       // the store dir
+		"/home/u/src/proj",                                            // runs at the repo root
+		"t11-",                                                        // the id convention for THIS ticket
+	]) assert.ok(brief.includes(needle), `brief missing: ${needle}`);
+});
+
+test("scenario-writer brief mandates: store-only writes, never the code, BLOCKED when the store is inside the repo, titles-only report contract", () => {
+	const brief = assembleScenarioWriterBrief({
+		ticket: 7, title: "Close position", body: "body", storeDir: "/s", repoRoot: "/r",
+	});
+	assert.match(brief, /only inside the store/i, "writes only inside the store");
+	assert.match(brief, /never read the code/i, "never reads the code");
+	assert.match(brief, /required: true/, "required: true for core behaviour");
+	assert.match(brief, /t<ticket>-<slug>/, "id convention");
+	assert.match(brief, /store lies inside the repository/i, "the BLOCKED condition");
+	assert.match(brief, /^STATUS: DONE$/m, "report: STATUS: DONE");
+	assert.match(brief, /^STATUS: BLOCKED/m, "report: STATUS: BLOCKED");
+	assert.match(brief, /required\|scored, new\|changed/, "report: one line per scenario");
+	assert.match(brief, /TITLES ONLY/i, "the issue list carries titles, never the scenario text");
+});
+
+test("parseScenarioLines extracts id/title/kind/state and drops everything after the flag parens", () => {
+	const report = [
+		"Wrote the scenarios.",
+		"",
+		"t1-cache-hit — Cache hit returns the stored value (required, new) — SECRET-BODY-ALPHA must not leak",
+		"t1-cache-miss — A miss recomputes once (scored, changed) SECRET-BODY-BETA must not leak",
+		"",
+		"Some prose line with an em dash — nothing to parse.",
+		"x1-nope — not a ticket-prefixed id (required, new)",
+		"t1-malformed — line without the flag parens",
+		"STATUS: DONE",
+	].join("\n");
+	const lines = parseScenarioLines(report);
+	assert.deepEqual(lines, [
+		{ id: "t1-cache-hit", title: "Cache hit returns the stored value", kind: "required", state: "new" },
+		{ id: "t1-cache-miss", title: "A miss recomputes once", kind: "scored", state: "changed" },
+	]);
+});
+
+test("parseScenarioLines ignores empty input and duplicates (first occurrence wins)", () => {
+	assert.deepEqual(parseScenarioLines(""), []);
+	assert.deepEqual(parseScenarioLines("\n  \n\n"), []);
+	const dup = "t2-a — Alpha (required, new)\nt2-a — Alpha (scored, changed)\n";
+	assert.deepEqual(parseScenarioLines(dup), [{ id: "t2-a", title: "Alpha", kind: "required", state: "new" }]);
+});
+
+test("buildScenarioComment is titles only: id, title, required, new/changed — and nothing else", () => {
+	const comment = buildScenarioComment(1, [
+		{ id: "t1-cache-hit", title: "Cache hit returns the stored value", kind: "required", state: "new" },
+		{ id: "t1-cache-miss", title: "A miss recomputes once", kind: "scored", state: "changed" },
+	]);
+	for (const needle of ["#1", "t1-cache-hit", "Cache hit returns the stored value", "required", "new", "t1-cache-miss", "scored", "changed"])
+		assert.ok(comment.includes(needle), `comment missing: ${needle}`);
+	assert.ok(!comment.includes("SECRET"), "no body text in the comment");
+});
+
+test("scenarioLinesForTicket keeps only the t<ticket>- rows (foreign ids and longer prefixes excluded)", () => {
+	const mine = { id: "t7-mine", title: "Mine", kind: "required" as const, state: "new" as const };
+	const lines = [
+		mine,
+		{ id: "t8-theirs", title: "Theirs", kind: "scored" as const, state: "changed" as const },
+		{ id: "t71-prefix-decoy", title: "Decoy", kind: "required" as const, state: "new" as const },
+	];
+	assert.deepEqual(scenarioLinesForTicket(7, lines), [mine]);
+	assert.deepEqual(scenarioLinesForTicket(8, lines), [{ id: "t8-theirs", title: "Theirs", kind: "scored", state: "changed" }]);
+});
+
+test("buildScenarioComment drops foreign ids — a writer reporting the wrong ticket cannot pollute the review list", () => {
+	const comment = buildScenarioComment(7, [
+		{ id: "t7-mine", title: "Mine", kind: "required", state: "new" },
+		{ id: "t8-theirs", title: "Theirs", kind: "scored", state: "changed" },
+	]);
+	assert.ok(comment.includes("t7-mine"), "own ticket's line stays");
+	assert.ok(!comment.includes("t8-theirs") && !comment.includes("Theirs"), "foreign line dropped");
 });
 
 // --- the first wall (spec §3): briefs never name the store ------------------

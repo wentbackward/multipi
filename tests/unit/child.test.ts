@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFileSync, unlinkSync, mkdtempSync } from "node:fs";
+import { readFileSync, unlinkSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn as cpSpawn } from "node:child_process";
 import { spawnPi, resolvePiInvocation, killGroup, groupAlive, groupMemberCount } from "../../extension/src/child.ts";
@@ -36,12 +36,22 @@ test("spawnPi streams updates and captures final output + usage", async () => {
 });
 
 test("spawnPi passes the task through as the trailing argument", async () => {
-	const res = await spawnPi({
-		task: "remember this exact phrase: alpha-bravo",
-		cwd: process.cwd(),
-		env: { MULTIPI_PI_BIN: FAKE_PI, FAKE_PI_ECHO_TASK: "1" },
-	});
-	assert.match(res.finalText, /alpha-bravo/);
+	const echoDir = mkdtempSync(path.join(tmpdir(), "fake-pi-echo-"));
+	const echoFile = path.join(echoDir, "task");
+	try {
+		const res = await spawnPi({
+			task: "remember this exact phrase: alpha-bravo",
+			cwd: process.cwd(),
+			env: { MULTIPI_PI_BIN: FAKE_PI, FAKE_PI_ECHO_TASK: echoFile },
+		});
+		assert.match(res.finalText, /alpha-bravo/);
+		assert.ok(
+			readFileSync(echoFile, "utf8").endsWith(" remember this exact phrase: alpha-bravo"),
+			`echo file carries the task verbatim: ${readFileSync(echoFile, "utf8")}`,
+		);
+	} finally {
+		rmSync(echoDir, { recursive: true, force: true });
+	}
 });
 
 test("spawnPi reports non-zero exits with stderr", async () => {
