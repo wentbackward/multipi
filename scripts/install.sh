@@ -12,9 +12,10 @@ plugin_root=$(cd "$here/.." && pwd)
 target=${1:-.}
 target=$(cd "$target" && pwd)
 
-# A worktree's .git is a FILE pointing at the main repo, not a directory — accept
-# both (the dogfood checkouts themselves are worktrees).
-[ -d "$target/.git" ] || [ -f "$target/.git" ] || { echo "install: $target is not a git repository" >&2; exit 2; }
+# A worktree's .git is a FILE pointing at the main repo, not a directory — and bare
+# repos have neither at the top level. Validate with git itself so a stray file named
+# .git in a non-repo never passes (any of the shapes git accepts is acceptable here).
+git -C "$target" rev-parse --git-common-dir >/dev/null 2>&1 || { echo "install: $target is not a git repository" >&2; exit 2; }
 
 # 1. scripts/ — the deterministic backbone, versioned inside the target (skipped when installing
 #    the plugin into itself)

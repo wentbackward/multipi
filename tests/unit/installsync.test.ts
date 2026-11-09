@@ -68,4 +68,14 @@ test("the installed extension manifest is the installer-owned ESM document", () 
 		["@earendil-works/pi-coding-agent", "typebox"],
 		"the installed manifest must own exactly the two extension deps",
 	);
+	// The pins mirror this repo's devDependencies (DECISIONS entry): enforce the mirror,
+	// or a future devDep bump would silently leave every installed repo on a stale pin.
+	const root = JSON.parse(read(rel("package.json")).toString("utf8")) as { devDependencies?: Record<string, string> };
+	for (const name of ["@earendil-works/pi-coding-agent", "typebox"]) {
+		assert.equal(
+			manifest.dependencies?.[name],
+			root.devDependencies?.[name],
+			`installed manifest pin for ${name} drifted from the root package.json devDependency`,
+		);
+	}
 });
