@@ -1751,7 +1751,7 @@ grep -qiF "scenario-writer" "$skill_md" &&
 grep -qiF "ordinary pipeline" "$skill_md" &&
   pass "the runbook merges through the ordinary pipeline" ||
   fail "the runbook does not say the switch merges through the ordinary pipeline"
-grep -qi "never ask the human to read a diff" "$skill_md" &&
+grep -qiE "never ask\[s\]? the human to read a diff" "$skill_md" &&
   pass "the dark-mode rule: the orchestrator never asks the human to read a diff" ||
   fail "the dark-mode diff rule is missing"
 for surface in "scenario title" "gate outcome" "verifier report" "dl/blocked"; do
