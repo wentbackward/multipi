@@ -19,9 +19,13 @@
 #            tracker's open+closed issue set — a bare number that matches no
 #            ticket (chore/2026-backup) is not one and falls into STALE.
 # Classification is FAIL-CLOSED: a tracker query may fail without saying "does
-# not exist". If gh is missing or unauthenticated, or EITHER issue-list fetch or
-# a per-branch pr query fails mid-run, the worktree is KEPT ("cannot classify") —
-# removal always demands a POSITIVE classification.
+# not exist", and the SAME rule applies to the local age probe — an unreadable
+# commit age is unclassifiable, never "ancient". If gh is missing or
+# unauthenticated, or EITHER issue-list fetch or a per-branch pr query fails
+# mid-run, or `git log` cannot read the last commit, the worktree is KEPT
+# ("cannot classify") — removal always demands a POSITIVE classification. A
+# failed issue-list fetch also prints a one-line WARN carrying gh's stderr, so
+# an unattended dark cycle's log says WHY everything was kept.
 # Always KEPT (printed with the reason, in both modes):
 #   - the main worktree (never listed) and the gate worktree, plus detached heads
 #     (not ticket worktrees),
@@ -77,13 +81,30 @@ if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then have_gh
 open_raw=""
 closed_raw=""
 tracker_ok=0
+gh_err_file=""
+warn_tracker_fetch() { # warn_tracker_fetch WHAT — one WARN line carrying gh's stderr
+  why=$(tr '\n' ' ' <"$gh_err_file" | sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/^ //' -e 's/ $//')
+  [ -n "$why" ] || why="no diagnostic captured"
+  echo "WARN  tracker fetch failed ($1): $why"
+}
 if [ "$have_gh" -eq 1 ]; then
   # --limit 500 per state: the snapshot cap. Degradation (tickets beyond it fall
   # back to STALE) is logged in docs/DECISIONS.md, 2026-11-09 entry
   # "cleanup-worktrees.sh tracks the issue-list FETCH success".
-  open_raw=$(gh issue list --state open --json number --limit 500 2>/dev/null) &&
-    closed_raw=$(gh issue list --state closed --json number --limit 500 2>/dev/null) &&
-    tracker_ok=1
+  # Fetch failures are DIAGNOSED, not just absorbed: a failed fetch still keeps
+  # everything (tracker_ok stays 0), and the WARN says why it failed.
+  gh_err_file=$(mktemp) || dl_die "mktemp failed"
+  if open_raw=$(gh issue list --state open --json number --limit 500 2>"$gh_err_file"); then
+    if closed_raw=$(gh issue list --state closed --json number --limit 500 2>"$gh_err_file"); then
+      tracker_ok=1
+    else
+      warn_tracker_fetch "issue list --state closed"
+    fi
+  else
+    warn_tracker_fetch "issue list --state open"
+  fi
+  rm -f "$gh_err_file"
+  gh_err_file=""
 fi
 # nums_of: layout-agnostic — real gh emits ONE compact array line, and future
 # clients may pretty-print; every "number" field yields one line.
@@ -163,8 +184,17 @@ while IFS=$'\t' read -r wt br; do
     take "$wt" "$br" "closed: no live PR"; continue
   fi
   # No live PR, and the branch number is no ticket on the tracker (or there is
-  # none at all): the STALE bucket, age-gated by cleanup.stale_days.
-  last=$(git -C "$wt" log -1 --format=%ct 2>/dev/null || echo 0)
+  # none at all): the STALE bucket, age-gated by cleanup.stale_days. The LOCAL
+  # probe obeys the fail-closed rule too: an unreadable age is unclassifiable,
+  # never "ancient" (reading a probe failure as age 0 would let a negative
+  # signal drive deletion).
+  last=$(git -C "$wt" log -1 --format=%ct 2>/dev/null) || last=""
+  case $last in
+    '' | *[!0-9]*)
+      keep "$wt" "commit age unreadable — cannot classify"
+      continue
+      ;;
+  esac
   idle_days=$(( (now - last) / 86400 ))
   if [ $((now - last)) -gt $((stale_days * 86400)) ]; then
     take "$wt" "$br" "stale: last commit ${idle_days}d old (> ${stale_days}d limit)"
