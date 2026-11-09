@@ -12,7 +12,9 @@ plugin_root=$(cd "$here/.." && pwd)
 target=${1:-.}
 target=$(cd "$target" && pwd)
 
-[ -d "$target/.git" ] || { echo "install: $target is not a git repository" >&2; exit 2; }
+# A worktree's .git is a FILE pointing at the main repo, not a directory — accept
+# both (the dogfood checkouts themselves are worktrees).
+[ -d "$target/.git" ] || [ -f "$target/.git" ] || { echo "install: $target is not a git repository" >&2; exit 2; }
 
 # 1. scripts/ — the deterministic backbone, versioned inside the target (skipped when installing
 #    the plugin into itself)
@@ -32,7 +34,25 @@ mkdir -p "$dest_ext/src"
 cp -f "$plugin_root/extension/src/"*.ts "$dest_ext/src/"
 mkdir -p "$dest_ext/agents"
 cp -f "$plugin_root/agents/"*.md "$dest_ext/agents/"
-cp -f "$plugin_root/extension/package.json" "$dest_ext/" 2>/dev/null || true
+# The extension's package.json is OWNED BY THE INSTALLER (ticket #37): it is
+# rewritten on every sync — never copied — so a stale local copy (an npm-init'd
+# type:commonjs manifest left in the extension dir to host the runtime probe's
+# node_modules) can no longer survive an upgrade and force CJS parsing of the
+# ESM .ts sources (which silently kills the doctor's factory report). Same
+# ownership class as the scripts/ copy: the installer, not the target repo,
+# decides the bytes. The dep pins mirror this repo's package.json devDeps.
+cat >"$dest_ext/package.json" <<'EOF'
+{
+  "name": "multipi-devloop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "typebox": "1.3.27"
+  }
+}
+EOF
 cp -f "$plugin_root/extension/tsconfig.json" "$dest_ext/" 2>/dev/null || true
 
 # 3. role prompts at the project layer (these win over the bundled copy)

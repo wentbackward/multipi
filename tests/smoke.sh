@@ -876,6 +876,18 @@ cat >"$INSTALL_PROJ/.devloop.json" <<'EOF'
 }
 EOF
 git -C "$INSTALL_PROJ" remote add origin "$work/origin.git"
+# A git WORKTREE (a .git file, not a directory) is a valid target: the dogfood
+# checkouts themselves are worktrees, and an installer that refuses them cannot
+# upgrade its own instance.
+( cd "$INSTALL_PROJ" && git add -A >/dev/null && git commit -qm "chore: installed" )
+git -C "$INSTALL_PROJ" worktree add -q "$work/installwt"
+bash "$plugin/scripts/install.sh" "$work/installwt" >/dev/null 2>&1 &&
+  pass "install runs over a worktree target (.git file)" ||
+  fail "install refused a worktree target"
+grep -q '"type": "module"' "$work/installwt/.pi/extensions/multipi-devloop/package.json" &&
+  pass "the worktree target receives the owned ESM manifest" ||
+  fail "no owned ESM manifest in the worktree target"
+git -C "$INSTALL_PROJ" worktree remove --force "$work/installwt"
 out=$(cd "$INSTALL_PROJ" && bash "$plugin/scripts/doctor.sh" 2>&1)
 echo "$out" | grep -qF "factory collaborative, scenarios off (default)" &&
   pass "doctor prints the factory line in the installed target" ||
