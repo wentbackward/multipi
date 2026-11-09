@@ -12,13 +12,25 @@
 # Supported surface (everything the multipi scripts and extension call):
 #   auth status
 #   pr view <branch> [--json state]        0 open, 1 none
+#   pr list --head <branch> --json state   0 always ([] when no PR)
+#     --state open|closed|merged|all is HONORED with the real CLI's default:
+#     WITHOUT --state only OPEN PRs are listed — a MERGED PR is invisible
+#     unless the caller asks for all (or merged).
 #   pr create --head B --title T [--body-file F]
 #   pr merge|squash-merge <branch> [--match-head-commit SHA]
 #   issue create <title> [body]            prints issue URL
 #   issue list --state open|closed --json <fields>
+#     the REQUESTED fields are honoured: of number/title/labels/body, only the
+#     ones named in --json are emitted (unknown fields are ignored), so a body
+#     containing JSON-shaped text can never pollute a --json number query.
 #   issue view <n> --json <fields>
 #   issue edit <n> --add-label <l>
 #   issue close <n> [--comment <c>]
+#
+# `issue list --json` emits the REAL CLI shape: ONE compact array line
+# ([{...},{...}], or [] when empty), not one object per line.
+# Failure seams for fail-open tests (off unless set to 1): FAKE_GH_FAIL_ISSUE_LIST
+# and FAKE_GH_FAIL_PR_LIST make the matching subcommand fail like a transient 502.
 #
 # JSON strings escape backslash and double quote; the issue BODY in
 # `issue list --json` spans the remainder of the issue file, and its newlines
@@ -34,6 +46,14 @@ jesc() { printf '%s' "${1:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
 # global --repo FLAG VALUE: the extension pins the repo explicitly; the fake ignores it
 if [ "${1:-}" = "--repo" ]; then shift 2; fi
+
+# documented failure seams (see header): simulate a transient tracker failure
+if [ "${1:-} ${2:-}" = "issue list" ] && [ "${FAKE_GH_FAIL_ISSUE_LIST:-}" = 1 ]; then
+  echo "fake gh: simulated transient failure (issue list)" >&2; exit 1
+fi
+if [ "${1:-} ${2:-}" = "pr list" ] && [ "${FAKE_GH_FAIL_PR_LIST:-}" = 1 ]; then
+  echo "fake gh: simulated transient failure (pr list)" >&2; exit 1
+fi
 
 case "${1:-} ${2:-}" in
   "auth status")
@@ -107,6 +127,27 @@ case "${1:-} ${2:-}" in
     printf '%s\n%s\n' "$title" "$body" >"$dir/issues/$n"
     echo "https://github.com/fake/repo/issues/$n"
     ;;
+  "pr list")
+    head=""
+    pstate=open
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --head) head=$2; shift 2 ;;
+        --state) pstate=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    st=""
+    [ -f "$dir/$(key "$head").state" ] && st=$(sed -n 1p "$dir/$(key "$head").state")
+    show=0
+    [ -n "$st" ] && case $pstate in
+      all) show=1 ;;
+      open) [ "$st" = OPEN ] && show=1 ;;
+      closed) [ "$st" = CLOSED ] && show=1 ;;
+      merged) [ "$st" = MERGED ] && show=1 ;;
+    esac
+    [ "$show" = 1 ] && printf '[{"state":"%s"}]\n' "$st" || printf '[]\n'
+    ;;
   "issue list")
     state=open json=""
     while [ $# -gt 0 ]; do
@@ -119,30 +160,41 @@ case "${1:-} ${2:-}" in
     done
     src=$dir/issues
     [ "$state" = closed ] && src=$dir/issues-closed
-    found=0
+    # Honour the REQUESTED --json fields (real CLI contract): of
+    # number/title/labels/body, only the named ones are emitted. Emitting
+    # unrequested body text into a --json number query would let JSON-shaped
+    # bodies interfere with number extractors.
+    want_field() { case ,$json, in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
+    items=""
     for f in $(find "$src" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\n' 2>/dev/null | sort -n); do
-      found=1
       if [ -n "$json" ]; then
-        if [ "$state" = closed ]; then
-          printf '{"number":%s}\n' "$f"
-        else
-          title=$(sed -n 1p "$src/$f")
-          # The body is the REMAINDER of the file (multi-line round-trips): quote it first,
-          # then encode newlines as literal \n so the JSON value stays on one line.
-          body=$(jesc "$(sed -n '2,$p' "$src/$f")" | awk '{printf "%s%s", (NR>1?"\\n":""), $0}')
+        obj='{"number":'$f
+        if want_field title; then
+          obj="$obj,\"title\":\"$(jesc "$(sed -n 1p "$src/$f")")\""
+        fi
+        if want_field labels; then
           labs="[]"
           if [ -f "$dir/labels/$f" ]; then
             labs=$(awk '{printf "%s{\"name\":\"%s\"}", (NR>1?",":""), $0}' "$dir/labels/$f")
             labs="[$labs]"
           fi
-          printf '{"number":%s,"title":"%s","labels":%s,"body":"%s"}\n' \
-            "$f" "$(jesc "$title")" "$labs" "$(jesc "$body")"
+          obj="$obj,\"labels\":$labs"
         fi
+        if want_field body; then
+          # The body is the REMAINDER of the file (multi-line round-trips): quote it
+          # first, then encode newlines as literal \n so the value stays single-line.
+          body=$(jesc "$(sed -n '2,$p' "$src/$f")" | awk '{printf "%s%s", (NR>1?"\\n":""), $0}')
+          obj="$obj,\"body\":\"$body\""
+        fi
+        obj="$obj}"
+        [ -z "$items" ] || items="$items,"  # compact single line, real-CLI shape
+        items="$items$obj"
       else
         echo "#$f $(sed -n 1p "$src/$f")"
       fi
     done
-    [ "$found" = 1 ] || exit 0
+    [ -n "$json" ] && printf '[%s]\n' "$items"
+    exit 0
     ;;
   "issue view")
     n=$3

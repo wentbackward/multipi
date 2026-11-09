@@ -59,8 +59,10 @@ expect ".devloop.json exposes the hygiene check to the gate (non-heavy)" \
 
 # --- fake-gh issue list: numeric ordering ------------------------------------
 list_numbers() { # list_numbers STATE -> space-separated issue numbers, in order
+  # Layout-agnostic: real gh (and the fake) emit ONE compact array line.
   FAKE_GH_DIR="$work/gh" "$plugin/tests/fake-gh" issue list --state "$1" --json number \
-    | sed -n 's/.*"number":\([0-9]*\).*/\1/p' | tr '\n' ' ' | sed -e 's/ $//'
+    | grep -oE '"number"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' \
+    | tr '\n' ' ' | sed -e 's/ $//'
 }
 expect "issue list is empty for a fresh fake gh (open)" \
   "0" "$(FAKE_GH_DIR="$work/gh" "$plugin/tests/fake-gh" issue list --state open >/dev/null 2>&1; echo $?)"
@@ -75,6 +77,23 @@ expect "issue list (closed) sorts numerically too" \
            list_numbers closed)"
 expect "issue list without --json stays one line per issue" \
   "#1 one" "$(FAKE_GH_DIR="$work/gh" "$plugin/tests/fake-gh" issue list --state open | head -1)"
+
+# --- fake-gh issue list: --json honours the requested fields -----------------
+# An issue body containing JSON-like number text must not pollute a numbers-only
+# query, and unrequested fields are not emitted at all (real CLI contract).
+printf 'probe\ntext with "number": 999 inside\n' >"$work/gh/issues/20"
+expect "a JSON-shaped body does not pollute a --json number query" \
+  "1 2 10 20" "$(list_numbers open)"
+num_only=$(FAKE_GH_DIR="$work/gh" "$plugin/tests/fake-gh" issue list --state open --json number)
+printf '%s' "$num_only" | grep -q 'title\|body\|labels' &&
+  fail "a --json number query leaked unrequested fields" ||
+  pass "a --json number query carries no unrequested fields"
+full=$(FAKE_GH_DIR="$work/gh" "$plugin/tests/fake-gh" issue list --state open --json number,title,body)
+printf '%s' "$full" | grep -qF '"number":20' &&
+  printf '%s' "$full" | grep -qF 'probe' &&
+  printf '%s' "$full" | grep -qF '999' &&
+  pass "a --json number,title,body query still carries every requested field" ||
+  fail "requesting title/body dropped requested fields"
 
 echo "hygiene: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]
