@@ -1062,7 +1062,7 @@ rm -rf "$store_dir"
 # dirty kept, branch-still-on-remote kept, open issue kept) hold in both modes;
 # the scenario store is owner data and survives.
 mkcfg '"cleanup": {"stale_days": 2}'
-cw() { bash "$plugin/scripts/cleanup-worktrees.sh" 2>&1; }
+cw() { bash "$plugin/scripts/cleanup-worktrees.sh" "$@" 2>&1; }
 gt_dir="$work/home/project/worktrees/project/gate"
 wt_base="$work/home/project/worktrees/project"
 
