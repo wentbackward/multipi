@@ -1054,6 +1054,124 @@ echo "$out" | grep -q "scenarios.run is not configured" &&
 mkcfg '' # restore the base fixture config
 rm -rf "$store_dir"
 
+# --- cleanup-worktrees.sh (dark-factory spec §6/§7) --------------------------
+# Consent semantics: WITHOUT --apply the script only lists removal candidates as
+# DRYRUN and deletes nothing; WITH --apply it removes CLOSED worktrees (ticket
+# closed, branch gone from the remote) and STALE ones (no PR, no open issue,
+# last commit older than cleanup.stale_days). Keep-invariants (gate/main kept,
+# dirty kept, branch-still-on-remote kept, open issue kept) hold in both modes;
+# the scenario store is owner data and survives.
+mkcfg '"cleanup": {"stale_days": 2}'
+cw() { bash "$plugin/scripts/cleanup-worktrees.sh" 2>&1; }
+gt_dir="$work/home/project/worktrees/project/gate"
+wt_base="$work/home/project/worktrees/project"
+
+# Tracker fixtures: a closed, an open and a dirty ticket (number -> branch name).
+cl_n=$(gh issue create "closed ticket" "closed body" | sed -nE 's#.*/issues/([0-9]+)$#\1#p')
+op_n=$(gh issue create "open ticket" "open body" | sed -nE 's#.*/issues/([0-9]+)$#\1#p')
+dt_n=$(gh issue create "dirty ticket" "dirty body" | sed -nE 's#.*/issues/([0-9]+)$#\1#p')
+gh issue close "$cl_n" >/dev/null
+
+# Candidates: CLOSED (clean, branch off the remote, ticket closed) and STALE (no PR,
+# no open issue, last commit 3 days old > the 2-day limit — GIT_COMMITTER_DATE).
+git worktree add -q "$wt_base/issue-$cl_n" -b "feat/$cl_n-closed" origin/main
+git worktree add -q "$wt_base/issue-stale-old" -b feat/stale-old origin/main
+GIT_COMMITTER_DATE="2020-01-05T00:00:00Z" \
+  git -C "$wt_base/issue-stale-old" commit -q --allow-empty -m "chore: old commit"
+# Keep cases (all survive --apply):
+git worktree add -q "$wt_base/issue-stale-young" -b feat/stale-young origin/main
+GIT_COMMITTER_DATE="$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)" \
+  git -C "$wt_base/issue-stale-young" commit -q --allow-empty -m "chore: young commit"
+git worktree add -q "$wt_base/issue-$op_n" -b "feat/$op_n-open" origin/main
+git worktree add -q "$wt_base/issue-$dt_n" -b "feat/$dt_n-dirty" origin/main
+echo scratch >"$wt_base/issue-$dt_n/scratch.txt"
+git worktree add -q "$wt_base/issue-remote" -b feat/remote-kept origin/main
+git push -q origin feat/remote-kept
+
+# DRYRUN mode: candidates listed, nothing deleted.
+out=$(cw); rc=$?
+echo "$out"
+expect "cleanup without --apply exits 0" "0" "$rc"
+printf '%s\n' "$out" | grep -q "^DRYRUN $wt_base/issue-$cl_n  (closed: ticket closed" &&
+  pass "the closed worktree is listed as DRYRUN with a closed reason" ||
+  fail "no closed DRYRUN line (want: DRYRUN $wt_base/issue-$cl_n  (closed: ...))"
+printf '%s\n' "$out" | grep -q "^DRYRUN $wt_base/issue-stale-old  (stale: " &&
+  pass "the stale worktree is listed as DRYRUN with a stale reason" ||
+  fail "no stale DRYRUN line"
+[ "$(printf '%s\n' "$out" | grep -c '^REMOVED')" = 0 ] &&
+  pass "the dry run removes nothing" || fail "the dry run removed something"
+[ "$(printf '%s\n' "$out" | grep -c '^DRYRUN')" = 2 ] &&
+  pass "exactly the two candidates are listed" || fail "dry-run candidate count wrong"
+printf '%s\n' "$out" | grep -q "^KEPT  $gt_dir  (gate worktree)" &&
+  pass "the gate worktree is kept" || fail "the gate worktree was not kept"
+[ -n "$(printf '%s\n' "$out" | grep "^KEPT  $wt_base/issue-stale-young")" ] &&
+  pass "a too-young worktree is kept (idle < stale_days)" || fail "the young worktree was not kept"
+printf '%s\n' "$out" | grep -q "^KEPT  $wt_base/issue-$op_n  (open issue #$op_n)" &&
+  pass "a worktree whose branch has an open issue is kept" || fail "the open-issue worktree was not kept"
+printf '%s\n' "$out" | grep -q "^KEPT  $wt_base/issue-$dt_n  (dirty" &&
+  pass "a dirty worktree is kept" || fail "the dirty worktree was not kept"
+printf '%s\n' "$out" | grep -q "^KEPT  $wt_base/issue-remote  (branch feat/remote-kept still on origin)" &&
+  pass "a worktree whose branch is still on the remote is kept" || fail "the remote-branch worktree was not kept"
+printf '%s' "$out" | grep -qF " $work/project" &&
+  fail "the main worktree was listed" || pass "the main worktree is never listed"
+[ -d "$wt_base/issue-$cl_n" ] && [ -d "$wt_base/issue-stale-old" ] &&
+  pass "the dry run leaves the candidate worktrees in place" || fail "the dry run touched a candidate"
+expect "the dry-run summary counts removed/dry-run/kept" \
+  "cleanup: 0 removed, 2 dry-run, 5 kept" "$(printf '%s\n' "$out" | tail -1)"
+
+# The scenario store is owner data: populate it, then --apply must leave every file.
+mkdir -p "$store_dir"
+write_scen c1-delta.md c1-delta "Delta works" true
+write_scen c2-omega.md c2-omega "Omega works" false
+store_count_before=$(find "$store_dir" -mindepth 1 -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')
+
+# --apply mode: removes exactly the closed and the stale worktree, keeps everything else.
+out=$(cw --apply); rc=$?
+echo "$out"
+expect "cleanup --apply exits 0" "0" "$rc"
+[ "$(printf '%s\n' "$out" | grep -c '^REMOVED')" = 2 ] &&
+  pass "exactly the two candidates are removed" || fail "--apply removed the wrong set"
+printf '%s\n' "$out" | grep -q "^REMOVED $wt_base/issue-$cl_n" &&
+  pass "the closed worktree is removed" || fail "the closed worktree was not removed"
+printf '%s\n' "$out" | grep -q "^REMOVED $wt_base/issue-stale-old" &&
+  pass "the stale worktree is removed" || fail "the stale worktree was not removed"
+[ ! -d "$wt_base/issue-$cl_n" ] && [ ! -d "$wt_base/issue-stale-old" ] &&
+  pass "the removed worktrees are gone from disk" || fail "a removed worktree dir remains"
+[ -z "$(git branch --list "feat/$cl_n-closed")" ] && [ -z "$(git branch --list feat/stale-old)" ] &&
+  pass "the removed branches are deleted locally" || fail "a removed branch remains"
+[ -d "$wt_base/issue-$op_n" ] && [ -d "$wt_base/issue-$dt_n" ] &&
+  [ -d "$wt_base/issue-stale-young" ] && [ -d "$wt_base/issue-remote" ] && [ -d "$gt_dir" ] &&
+  pass "the kept worktrees survive --apply" || fail "--apply removed a kept worktree"
+store_count_after=$(find "$store_dir" -mindepth 1 -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')
+[ "$store_count_before" = "$store_count_after" ] && [ -f "$store_dir/c1-delta.md" ] &&
+  [ -f "$store_dir/c2-omega.md" ] &&
+  pass "every scenario store file survives --apply" || fail "the scenario store was damaged"
+expect "the applied summary counts removed/dry-run/kept" \
+  "cleanup: 2 removed, 0 dry-run, 5 kept" "$(printf '%s\n' "$out" | tail -1)"
+
+# Idempotent: a second --apply finds nothing to do.
+out=$(cw --apply)
+expect "a second --apply changes nothing (idempotent)" "cleanup: 0 removed, 0 dry-run, 5 kept" \
+  "$(printf '%s\n' "$out" | tail -1)"
+
+# Operator errors: an unknown flag is a usage error.
+cw --bogus >/dev/null 2>&1
+expect "an unknown flag is a usage error" "2" "$?"
+
+# The per-cycle step is pinned in the devloop skill (both copies, in sync).
+grep -q 'cleanup-worktrees.sh --apply' "$plugin/skills/devloop/SKILL.md" &&
+  grep -qF '"dark"' "$plugin/skills/devloop/SKILL.md" &&
+  pass "skills/devloop/SKILL.md pins the dark per-cycle cleanup step" ||
+  fail "the source skill is missing the dark per-cycle cleanup step"
+grep -q 'cleanup-worktrees.sh --apply' "$plugin/.pi/skills/devloop/SKILL.md" &&
+  pass ".pi/skills/devloop/SKILL.md carries the dark per-cycle cleanup step" ||
+  fail "the .pi skill copy is missing the dark per-cycle cleanup step"
+diff -q "$plugin/skills/devloop/SKILL.md" "$plugin/.pi/skills/devloop/SKILL.md" >/dev/null &&
+  pass "the skill copies stay in sync" || fail "the skill copies diverged"
+
+mkcfg '' # restore the base fixture config
+rm -rf "$store_dir"
+
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
 MULTIPI_PLUGIN_DIR="$plugin" env -u MULTIPI_CHILD node --input-type=module -e '
 const pi = { registered: [], handlers: {}, commands: [], registerTool(t) { this.registered.push(t.name); }, registerCommand(n) { this.commands.push(n); }, on(ev, h) { this.handlers[ev] = h; } };
