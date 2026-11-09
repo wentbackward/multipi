@@ -637,6 +637,93 @@ test("dispatch(scenario-writer) refuses a second writer on the same ticket while
 	} finally { fx.cleanup(); }
 });
 
+// ---------------------------------------------------------------------------
+// Scenario startability (dark-factory spec §4; ticket #12): with the store on, a
+// ticket is startable only if the store holds a valid t<ticket>- scenario.
+// ---------------------------------------------------------------------------
+
+/** Seed one VALID scenario file into the store (default dir: <state>/scenarios under MULTIPI_HOME). */
+function seedScenario(fx: ReturnType<typeof makeFixture>, id: string, title = "Holdout behaviour"): void {
+	const p = path.join(fx.dir, "home", "proj", "scenarios", `${id}.md`);
+	mkdirSync(path.dirname(p), { recursive: true });
+	writeFileSync(
+		p,
+		`---\nid: ${id}\ntitle: ${title}\nrequired: true\n---\n## User and goal\nThe behaviour under test.\n\n## Satisfied when\nIt happens observably.\n`,
+	);
+}
+
+test("stop gate (store on): an open ticket with NO covering scenario settles — no forced continuation", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		createIssue(fx, "Uncovered open ticket");
+		const d = await evaluateSettle(ctx.cwd);
+		assert.equal(d, undefined, "only-uncovered open tickets + a free slot must not force a continuation");
+	} finally { fx.cleanup(); }
+});
+
+test("stop gate (store on): an open ticket covered by a valid t<n>- scenario blocks with the keep-going message", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Covered open ticket");
+		seedScenario(fx, `t${n}-covers-it`);
+		const before = readCounterFile(fx);
+		const d = await evaluateSettle(ctx.cwd);
+		assert.ok(d, "covered ticket + free slot must force a continuation");
+		assert.equal(d!.continue, true);
+		assert.match(d!.entries[0].content, /startable/i);
+		assert.equal(before, readCounterFile(fx), "loop drive must not bump the bounded counter");
+	} finally { fx.cleanup(); }
+});
+
+test("dispatch(implementer) (store on, uncovered): refuses, naming the ticket and the missing t<n>- scenario", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "No scenario yet");
+		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		assert.equal(res.isError, true, textOf(res));
+		const t = textOf(res);
+		assert.match(t, new RegExp(`ticket #${n} is not startable`), t);
+		assert.match(t, new RegExp(`t${n}-`), "the message names the t<ticket>- prefix the store lacks");
+		assert.ok(!existsSync(path.join(fx.dir, "home", "proj", "worktrees")), "no worktree for a refused dispatch");
+	} finally { fx.cleanup(); }
+});
+
+test("dispatch(implementer) (store on, covered by a valid t<n>- scenario): proceeds with the normal pipeline", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Covered ticket gets implemented");
+		seedScenario(fx, `t${n}-the-behaviour`);
+		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		assert.equal(res.isError ?? false, false, textOf(res));
+		assert.match(textOf(res), new RegExp(`implementer #${n} .* -> done`), textOf(res));
+		const labels = readFileSync(path.join(fx.dir, "gh", "labels", String(n)), "utf8").trim().split("\n");
+		assert.ok(labels.includes("dl/in-progress") && labels.includes("dl/in-review"), JSON.stringify(labels));
+	} finally { fx.cleanup(); }
+});
+
+test("stop gate (store off): coverage fields absent — a store-less config behaves exactly as before", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", fast_check: "true" })); // collaborative, no store
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Ordinary open ticket");
+		const d = await evaluateSettle(ctx.cwd);
+		assert.ok(d, "without a store, an open ticket is startable as always");
+		assert.match(d!.entries[0].content, /startable/i);
+		// and the dispatch still proceeds without any scenario
+		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		assert.equal(res.isError ?? false, false, textOf(res));
+	} finally { fx.cleanup(); }
+});
+
 test("dispatch streams a status line (elapsed, tokens, cost, activity) while the child runs", async () => {
 	const fx = makeFixture(JSON.stringify({ base_branch: "main", checks: [{ name: "unit", command: "true", heavy: false }], format: null, format_extensions: null, fast_check: "true" }));
 	setupEnv(fx);

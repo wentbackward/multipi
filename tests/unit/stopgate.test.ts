@@ -99,3 +99,71 @@ test("countStartable counts unblocked issues whose deps are all closed", () => {
 	assert.equal(countStartable(issues, [], [2]), 2); // in-flight counts as satisfied
 	assert.equal(countStartable(issues, [1], [2]), 3);
 });
+
+// ---------------------------------------------------------------------------
+// Startability rule with the scenario store on (dark-factory spec §4):
+// a ticket is startable only if the store holds a valid t<ticket>- scenario.
+// ---------------------------------------------------------------------------
+
+test("countStartable: store off (absent or explicit false) ignores coverage — identical decisions to today", () => {
+	const issues: IssueInfo[] = [
+		{ number: 7, blocked: false, deps: [] },
+		{ number: 8, blocked: false, deps: [] },
+	];
+	assert.equal(countStartable(issues, []), 2);
+	assert.equal(countStartable(issues, [], [], { on: false, covered: [7] }), 2);
+	assert.equal(countStartable(issues, [], [], { on: false, covered: [] }), 2);
+});
+
+test("countStartable: store on — only tickets covered by a valid t<n>- scenario count", () => {
+	const issues: IssueInfo[] = [
+		{ number: 7, blocked: false, deps: [] }, // covered
+		{ number: 8, blocked: false, deps: [] }, // uncovered
+		{ number: 9, blocked: true, deps: [] }, // blocked, covered — blocked still wins
+		{ number: 10, blocked: false, deps: [7] }, // uncovered AND dependent
+	];
+	assert.equal(countStartable(issues, [], [], { on: true, covered: [7, 9] }), 1); // only #7
+	assert.equal(countStartable(issues, [], [], { on: true, covered: [7, 8, 9] }), 2); // #7 and #8
+	assert.equal(countStartable(issues, [], [], { on: true, covered: [] }), 0); // nothing covered
+	// dependency logic still applies ON TOP of coverage
+	const depIssues: IssueInfo[] = [{ number: 9, blocked: false, deps: [7] }, { number: 7, blocked: false, deps: [] }];
+	assert.equal(countStartable(depIssues, [], [], { on: true, covered: [7, 9] }), 1); // #9 waits on #7
+	assert.equal(countStartable(depIssues, [7], [], { on: true, covered: [7, 9] }), 2); // #7 closed frees #9
+});
+
+test("store on + covered ticket + free slot -> loop-drive block (unbounded)", () => {
+	const d = evaluateStopGate({
+		...base,
+		issues: [{ number: 7, blocked: false, deps: [] }],
+		currentBlocks: 999,
+		scenariosOn: true,
+		covered: [7],
+	});
+	assert.equal(d.action, "block");
+	assert.equal(d.bumpCounter, false);
+	assert.match(d.message, /startable/i);
+});
+
+test("store on + uncovered ticket is not startable — stop-gate passes when nothing else is pending", () => {
+	const d = evaluateStopGate({ ...base, issues: [{ number: 7, blocked: false, deps: [] }], scenariosOn: true, covered: [] });
+	assert.equal(d.action, "pass");
+	const d2 = evaluateStopGate({ ...base, issues: [{ number: 7, blocked: false, deps: [] }], scenariosOn: true, covered: [42] });
+	assert.equal(d2.action, "pass"); // a foreign ticket's scenario does not cover #7
+});
+
+test("store on: mixed covered/uncovered board blocks only on the covered share", () => {
+	const d = evaluateStopGate({
+		...base,
+		issues: [
+			{ number: 7, blocked: false, deps: [] },
+			{ number: 8, blocked: false, deps: [] },
+		],
+		scenariosOn: true,
+		covered: [8],
+	});
+	assert.equal(d.action, "block");
+	assert.match(d.message, /1 ticket\(s\) are startable/);
+	// at capacity the covered ticket no longer forces continuation
+	const d2 = evaluateStopGate({ ...base, issues: [{ number: 8, blocked: false, deps: [] }], scenariosOn: true, covered: [8], running: 3 });
+	assert.equal(d2.action, "pass");
+});

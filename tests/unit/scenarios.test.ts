@@ -5,7 +5,7 @@ import test from "node:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { scanStore, storeCounts, isSealed, parseVerdict, foldJudgeRun, type ScenarioFile } from "../../extension/src/scenarios.ts";
+import { scanStore, storeCounts, isSealed, parseVerdict, foldJudgeRun, coveredTicketNumbers, type ScenarioFile } from "../../extension/src/scenarios.ts";
 
 const VALID = `---
 id: t12-close-position-clears-alert
@@ -198,6 +198,54 @@ test("storeCounts returns total, required and invalid COUNTS (no names)", () => 
 			assert.equal(c.invalid, 1);
 		},
 	);
+});
+
+// --- coveredTicketNumbers: startability rule data (spec §4) ---
+
+test("coveredTicketNumbers maps valid t<ticket>- ids to ticket numbers, deduplicated and sorted", () => {
+	withStore(
+		{
+			"a.md": VALID.replace("t12-close-position-clears-alert", "t12-first"),
+			"b.md": VALID.replace("t12-close-position-clears-alert", "t12-second"), // same ticket twice
+			"c.md": VALID.replace("t12-close-position-clears-alert", "t3-third"),
+			"deep/nested.md": VALID.replace("t12-close-position-clears-alert", "t27-nested"),
+		},
+		(_dir, files) => {
+			assert.deepEqual(coveredTicketNumbers(files), [3, 12, 27]);
+		},
+	);
+});
+
+test("coveredTicketNumbers: invalid files never cover their ticket (duplicate loser included)", () => {
+	withStore(
+		{
+			"missing-required.md": VALID.replace("t12-close-position-clears-alert", "t41-broken").replace(/^required: .*$\n/m, ""),
+			"duplicate.md": VALID.replace("t12-close-position-clears-alert", "t42-dup-a"), // valid winner covers 42
+			"duplicate2.md": VALID.replace("t12-close-position-clears-alert", "t42-dup-a"), // invalid loser adds nothing
+		},
+		(_dir, files) => {
+			assert.deepEqual(coveredTicketNumbers(files), [42], "the broken t41- file covers nothing; the duplicate loser neither twice nor at all");
+		},
+	);
+});
+
+test("coveredTicketNumbers: t<ticket>- is an exact prefix — t123- never covers 12, bare t12 never covers 12 either", () => {
+	withStore(
+		{
+			"long.md": VALID.replace("t12-close-position-clears-alert", "t123-longer"),
+			"bare.md": VALID.replace("t12-close-position-clears-alert", "t12"),
+			"nonum.md": VALID.replace("t12-close-position-clears-alert", "tt12-not-a-ticket"),
+		},
+		(_dir, files) => {
+			assert.deepEqual(coveredTicketNumbers(files), [123]);
+		},
+	);
+});
+
+test("coveredTicketNumbers: empty store covers nothing", () => {
+	withStore({}, (_dir, files) => {
+		assert.deepEqual(coveredTicketNumbers(files), []);
+	});
 });
 
 // --- isSealed: pinned digest contract (spec §5.5) ---

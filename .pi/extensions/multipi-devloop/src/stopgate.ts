@@ -29,15 +29,36 @@ export interface StopGateInputs {
 	/** Children currently running. */
 	running: number;
 	cap: number;
+	/** Scenario store on? (dark-factory spec §4: startability requires a covering scenario). */
+	scenariosOn?: boolean;
+	/** Ticket numbers covered by at least one valid `t<n>-` scenario (only effective when scenariosOn). */
+	covered?: number[];
+}
+
+/** Store state for the startability rule (spec §4); omitted store means off. */
+export interface StoreCoverage {
+	on: boolean;
+	/** Ticket numbers with at least one valid `t<n>-` scenario in the store. */
+	covered: number[];
 }
 
 export type StopGateDecision =
 	| { action: "pass"; gaveUp?: boolean }
 	| { action: "block"; message: string; bumpCounter: boolean };
 
-export function countStartable(issues: IssueInfo[], closed: number[], inFlight: number[] = []): number {
+export function countStartable(
+	issues: IssueInfo[],
+	closed: number[],
+	inFlight: number[] = [],
+	store: StoreCoverage = { on: false, covered: [] },
+): number {
 	const done = new Set([...closed, ...inFlight]);
-	return issues.filter((i) => !i.blocked && i.deps.every((d) => done.has(d))).length;
+	const covered = new Set(store.covered);
+	// Startability rule (spec §4): with the store on, a ticket is startable only if a valid
+	// t<ticket>- scenario covers it; with the store off the rule is inert (today's semantics).
+	return issues.filter(
+		(i) => !i.blocked && i.deps.every((d) => done.has(d)) && (!store.on || covered.has(i.number)),
+	).length;
 }
 
 /**
@@ -65,7 +86,10 @@ export function evaluateStopGate(i: StopGateInputs): StopGateDecision {
 				"The main-branch working tree has UNCOMMITTED CHANGES. Stage, commit (or discard), then settle.",
 		};
 	}
-	const startable = countStartable(i.issues, i.closed, i.inFlight);
+	const startable = countStartable(i.issues, i.closed, i.inFlight, {
+		on: i.scenariosOn === true,
+		covered: i.covered ?? [],
+	});
 	if (startable > 0 && i.running < i.cap) {
 		return {
 			action: "block",
