@@ -58,7 +58,7 @@ test("the installed template tracks templates/devloop.json", () => {
 // #37: the extension's package.json is WRITTEN by scripts/install.sh (not copied from a
 // source file) and is therefore pinned to the installer's contract, not to a byte mirror.
 test("the installed extension manifest is the installer-owned ESM document", () => {
-	const manifest = JSON.parse(read(rel(DST_EXT, "package.json"), "utf8")) as {
+	const manifest = JSON.parse(read(rel(DST_EXT, "package.json")).toString("utf8")) as {
 		type?: string;
 		dependencies?: Record<string, string>;
 	};
