@@ -146,6 +146,20 @@ function isJsonObject(line: string): boolean {
 	}
 }
 
+/**
+ * Fold ONE judge run into a verdict (spec §5.2, verdict policy in one place): parse the
+ * transcript with parseVerdict, then apply the exit-code rule — a judge that exits non-zero
+ * scores 0 EVEN WHEN a well-formed verdict line exists: an unhealthy judge never green-lights.
+ * The exit code rides the reason string ("judge exited N; …") so the results line stays
+ * id-only and the stage stays free of verdict logic.
+ */
+export function foldJudgeRun(output: string, expectedId: string, exitCode: number): VerdictResult {
+	const v = parseVerdict(output, expectedId);
+	if (exitCode === 0) return v;
+	const prefix = `judge exited ${exitCode}; `;
+	return { ok: false, reason: v.ok ? prefix + "verdict discarded (non-zero exit)" : prefix + v.reason };
+}
+
 // --- frontmatter (spec §2 file format) ---
 
 interface Frontmatter {
@@ -172,6 +186,14 @@ function parseFrontmatter(content: string): Frontmatter {
 	return { fields, body: lines.slice(close + 1).join("\n").trim() };
 }
 
+/**
+ * Pinned id charset (review of #13): judge transcript dirs, env seams and result lines are all
+ * built from the id, so ids stay inside one safe charset. Anything else (slashes, spaces, dots
+ * at the edges of a path component) is rejected here so NEITHER the doctor NOR the stage can
+ * turn a store file into a path escape (reproduced vector: `id: ../../xwalk/outside/evil`).
+ */
+export const SCENARIO_ID_RE = /^[A-Za-z0-9._-]+$/;
+
 function validateFile(file: string, content: string): ScenarioFile {
 	const fm = parseFrontmatter(content);
 	if (fm.reason) return { file, valid: false, reason: `malformed frontmatter: ${fm.reason}` };
@@ -180,6 +202,7 @@ function validateFile(file: string, content: string): ScenarioFile {
 
 	const id = fm.fields.get("id");
 	if (id === undefined || id === "") return fail("missing id");
+	if (!SCENARIO_ID_RE.test(id)) return fail(`invalid id: ${id} (ids must match [A-Za-z0-9._-]+)`, { id });
 	const title = fm.fields.get("title");
 	if (title === undefined || title === "") return fail("missing title", { id });
 
