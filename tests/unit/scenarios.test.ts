@@ -5,7 +5,7 @@ import test from "node:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { scanStore, storeCounts, isSealed, parseVerdict, foldJudgeRun, coveredTicketNumbers, coveredTicketsFromScan, type ScenarioFile } from "../../extension/src/scenarios.ts";
+import { scanStore, storeCounts, isSealed, parseVerdict, foldJudgeRun, coveredTicketNumbers, coveredTicketsFromScan, scanFailureReason, type ScenarioFile } from "../../extension/src/scenarios.ts";
 
 const VALID = `---
 id: t12-close-position-clears-alert
@@ -123,6 +123,21 @@ test("scanStore returns an error result (not a throw) when a store .md file is u
 	} finally {
 		rmSync(storeDir, { recursive: true, force: true });
 	}
+});
+
+test("scanFailureReason: an fs error keeps its errno code", () => {
+	const e = Object.assign(new Error("read failed"), { code: "EACCES" });
+	assert.equal(scanFailureReason(e), "store is unreadable (EACCES)");
+});
+
+test("scanFailureReason: a non-fs JS error names the error constructor (a bug, not a store defect)", () => {
+	const r = scanFailureReason(new TypeError("slice of undefined"));
+	assert.match(r, /TypeError/, "the constructor name distinguishes a genuine JS bug from a store defect");
+	assert.ok(!r.includes("EACCES") && !r.includes("ENOENT"), "no fs defect class is invented");
+});
+
+test("scanFailureReason: a thrown non-Error value stays 'unknown error'", () => {
+	assert.equal(scanFailureReason("boom"), "store is unreadable (unknown error)");
 });
 
 test("scanStore returns an empty ok result for a missing store dir", () => {

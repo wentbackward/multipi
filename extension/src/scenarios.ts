@@ -101,13 +101,16 @@ export function scanStore(storeDir: string): ScanResult {
 /**
  * Named reason for a failed store scan: the defect CLASS only — never the store path or an
  * fs error string (those embed the path): the stage may print the reason and the store path
- * must not reach a train's stdout (smoke-pinned no-leak rule).
+ * must not reach a train's stdout (smoke-pinned no-leak rule). A genuine JS bug (a non-fs
+ * error) carries the error's CONSTRUCTOR NAME, so it stays distinguishable from a store
+ * defect in the red line and the doctor output. Exported for the unit pin (no injection
+ * seam can force a non-fs throw through scanStore itself).
  */
-function scanFailureReason(e: unknown): string {
+export function scanFailureReason(e: unknown): string {
 	const code = (e as NodeJS.ErrnoException).code ?? "";
-	return code === "ENOTDIR"
-		? "store path is not a directory (ENOTDIR)"
-		: `store is unreadable (${code || "unknown error"})`;
+	if (code === "ENOTDIR") return "store path is not a directory (ENOTDIR)";
+	const ctor = e instanceof Error ? e.constructor.name : "unknown error";
+	return `store is unreadable (${code || ctor})`;
 }
 
 /** total / required (valid files only) / invalid counts. */

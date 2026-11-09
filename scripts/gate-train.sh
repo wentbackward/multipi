@@ -110,14 +110,21 @@ done
 printf '%s' "$summary" | sed '/^$/d'
 
 # --- scenario stage (dark-factory spec §5) ---------------------------------------
-# The on/off call uses the SAME pure module (config.ts: loadConfig + scenariosOn) the stage
-# and the doctor use, so all three agree; it reads the config of the TRAIN TOP, which is
-# what is checked out here. When the call cannot be made (no node, no modules), the stage
-# is skipped: the gate degrades to its pre-stage behaviour and the doctor reports the
-# defect — an undeterminable store is not a green light for anything.
+# The on/off call uses the SAME pure module (config.ts: loadConfig + scenariosOn) the
+# stage and the doctor use, so all three agree: loadConfig resolves the config from the
+# MAIN worktree's .devloop.json, i.e. the same single main-root config the stage and the
+# doctor read — NOT whatever is checked out at the train top here. When the call cannot
+# be made (no node, no modules, an incomplete module candidate), the stage is skipped:
+# the gate degrades to its pre-stage behaviour and the doctor reports the defect — an
+# undeterminable store is not a green light for anything.
 scen_src=""
 for cand in "$DL_ROOT/.pi/extensions/multipi-devloop/src" "$scripts_dir/../extension/src"; do
-  if [ -f "$cand/config.ts" ]; then scen_src=$cand; break; fi
+  # The same three modules the stage itself requires: an incomplete candidate must read
+  # as "the call cannot be made" (degrade), never as runnable.
+  if [ -f "$cand/config.ts" ] && [ -f "$cand/scenarios.ts" ] && [ -f "$cand/scenario-run.ts" ]; then
+    scen_src=$cand
+    break
+  fi
 done
 scen_on=off
 if [ -n "$scen_src" ] && command -v node >/dev/null 2>&1; then
