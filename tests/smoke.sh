@@ -799,6 +799,101 @@ rm -f "$store_dir"
 mkcfg '' # restore the base fixture config
 rm -rf "$store_dir"
 
+# --- doctor.sh: the factory one-shot names the import failure (#37) ---------
+# Reproduces the incident: the INSTALLED extension dir with the real src copy
+# and a stale type:commonjs manifest (an npm-init'd leftover to host the
+# runtime probe's node_modules). The CJS declaration forces CJS parsing of the
+# ESM .ts sources, the import rejects, and node prints the reason to stderr,
+# which doctor used to swallow (2>/dev/null) — the failure surfaced as "import
+# failed" with no reason. The note must carry the FIRST line of node's stderr.
+# (Stub node_modules keep the runtime probe quiet, isolating the factory lines.)
+BROKEN_EXT=".pi/extensions/multipi-devloop"
+mkdir -p "$BROKEN_EXT" node_modules
+cp -R "$plugin/extension/src" "$BROKEN_EXT/src"
+printf '{\n  "name": "multipi-devloop",\n  "type": "commonjs"\n}\n' >"$BROKEN_EXT/package.json"
+stub_runtime_deps() { # minimal importable stand-ins (pattern of the runtime section below)
+  mkdir -p node_modules/typebox node_modules/@earendil-works/pi-coding-agent
+  printf '{"name":"typebox","version":"0.0.0","main":"index.js"}' >node_modules/typebox/package.json
+  echo 'module.exports = {}; ' >node_modules/typebox/index.js
+  printf '{"name":"@earendil-works/pi-coding-agent","version":"0.0.0","main":"index.js"}' >node_modules/@earendil-works/pi-coding-agent/package.json
+  echo 'module.exports = {}; ' >node_modules/@earendil-works/pi-coding-agent/index.js
+}
+stub_runtime_deps
+out=$(doct); rc=$?
+expect "a broken factory import stays a note, not a problem" "0" "$rc"
+echo "$out" | grep -q "^note    factory report unavailable (node import failed: " &&
+  pass "the broken import is noted WITH its reason" ||
+  fail "no reason-carrying import-failed note (got: $(echo "$out" | grep -F 'factory report unavailable' || echo '<no factory note at all>'))"
+echo "$out" | grep -q "Failed to load the ES module" &&
+  pass "the note carries node's first error line (the module-type cause)" ||
+  fail "node's error line is missing from the note (still the bare 'import failed'?"
+echo "$out" | grep -qF "factory collaborative, scenarios off" &&
+  fail "a factory line was printed although the import failed" ||
+  pass "no factory line beside a failed import"
+printf '{\n  "name": "multipi-devloop",\n  "type": "module"\n}\n' >"$BROKEN_EXT/package.json"
+out=$(doct)
+echo "$out" | grep -qF "factory collaborative, scenarios off (default)" &&
+  pass "the factory line returns when the manifest is fixed" ||
+  fail "factory line lost after fixing the manifest"
+rm -rf "$BROKEN_EXT" node_modules
+
+# --- install.sh: the extension package.json is installer-owned (#37) --------
+# A stale npm-init'd type:commonjs manifest in the target's extension dir used
+# to SURVIVE the sync (the best-effort copy pointed at a source file that does
+# not exist), forcing CJS parsing of the ESM .ts sources and silently disabling
+# the factory report. The installer now OWNS the manifest: it rewrites it on
+# every sync, fresh install and upgrade alike.
+INSTALL_PROJ="$work/installproj"
+git init -q "$INSTALL_PROJ"
+mkdir -p "$INSTALL_PROJ/.pi/extensions/multipi-devloop"
+printf '{\n  "name": "multipi-devloop",\n  "version": "0.0.1",\n  "type": "commonjs"\n}\n' \
+  >"$INSTALL_PROJ/.pi/extensions/multipi-devloop/package.json"
+bash "$plugin/scripts/install.sh" "$INSTALL_PROJ" >/dev/null 2>&1 &&
+  pass "install runs over a target with a pre-existing extension dir" ||
+  fail "install failed over a pre-existing extension dir"
+MANIFEST="$INSTALL_PROJ/.pi/extensions/multipi-devloop/package.json"
+grep -q '"type": "module"' "$MANIFEST" &&
+  pass "a stale type:commonjs manifest is rewritten to type:module" ||
+  fail "the stale type:commonjs manifest survived the install"
+grep -q '"type": "commonjs"' "$MANIFEST" &&
+  fail "a commonjs declaration survived the install" || pass "no commonjs declaration remains"
+grep -q 'typebox' "$MANIFEST" && grep -q '@earendil-works/pi-coding-agent' "$MANIFEST" &&
+  pass "the owned manifest carries the two extension deps" ||
+  fail "the owned manifest is missing an extension dep"
+# Fresh install (no pre-existing manifest) writes the same owned ESM bytes.
+rm -rf "$INSTALL_PROJ"
+git init -q "$INSTALL_PROJ"
+bash "$plugin/scripts/install.sh" "$INSTALL_PROJ" >/dev/null 2>&1
+grep -q '"type": "module"' "$MANIFEST" &&
+  pass "a fresh install writes the ESM manifest" ||
+  fail "a fresh install wrote no ESM manifest"
+# doctor IN THE INSTALLED TARGET computes the factory report from the installed
+# copy (candidate 1), so the owned manifest is what keeps the factory line alive.
+cat >"$INSTALL_PROJ/.devloop.json" <<'EOF'
+{
+  "base_branch": "main",
+  "checks": [{"name": "unit", "command": "true"}]
+}
+EOF
+git -C "$INSTALL_PROJ" remote add origin "$work/origin.git"
+# A git WORKTREE (a .git file, not a directory) is a valid target: the dogfood
+# checkouts themselves are worktrees, and an installer that refuses them cannot
+# upgrade its own instance.
+( cd "$INSTALL_PROJ" && git add -A >/dev/null && git commit -qm "chore: installed" )
+git -C "$INSTALL_PROJ" worktree add -q "$work/installwt"
+bash "$plugin/scripts/install.sh" "$work/installwt" >/dev/null 2>&1 &&
+  pass "install runs over a worktree target (.git file)" ||
+  fail "install refused a worktree target"
+grep -q '"type": "module"' "$work/installwt/.pi/extensions/multipi-devloop/package.json" &&
+  pass "the worktree target receives the owned ESM manifest" ||
+  fail "no owned ESM manifest in the worktree target"
+git -C "$INSTALL_PROJ" worktree remove --force "$work/installwt"
+out=$(cd "$INSTALL_PROJ" && bash "$plugin/scripts/doctor.sh" 2>&1)
+echo "$out" | grep -qF "factory collaborative, scenarios off (default)" &&
+  pass "doctor prints the factory line in the installed target" ||
+  fail "no factory line in the installed target (got: $(echo "$out" | grep -F 'factory' || echo '<no factory line at all>'))"
+rm -rf "$INSTALL_PROJ"
+
 # --- doctor.sh: extension runtime -------------------------------------------
 # Stub the installed extension and a stub node_modules (offline stand-ins for the
 # real packages; doctor must only see that they resolve).

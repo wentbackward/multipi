@@ -59,6 +59,15 @@ else
     else
       # SCEN_SRC env, not string interpolation: the path never enters the JS source, so a
       # path containing a quote can't break (or alter) the one-shot — the stage's pattern.
+      # stderr goes to a temp file, not /dev/null (ticket #37): when the import fails the
+      # note must carry the first line of the error — a stale type:commonjs manifest, a
+      # missing module — not just "import failed" (the #15 WARN pattern: diagnose, don't
+      # hide). Only the extension's own source paths can appear in that line; the store
+      # path is computed after a successful import, so the store-path rule holds.
+      factory_err=$(mktemp)
+      # EXIT trap owns the temp file until the normal path resets it (same discipline as
+      # cleanup-worktrees.sh's tracker temp): a mid-run death cannot leak it.
+      trap 'rm -f "$factory_err"' EXIT
       factory_json=$(
         SCEN_SRC=$factory_src node --input-type=module -e '
 const { loadConfig, scenariosOn, resolvePaths } = await import(process.env.SCEN_SRC + "/config.ts");
@@ -84,9 +93,14 @@ if (cfg) {
   }
   process.stdout.write(JSON.stringify(report));
 }
-' 2>/dev/null
+' 2>"$factory_err"
       )
-      [ -n "$factory_json" ] || optional "factory report unavailable (node import failed)"
+      if [ -z "$factory_json" ]; then
+        err_first=$(head -n 1 "$factory_err")
+        optional "factory report unavailable (node import failed${err_first:+: $err_first})"
+      fi
+      rm -f "$factory_err"
+      trap - EXIT
     fi
     if [ -n "$factory_json" ]; then
       f_mode=$(json_get mode <<<"$factory_json")
