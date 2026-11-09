@@ -397,7 +397,12 @@ branch's worktree when its tree is clean (dirty ⇒ kept and reported). `scripts
 cleanup-worktrees.sh [--apply] [repo]` collects ticket-worktree litter with consent semantics (dark-factory
 spec §1/§6): without `--apply` it prints removal candidates as DRYRUN and deletes nothing; with `--apply` it
 removes them (exit 0 done, idempotent; 2 usage/config). Candidates are CLEAN worktrees whose branch is gone
-from the remote AND whose ticket is CLOSED (a PR is MERGED, or the ticket is closed without a PR — in both
-cases with no open issue; an open issue always wins) or STALE
-(no PR, no open issue, last commit older than `cleanup.stale_days`, default 14). It keeps everything else
-with a stated reason — including anything it cannot classify while the tracker is unreachable.
+from the remote AND whose tracked work is done or abandoned: CLOSED (a PR is MERGED — the work has landed —
+or the branch's ticket is closed without a live PR) or STALE
+(no live PR, no open issue, last commit older than `cleanup.stale_days`, default 14). A branch number
+counts as a ticket only when that number is present in the tracker's open+closed issue set; a bare number
+that matches no ticket (e.g. `chore/2026-backup`) is not one and falls into the STALE bucket. An OPEN issue
+always wins over every removal reason. Classification is fail-closed: any tracker query failure (missing or
+unauthenticated gh, a failed issue-list fetch, a failed per-branch pr query) keeps the worktree as
+`cannot classify` — a failure is never read as `does not exist`. It keeps everything else
+with a stated reason.
