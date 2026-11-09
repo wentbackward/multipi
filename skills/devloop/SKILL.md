@@ -165,3 +165,35 @@ is done: mark its issues closed, summarise what shipped and where, and stop ONLY
 - Never push to the base branch from the main worktree for a ticket; ticket work travels branches only
   (docs/config commits to the base are fine and get merged immediately).
 - Never let a `dl/blocked` ticket silently age: every session start revisits them.
+
+## 10. Going dark (the `factory` toggle)
+
+Going dark is a normal config change on a branch — a preset, not a new pipeline:
+
+1. On a branch: flip `"factory"` to `"dark"` in `.devloop.json`. The preset turns the scenario
+   store on, starts scenario-writing at ticket creation, and runs worktree/branch cleanup each
+   loop cycle; an explicit `"scenarios": false` or a `scenarios` block always wins over the preset.
+2. Dispatch the `scenario-writer` for every open ticket before the first dark dispatch: it runs at
+   the repo root, reads the ticket + spec (never the code) and writes the holdout scenarios outside
+   the codebase. A ticket is startable only when its scenarios exist, so the board must be seeded
+   first — that is what makes the self-seed → write scenarios → implement pipeline safe to leave alone.
+3. Record the switch in docs/DECISIONS.md (date, the preset, the reason) and merge through the
+   ordinary pipeline — review, gate, merge. Nothing dark-specific about the merge. (The gate OF the
+   flip branch still reads the main-root config with main checked out, so it is collaborative: the
+   first gate AFTER the switch merges is the moment the scenario stage activates.)
+
+While the factory is dark, where the human looks changes — and so does yours. The human reviews
+the scenario title lists (in the issues), the gate outcomes, the verifier reports and the parked
+`dl/blocked` list; nothing else is expected of them between visits. The orchestrator reviews those
+same surfaces and never asks the human to read a diff: diff judgment stays with the `code-reviewer`
+child, and the human's review surface is intent (scenarios) and outcomes. That is what "dark"
+means here — nobody reviews the code, not that nobody is responsible (the stop conditions, the
+safety rules and "a red gate is never merged" are identical in both modes).
+
+**Log hygiene (pinned, spec §5):** the stage logs `train-scenario-results.jsonl`,
+`train-scenario-judge/` and `train-scenarios-run.log` hold judge evidence and sealed ids — they
+are never forwarded to an implementer, reviewer or verifier, not in a dispatch brief, not in a
+review task, not in a re-dispatch comment. Only the `missing` text of unsatisfied scenarios
+travels back to the implementer — it names the absent behaviour in the user's terms ("closing a
+position leaves its alert active"), never the scenario text, never the store path, never the
+judge's evidence. `train-scenarios.log` (the stage's own lines) is safe to forward.

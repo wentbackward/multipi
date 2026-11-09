@@ -114,16 +114,22 @@ for branch in "$@"; do
   # Remove the ticket's worktree now that the train is merged: the loop created it, so the
   # loop owns its deletion. A DIRTY worktree is kept — uncommitted work is evidence, and
   # nothing may be destroyed to tidy a directory. (Legacy sibling worktrees are collected by
-  # scripts/cleanup-worktrees.sh.)
+  # scripts/cleanup-worktrees.sh.) The probe is FAIL-CLOSED like cleanup-worktrees.sh's:
+  # a failing `status` is unclassifiable, never clean — it would read empty-on-failure as
+  # clean and destroy uncommitted work at the most automated moment of the loop.
   wt=$(git worktree list --porcelain | awk -v b="refs/heads/$branch" '$1 == "worktree" { w = $2 } $1 == "branch" && $2 == b { print w }')
   if [ -n "$wt" ] && [ -d "$wt" ]; then
-    if [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
-      git worktree remove "$wt" >/dev/null 2>&1 || true
-      git worktree prune >/dev/null 2>&1 || true
-      git branch -q -D "$branch" >/dev/null 2>&1 || true
-      echo "cleaned worktree $wt (branch $branch)"
+    if st=$(git -C "$wt" status --porcelain 2>/dev/null); then
+      if [ -z "$st" ]; then
+        git worktree remove "$wt" >/dev/null 2>&1 || true
+        git worktree prune >/dev/null 2>&1 || true
+        git branch -q -D "$branch" >/dev/null 2>&1 || true
+        echo "cleaned worktree $wt (branch $branch)"
+      else
+        echo "KEPT worktree $wt — uncommitted changes; remove by hand when ready"
+      fi
     else
-      echo "KEPT worktree $wt — uncommitted changes; remove by hand when ready"
+      echo "KEPT worktree $wt — status probe failed; remove by hand when ready"
     fi
   fi
   previous=$branch
