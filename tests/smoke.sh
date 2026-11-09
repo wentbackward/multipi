@@ -123,6 +123,12 @@ for url in "git@github.com:example-owner/example-fork.git" \
 done
 set_fork_origin "https://git.example/group/project.git"
 expect "GH_REPO is not pinned for a non-github.com origin" "" "$(fork_cfg 'printf %s "${GH_REPO:-}"')"
+# Host-anchored negatives (the rationale the DECISIONS entry names): a lookalike
+# host must not pin, and a github.com-suffix domain is not github.com.
+set_fork_origin "git@notgithub.com:example-owner/example-fork"
+expect "GH_REPO is not pinned for a git@notgithub.com origin" "" "$(fork_cfg 'printf %s "${GH_REPO:-}"')"
+set_fork_origin "https://github.com.example.com/example-owner/example-fork"
+expect "GH_REPO is not pinned for a github.com.example.com origin" "" "$(fork_cfg 'printf %s "${GH_REPO:-}"')"
 set_fork_origin "https://github.com/example-owner/example-fork.git"
 fork_gh 'gh issue list --state open --json number' >/dev/null
 [ "$(tail -1 "$work/gh-fork/calls.log")" = "gh repo=example-owner/example-fork issue list --state open --json number" ] &&

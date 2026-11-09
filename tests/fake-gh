@@ -53,11 +53,14 @@ for a in "$@"; do
   [ "$prev_arg" = "--repo" ] && gh_repo=$a
   prev_arg=$a
 done
-echo "gh repo=$gh_repo $*" >>"$dir/calls.log"
+printf 'gh repo=%s%s\n' "$gh_repo" "${*:+ $*}" >>"$dir/calls.log"
 key() { printf '%s' "${1//\//_}"; }
 jesc() { printf '%s' "${1:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
 # global --repo FLAG VALUE: the extension pins the repo explicitly; the fake ignores it
+# beyond recording the EFFECTIVE repo (flag > $GH_REPO env > "-"). Documented limit:
+# only the space form --repo VALUE is recognised (all loop callers use it); the
+# --repo=VALUE form would be recorded as unset.
 if [ "${1:-}" = "--repo" ]; then shift 2; fi
 
 # documented failure seams (see header): simulate a transient tracker failure
