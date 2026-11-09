@@ -126,8 +126,10 @@ fi
 # Orphaned local branches (review of #15): a local branch with no worktree and no remote
 # counterpart is the residue of a failed `git branch -D` after a worktree removal. It is
 # NOTED, never counted — notes are advisory, and deleting a branch is the operator's consent
-# (the same collector-not-bulldozer stance as cleanup-worktrees.sh).
-if [ -n "$DL_ROOT" ]; then
+# (the same collector-not-bulldozer stance as cleanup-worktrees.sh). The remote probe is
+# SKIPPED when the remote itself is absent: `git remote get-url` failing must not read as
+# "every branch not on origin" — with no remote the scan cannot classify anything.
+if [ -n "$DL_ROOT" ] && git -C "$DL_ROOT" remote get-url "$DL_REMOTE" >/dev/null 2>&1; then
   checked=""
   while IFS= read -r line; do
     case $line in branch*) checked+="${line#branch }"$'\n' ;; esac
