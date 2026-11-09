@@ -185,6 +185,107 @@ expect "gate-train stops on a conflict and names the branch" "3 TRAIN rebase con
 
 git checkout -q main
 
+# --- gate-train.sh x scenario stage (dark-factory spec §5) ----------------------
+# Store OFF: the train behaves exactly as before and the stage is never invoked.
+[ ! -f "$work/home/project/logs/train-scenarios.log" ] &&
+  pass "a store-off train produces no stage log (stage not invoked)" ||
+  fail "a store-off train produced a stage log"
+
+# The stage config must be COMMITTED on the gated branch: the gate reads .devloop.json
+# from what is checked out at the train top. The store (outside the repo) is seeded once;
+# a canned bash judge decides, as in the stage section below.
+gate_store="$work/home/project/scenarios"
+rm -rf "$gate_store" && mkdir -p "$gate_store" "$work/gate-rules"
+printf -- '---\nid: t10-a\ntitle: Gate stage scenario\nrequired: true\n---\n## Steps\ndo the SENTINEL-SCENE-13 thing\n' >"$gate_store/t10-a.md"
+cat >"$work/grun.sh" <<'EOF'
+#!/bin/sh
+echo "target-gate-13"
+exec sleep 30
+EOF
+cat >"$work/gjudge.sh" <<EOF
+#!/bin/sh
+touch "$work/gjudge-ran"
+rule=\$(cat "$work/gate-rules/t10-a" 2>/dev/null || echo pass)
+case "\$rule" in
+  fail) printf '{"id":"t10-a","satisfied":0.2,"required":true,"evidence":"SENTINEL-EVID-13","missing":"the gate scenario did not fire"}\n' ;;
+  *)    printf '{"id":"t10-a","satisfied":0.95,"required":true,"evidence":"SENTINEL-EVID-13 ok","missing":""}\n' ;;
+esac
+exit 0
+EOF
+chmod +x "$work/grun.sh" "$work/gjudge.sh"
+gate_store_cfg() { # store-on project config, the base unit check kept
+  cat >.devloop.json <<EOF
+{
+  "base_branch": "main",
+  "fast_check": "test ! -e fast-fail",
+  "checks": [{"name": "unit", "command": "./check.sh", "summary": "passed|failed"}],
+  "heavy": {"slots": 2, "port_env": "SMOKE_PORT", "port_base": 9100, "port_step": 10, "poll_seconds": 1},
+  "scenarios": {"run_seconds": 5, "judge_seconds": 5, "pass": 0.8, "min_satisfaction": 0.9, "sealed": 0, "run": "$work/grun.sh", "judge": "bash $work/gjudge.sh"}
+}
+EOF
+}
+
+# Store on + failing check: scenarios skipped + TRAIN RED, exit 1, the stage never runs.
+git checkout -q -B feat/12-redcheck origin/main
+echo BROKEN >>src.txt
+gate_store_cfg
+git add -A && git commit -q -m "feat: broken content, store on (Refs #12)" && git push -q -u origin feat/12-redcheck
+rm -f "$work/gjudge-ran"
+out=$(bash "$plugin/scripts/gate-train.sh" feat/12-redcheck 2>&1)
+rc=$?
+echo "$out"
+expect "store-on train with a failing check is red" "1" "$rc"
+echo "$out" | grep -q "TRAIN RED" && pass "red train announced (failed check)" || fail "no TRAIN RED line"
+echo "$out" | grep -q "scenarios skipped" &&
+  pass "a failing check prints scenarios skipped" || fail "no scenarios skipped line"
+[ ! -f "$work/gjudge-ran" ] && pass "the stage was not invoked (the judge never ran)" ||
+  fail "the stage ran despite the failing check"
+[ ! -f "$work/home/project/logs/train-scenarios.log" ] &&
+  pass "the stage left no stage log" || fail "a stage log exists although the check failed"
+
+# Store on + green checks + red stage: TRAIN RED, exit 1, NO train record; the gate's
+# red output carries only the stage's safe lines (leak sentinels never appear).
+git checkout -q -B feat/13-redstage origin/main
+gate_store_cfg
+git add -A && git commit -q -m "feat: store on, healthy content (Refs #13)" && git push -q -u origin feat/13-redstage
+echo fail >"$work/gate-rules/t10-a"
+rm -f "$work/gjudge-ran" "$work/home/project/train-green.txt"
+out=$(bash "$plugin/scripts/gate-train.sh" feat/13-redstage 2>&1)
+rc=$?
+echo "$out"
+expect "store-on train with a red scenario stage is red" "1" "$rc"
+echo "$out" | grep -q "TRAIN RED" && pass "red train announced (red stage)" || fail "no TRAIN RED line"
+[ -f "$work/gjudge-ran" ] && pass "the stage ran after the green checks" || fail "the stage did not run"
+[ ! -f "$work/home/project/train-green.txt" ] &&
+  pass "a red stage leaves no train record" || fail "a red stage wrote the train record"
+echo "$out" | grep -qF "scenario t10-a unsatisfied (0.20, required): the gate scenario did not fire" &&
+  pass "the unsatisfied line is relayed into the gate output" || fail "no unsatisfied line in the gate output"
+echo "$out" | grep -q "^scenarios red: mean" &&
+  pass "the red aggregate line is relayed" || fail "no red aggregate line"
+printf '%s' "$out" | grep -q "SENTINEL-SCENE-13" &&
+  fail "scenario text leaked onto the gate output" || pass "no scenario text on the gate output"
+printf '%s' "$out" | grep -q "SENTINEL-EVID-13" &&
+  fail "judge evidence leaked onto the gate output" || pass "no judge evidence on the gate output"
+printf '%s' "$out" | grep -qF "$gate_store" &&
+  fail "the store path leaked onto the gate output" || pass "no store path on the gate output"
+
+# Store on + green checks + green stage: TRAIN GREEN, exit 0, the record IS written.
+echo pass >"$work/gate-rules/t10-a"
+rm -f "$work/gjudge-ran" "$work/home/project/train-green.txt"
+out=$(bash "$plugin/scripts/gate-train.sh" feat/13-redstage 2>&1)
+rc=$?
+echo "$out"
+expect "store-on train with a green scenario stage is green" "0" "$rc"
+expect "the stage's green line is relayed" "scenarios green: mean 0.95 (1 judged, 0 unsatisfied)" \
+  "$(printf '%s\n' "$out" | grep 'scenarios green')"
+[ -f "$work/home/project/train-green.txt" ] &&
+  pass "the green train record was written" || fail "no train record after a green stage"
+rm -f "$work/home/project/train-green.txt" # the merge-train cases below expect no gated train
+git checkout -q main # the merge-train cases expect the main checkout on main
+
+# Leave the doctor/stage sections their pristine expectations: no store dir, no rules.
+rm -rf "$gate_store" "$work/gate-rules"
+
 # --- fake-gh + open-pr.sh -----------------------------------------------------
 out=$(bash "$plugin/scripts/open-pr.sh" 2>&1)
 expect "open-pr with no branch is a usage error" "2" "$?"
