@@ -24,7 +24,7 @@ import * as childreg from "./childreg.ts";
 import { spawnPi, type ChildResult } from "./child.ts";
 import { discoverRoles, findRole } from "./roles.ts";
 import { listOpenIssues, listClosedIssueNumbers, addLabel, latestComment, addComment, type Issue } from "./issues.ts";
-import { scanStore, coveredTicketNumbers } from "./scenarios.ts";
+import { scanStore, coveredTicketsFromScan } from "./scenarios.ts";
 import {
 	evaluateStopGate,
 	runFastCheck,
@@ -354,8 +354,9 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 
 	// Startability rule (spec §4): with the store on, a ticket needs a valid t<ticket>- scenario
 	// BEFORE any implementation can start. Local refusal (the scan is a plain read), placed with
-	// the other local refusals so no worktree/label/GitHub side effect precedes it.
-	if (scenariosOn(ctx.cfg) && !coveredTicketNumbers(scanStore(ctx.paths.scenariosDir)).includes(ticket)) {
+	// the other local refusals so no worktree/label/GitHub side effect precedes it. An UNREADABLE
+	// store covers nothing (fail-closed) — a broken store never starts work it cannot verify.
+	if (scenariosOn(ctx.cfg) && !coveredTicketsFromScan(scanStore(ctx.paths.scenariosDir)).includes(ticket)) {
 		return {
 			...text(`ticket #${ticket} is not startable: the scenario store holds no valid t${ticket}- scenario covering it (dark-factory spec §4). Dispatch the scenario-writer for #${ticket} first, then re-dispatch the implementer.`),
 			isError: true,
@@ -772,7 +773,8 @@ export async function evaluateSettle(cwd: string): Promise<{ entries: { type: "c
 		const state = pruneDead(readState(ctx.stateDir));
 		const running = Object.values(state).filter((e) => e.status === "running" && e.role === "implementer").length;
 		// Startability rule (spec §4): with the store on, only tickets covered by a valid
-		// t<ticket>- scenario drive the loop; a missing store dir scans to [] (nothing covered).
+		// t<ticket>- scenario drive the loop; a missing store dir scans to [] (nothing covered)
+		// and an unreadable store likewise covers nothing (fail-closed).
 		const storeOn = scenariosOn(cfg);
 		const decision = evaluateStopGate({
 			fastCheckPassed: fc.passed,
@@ -794,7 +796,7 @@ export async function evaluateSettle(cwd: string): Promise<{ entries: { type: "c
 			running,
 			cap: cfg.heavy.slots,
 			scenariosOn: storeOn,
-			covered: storeOn ? coveredTicketNumbers(scanStore(ctx.paths.scenariosDir)) : [],
+			covered: storeOn ? coveredTicketsFromScan(scanStore(ctx.paths.scenariosDir)) : [],
 		});
 		if (decision.action === "pass") {
 			if (decision.gaveUp) resetCounter(counterPath(ctx.cfg.root));

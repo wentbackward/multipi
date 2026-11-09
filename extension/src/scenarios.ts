@@ -135,6 +135,16 @@ export function coveredTicketNumbers(files: ScenarioFile[]): number[] {
 }
 
 /**
+ * Coverage as a function of a SCAN, not a file list (gate red on the stacked #12→#19 train):
+ * ok → the tickets its valid files cover; error → NONE. Fail-closed: a store the scanner
+ * cannot fully read proves no coverage, so it is treated like an empty store (nothing
+ * startable), never like a wildcard — decisions 2026-11-02, docs/DECISIONS.md.
+ */
+export function coveredTicketsFromScan(scan: ScanResult): number[] {
+	return coveredTicketNumbers(scan.ok ? scan.files : []);
+}
+
+/**
  * Pinned sealed-share rule (spec §5.5): `int(sha256(id) first 10 hex chars, 16) mod 1000 <
  * sealedShare * 1000`. The digest is pinned so the seal cannot drift across platforms or
  * versions; the choice depends only on the id.
