@@ -54,3 +54,18 @@ test("the installed skills mirror skills/*/SKILL.md", () => {
 test("the installed template tracks templates/devloop.json", () => {
 	assert.deepEqual(read(rel(".pi/templates", "devloop.json")), read(rel("templates", "devloop.json")), ".pi/templates/devloop.json diverges");
 });
+
+// #37: the extension's package.json is WRITTEN by scripts/install.sh (not copied from a
+// source file) and is therefore pinned to the installer's contract, not to a byte mirror.
+test("the installed extension manifest is the installer-owned ESM document", () => {
+	const manifest = JSON.parse(read(rel(DST_EXT, "package.json"), "utf8")) as {
+		type?: string;
+		dependencies?: Record<string, string>;
+	};
+	assert.equal(manifest.type, "module", "the installed manifest must force ESM parsing of the .ts sources");
+	assert.deepEqual(
+		Object.keys(manifest.dependencies ?? {}).sort(),
+		["@earendil-works/pi-coding-agent", "typebox"],
+		"the installed manifest must own exactly the two extension deps",
+	);
+});
