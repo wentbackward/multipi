@@ -451,15 +451,19 @@ test("dispatch(scenario-writer) runs the child at the repo root (no worktree, no
 	setupEnv(fx);
 	const echo = path.join(fx.dir, "echo-task");
 	process.env.FAKE_PI_ECHO_TASK = echo; // the child's final message echoes the brief it received
+	// The brief's LAST line is the literal contract sample `STATUS: BLOCKED — <one-line reason>`;
+	// without an explicit report the terminal-line classifier would take the BLOCKED path by
+	// accident. Drive the outcome with a DONE report and assert it, so the expectation is documented.
+	fakeReport(fx, "Wrote the holdout scenarios into the store.\n\nSTATUS: DONE\n");
 	try {
 		const ctx = ctxWithAgents(fx);
 		const n = createIssue(fx, "Cache hit skips recompute", SC_WRITER_BODY);
 		const res = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
-		// The echoed task IS the brief: it must carry the ticket number, its acceptance criteria,
-		// the cited spec section and the store dir.
-		const t = textOf(res);
-		assert.match(t, /TASK WAS:/, "the FAKE_PI_ECHO_TASK seam delivered the brief");
+		// The echoed task IS the brief (written verbatim to the echo file): it must carry the
+		// ticket number, its acceptance criteria, the cited spec section and the store dir.
+		assert.ok(existsSync(echo), "the FAKE_PI_ECHO_TASK seam captured the brief");
+		const t = readFileSync(echo, "utf8");
 		for (const needle of [
 			`# ${n}: Cache hit skips recompute`,
 			"CRITERION-CACHE-HIT", "CRITERION-CACHE-MISS",
@@ -471,9 +475,11 @@ test("dispatch(scenario-writer) runs the child at the repo root (no worktree, no
 		const state = JSON.parse(readFileSync(path.join(fx.dir, "home", "proj", "dispatch.json"), "utf8"));
 		assert.equal(state[`scenario-writer-${n}`].worktree, fx.repo);
 		assert.equal(state[`scenario-writer-${n}`].branch, undefined);
+		assert.equal(state[`scenario-writer-${n}`].status, "done", "the explicit DONE report decided the outcome");
 		assert.ok(!existsSync(path.join(fx.dir, "home", "proj", "worktrees")), "no issue worktree was created");
 	} finally {
 		delete process.env.FAKE_PI_ECHO_TASK;
+		delete process.env.FAKE_PI_REPORT;
 		fx.cleanup();
 	}
 });

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Stand-in for: pi -p --no-session --mode json [--append-system-prompt F] [--tools ...] [--model M] TASK...
 # FAKE_PI_MODE: ok (default) | fail | slow. Streams the NDJSON events the real pi emits in JSON mode.
-# FAKE_PI_ECHO_TASK=F: append a final assistant message "TASK WAS: <task>" (the brief the child got).
+# FAKE_PI_ECHO_TASK=F: append a final assistant message "TASK WAS: <task>", and ALSO write
+#                     the task verbatim to F (the brief the child got, inspectable as a file;
+#                     FAKE_PI_REPORT, if set, still emits after this and wins as finalText).
 # FAKE_PI_REPORT=F: append one more, FINAL assistant message holding F's content — the child's
 #                  report (finalText) is driven by it (contract tests for DONE/BLOCKED outcomes).
 set -u
@@ -63,6 +65,7 @@ if [ -n "${FAKE_PI_ECHO_ROLE:-}" ]; then
 fi
 if [ -n "${FAKE_PI_ECHO_TASK:-}" ]; then
   task=${task#?}
+  printf '%s' "$task" >"$FAKE_PI_ECHO_TASK"
   emit "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"TASK WAS: $(json_escape "$task")\"}],\"model\":\"fake/model\",\"stopReason\":\"end\",\"usage\":{\"input\":1,\"output\":1,\"cacheRead\":0,\"cacheWrite\":0,\"cost\":{\"total\":0},\"totalTokens\":2}}}"
 fi
 # The report seam emits LAST, so it is the child's final message (the dispatch's report).
