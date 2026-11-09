@@ -3,7 +3,7 @@ import test from "node:test";
 import {
 	branchSlug, worktreePath, portRange,
 	assembleImplementerBrief, assembleReviewerBrief, assembleAnalystBrief, assembleVerifierBrief,
-	assembleScenarioWriterBrief, parseScenarioLines, buildScenarioComment,
+	assembleScenarioWriterBrief, parseScenarioLines, scenarioLinesForTicket, buildScenarioComment,
 } from "../../extension/src/brief.ts";
 
 const REPO = "/home/u/src/proj";
@@ -202,6 +202,26 @@ test("buildScenarioComment is titles only: id, title, required, new/changed — 
 	for (const needle of ["#1", "t1-cache-hit", "Cache hit returns the stored value", "required", "new", "t1-cache-miss", "scored", "changed"])
 		assert.ok(comment.includes(needle), `comment missing: ${needle}`);
 	assert.ok(!comment.includes("SECRET"), "no body text in the comment");
+});
+
+test("scenarioLinesForTicket keeps only the t<ticket>- rows (foreign ids and longer prefixes excluded)", () => {
+	const mine = { id: "t7-mine", title: "Mine", kind: "required" as const, state: "new" as const };
+	const lines = [
+		mine,
+		{ id: "t8-theirs", title: "Theirs", kind: "scored" as const, state: "changed" as const },
+		{ id: "t71-prefix-decoy", title: "Decoy", kind: "required" as const, state: "new" as const },
+	];
+	assert.deepEqual(scenarioLinesForTicket(7, lines), [mine]);
+	assert.deepEqual(scenarioLinesForTicket(8, lines), [{ id: "t8-theirs", title: "Theirs", kind: "scored", state: "changed" }]);
+});
+
+test("buildScenarioComment drops foreign ids — a writer reporting the wrong ticket cannot pollute the review list", () => {
+	const comment = buildScenarioComment(7, [
+		{ id: "t7-mine", title: "Mine", kind: "required", state: "new" },
+		{ id: "t8-theirs", title: "Theirs", kind: "scored", state: "changed" },
+	]);
+	assert.ok(comment.includes("t7-mine"), "own ticket's line stays");
+	assert.ok(!comment.includes("t8-theirs") && !comment.includes("Theirs"), "foreign line dropped");
 });
 
 // --- the first wall (spec §3): briefs never name the store ------------------
