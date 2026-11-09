@@ -397,6 +397,7 @@ branch's worktree when its tree is clean (dirty ⇒ kept and reported). `scripts
 cleanup-worktrees.sh [--apply] [repo]` collects ticket-worktree litter with consent semantics (dark-factory
 spec §1/§6): without `--apply` it prints removal candidates as DRYRUN and deletes nothing; with `--apply` it
 removes them (exit 0 done, idempotent; 2 usage/config). Candidates are CLEAN worktrees whose branch is gone
-from the remote AND whose ticket is CLOSED (a PR is MERGED, or the ticket is closed without a PR) or STALE
+from the remote AND whose ticket is CLOSED (a PR is MERGED, or the ticket is closed without a PR — in both
+cases with no open issue; an open issue always wins) or STALE
 (no PR, no open issue, last commit older than `cleanup.stale_days`, default 14). It keeps everything else
 with a stated reason — including anything it cannot classify while the tracker is unreachable.

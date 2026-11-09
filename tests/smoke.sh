@@ -1087,6 +1087,11 @@ git worktree add -q "$wt_base/issue-$dt_n" -b "feat/$dt_n-dirty" origin/main
 echo scratch >"$wt_base/issue-$dt_n/scratch.txt"
 git worktree add -q "$wt_base/issue-remote" -b feat/remote-kept origin/main
 git push -q origin feat/remote-kept
+# A merged PR whose issue is still OPEN (close lag): kept — "closed" means merged-and-CLOSED.
+lag_n=$(gh issue create "merged but issue still open" "lag body" | sed -nE 's#.*/issues/([0-9]+)$#\1#p')
+git worktree add -q "$wt_base/issue-$lag_n" -b "feat/$lag_n-merged" origin/main
+gh pr create --head "feat/$lag_n-merged" --base main --title "feat: lag ($lag_n)" >/dev/null
+echo MERGED >"$FAKE_GH_DIR/feat_${lag_n}-merged.state"
 
 # DRYRUN mode: candidates listed, nothing deleted.
 out=$(cw); rc=$?
@@ -1112,12 +1117,15 @@ printf '%s\n' "$out" | grep -q "^KEPT  $wt_base/issue-$dt_n  (dirty" &&
   pass "a dirty worktree is kept" || fail "the dirty worktree was not kept"
 printf '%s\n' "$out" | grep -q "^KEPT  $wt_base/issue-remote  (branch feat/remote-kept still on origin)" &&
   pass "a worktree whose branch is still on the remote is kept" || fail "the remote-branch worktree was not kept"
+printf '%s\n' "$out" | grep -q "^KEPT  $wt_base/issue-$lag_n  (open issue #$lag_n)" &&
+  pass "a merged-PR worktree with a still-open issue is kept (merged-and-closed only)" ||
+  fail "the merged-but-open worktree was not kept"
 printf '%s' "$out" | grep -qF " $work/project" &&
   fail "the main worktree was listed" || pass "the main worktree is never listed"
 [ -d "$wt_base/issue-$cl_n" ] && [ -d "$wt_base/issue-stale-old" ] &&
   pass "the dry run leaves the candidate worktrees in place" || fail "the dry run touched a candidate"
 expect "the dry-run summary counts removed/dry-run/kept" \
-  "cleanup: 0 removed, 2 dry-run, 5 kept" "$(printf '%s\n' "$out" | tail -1)"
+  "cleanup: 0 removed, 2 dry-run, 6 kept" "$(printf '%s\n' "$out" | tail -1)"
 
 # The scenario store is owner data: populate it, then --apply must leave every file.
 mkdir -p "$store_dir"
@@ -1140,18 +1148,19 @@ printf '%s\n' "$out" | grep -q "^REMOVED $wt_base/issue-stale-old" &&
 [ -z "$(git branch --list "feat/$cl_n-closed")" ] && [ -z "$(git branch --list feat/stale-old)" ] &&
   pass "the removed branches are deleted locally" || fail "a removed branch remains"
 [ -d "$wt_base/issue-$op_n" ] && [ -d "$wt_base/issue-$dt_n" ] &&
-  [ -d "$wt_base/issue-stale-young" ] && [ -d "$wt_base/issue-remote" ] && [ -d "$gt_dir" ] &&
+  [ -d "$wt_base/issue-stale-young" ] && [ -d "$wt_base/issue-remote" ] && [ -d "$wt_base/issue-$lag_n" ] &&
+  [ -d "$gt_dir" ] &&
   pass "the kept worktrees survive --apply" || fail "--apply removed a kept worktree"
 store_count_after=$(find "$store_dir" -mindepth 1 -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')
 [ "$store_count_before" = "$store_count_after" ] && [ -f "$store_dir/c1-delta.md" ] &&
   [ -f "$store_dir/c2-omega.md" ] &&
   pass "every scenario store file survives --apply" || fail "the scenario store was damaged"
 expect "the applied summary counts removed/dry-run/kept" \
-  "cleanup: 2 removed, 0 dry-run, 5 kept" "$(printf '%s\n' "$out" | tail -1)"
+  "cleanup: 2 removed, 0 dry-run, 6 kept" "$(printf '%s\n' "$out" | tail -1)"
 
 # Idempotent: a second --apply finds nothing to do.
 out=$(cw --apply)
-expect "a second --apply changes nothing (idempotent)" "cleanup: 0 removed, 0 dry-run, 5 kept" \
+expect "a second --apply changes nothing (idempotent)" "cleanup: 0 removed, 0 dry-run, 6 kept" \
   "$(printf '%s\n' "$out" | tail -1)"
 
 # Operator errors: an unknown flag is a usage error.

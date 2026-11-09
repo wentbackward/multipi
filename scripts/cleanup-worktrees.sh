@@ -7,9 +7,11 @@
 # loop cycle; in collaborative mode --apply is the operator's consent.
 #
 # Removal candidates — CLEAN ticket worktrees whose branch is GONE FROM THE REMOTE
-# and whose tracked work is done or abandoned:
-#   CLOSED : the branch's ticket is closed — merged-and-closed (a PR exists and is
-#            MERGED) or closed without a PR (not planned) —
+# and whose tracked work is done or abandoned. An OPEN ISSUE for the branch always
+# wins over every removal reason (a merged-but-not-yet-closed ticket keeps its
+# worktree — "closed" means merged-and-CLOSED):
+#   CLOSED : a PR is MERGED (merged-and-closed), or the ticket exists but is not
+#            open (not planned) —
 #   STALE  : no PR and no open issue for the branch, and the last commit is older
 #            than cleanup.stale_days (default 14, read via `cfg cleanup.stale_days 14`).
 # Always KEPT (printed with the reason, in both modes):
@@ -119,14 +121,15 @@ while read -r wt _h branch; do
   if [ "$have_gh" -ne 1 ]; then
     keep "$wt" "tracker unreachable (gh missing or unauthenticated) — cannot classify"; continue
   fi
+  if [ -n "$num" ] && issue_is_open "$num"; then
+    keep "$wt" "open issue #$num"; continue
+  fi
   pr=$(pr_state_of "$br")
   case $pr in
     MERGED) take "$wt" "$br" "closed: merged-and-closed" ;;
     OPEN) keep "$wt" "open PR for $br" ;;
     *)
-      if [ -n "$num" ] && issue_is_open "$num"; then
-        keep "$wt" "open issue #$num"
-      elif [ -n "$num" ] && issue_exists "$num"; then
+      if [ -n "$num" ] && issue_exists "$num"; then
         take "$wt" "$br" "closed: ticket closed without a PR"
       else
         # No PR, no open issue: the STALE bucket, age-gated by cleanup.stale_days.
