@@ -293,6 +293,120 @@ echo "$out" | grep -q "MISSING .*\.devloop.json" && pass "doctor names the missi
   fail "doctor did not name the missing config"
 mv .devloop.json.bak .devloop.json
 
+# --- doctor.sh: factory mode and store health (dark-factory spec §2) ---------
+# Splice factory/scenarios keys into the fixture config (keeping checks/remote/
+# AGENTS.md intact, so the assertions are about the factory lines alone).
+mkcfg() { # mkcfg [EXTRA-JSON]  — base fixture config plus EXTRA before the closing brace
+  local sep=,  # the heavy line ends with a comma only when EXTRA follows it
+  [ -n "$1" ] || sep=''
+  cat >.devloop.json <<EOF
+{
+  "base_branch": "main",
+  "fast_check": "test ! -e fast-fail",
+  "format": "echo formatted {file} >> fmt.log",
+  "format_extensions": [".txt"],
+  "checks": [
+    {"name": "unit", "command": "./check.sh", "summary": "passed|failed"},
+    {"name": "lint", "command": "test -x check.sh", "heavy": false}
+  ],
+  "heavy": {"slots": 2, "port_env": "SMOKE_PORT", "port_base": 9100, "port_step": 10, "poll_seconds": 1}$sep
+$1
+}
+EOF
+}
+doct() { bash "$plugin/scripts/doctor.sh" 2>&1; }
+store_dir="$work/home/project/scenarios"
+write_scen() { # write_scen FILE ID TITLE REQUIRED
+  printf -- '---\nid: %s\ntitle: %s\nrequired: %s\n---\n## User and goal\ndo it\n' "$2" "$3" "$4" >"$store_dir/$1"
+}
+
+# Collaborative with no keys: the default line, healthy, no store line.
+out=$(doct); rc=$?
+expect "collaborative default stays healthy" "0" "$rc"
+echo "$out" | grep -qF "factory collaborative, scenarios off (default)" &&
+  pass "doctor prints the default factory line" || fail "no default factory line"
+echo "$out" | grep -q "store" &&
+  fail "a store line was printed while scenarios are off" || pass "no store line while scenarios are off"
+
+# "factory":"dark" alone: the preset turns the store on; a missing dir is a note, not a miss.
+mkcfg '"factory": "dark"'
+out=$(doct); rc=$?
+expect "dark preset with a missing store dir stays healthy" "0" "$rc"
+echo "$out" | grep -qF "factory dark, scenarios on (preset)" &&
+  pass "doctor prints the dark preset line" || fail "no dark preset line"
+echo "$out" | grep -qF "note    scenario store not created yet: $store_dir" &&
+  pass "missing store dir is a note naming the resolved path" || fail "no note line for the missing store dir"
+echo "$out" | grep -q "^MISSING" &&
+  fail "a missing store dir was counted as a problem" || pass "missing store dir adds no problems"
+
+# dark + explicit "scenarios": false: the explicit off wins even in a dark factory.
+mkcfg '"factory": "dark", "scenarios": false'
+out=$(doct); rc=$?
+expect "dark with an explicit scenarios:false stays healthy" "0" "$rc"
+echo "$out" | grep -qF "factory dark, scenarios off (explicit)" &&
+  pass "doctor prints the explicit-off line" || fail "no explicit-off line"
+echo "$out" | grep -q "store" &&
+  fail "a store line was printed although scenarios are off" || pass "no store line for an explicit off"
+
+# collaborative + a scenarios block: the block turns the store on in any mode.
+mkcfg '"scenarios": {}'
+out=$(doct); rc=$?
+expect "collaborative with a scenarios block stays healthy" "0" "$rc"
+echo "$out" | grep -qF "factory collaborative, scenarios on (explicit)" &&
+  pass "doctor prints the collaborative explicit-on line" || fail "no collaborative explicit-on line"
+echo "$out" | grep -qF "$store_dir (0 scenarios, 0 required)" &&
+  pass "store line carries the resolved path and zero counts" || fail "store line missing or miscounted"
+
+# Seeded store (3 valid: 2 required, 1 not), dark: path, counts, healthy.
+mkdir -p "$store_dir"
+write_scen t1-alpha.md t1-alpha "Alpha works" true
+write_scen t2-beta.md t2-beta "Beta works" false
+write_scen t3-gamma.md t3-gamma "Gamma works" true
+mkcfg '"factory": "dark"'
+out=$(doct); rc=$?
+expect "doctor is healthy with a seeded store" "0" "$rc"
+echo "$out" | grep -qF "$store_dir (3 scenarios, 2 required)" &&
+  pass "doctor prints the store path with the scenario and required counts" ||
+  fail "store counts line wrong (want: $store_dir (3 scenarios, 2 required))"
+
+# One malformed file: exactly that file is named as a MISSING, exit 1.
+printf -- '---\nid: t4-bad\n' >"$store_dir/t4-bad.md" # unclosed frontmatter
+out=$(doct); rc=$?
+expect "doctor fails on a malformed scenario file" "1" "$rc"
+echo "$out" | grep -q "^MISSING scenario t4-bad.md: " &&
+  pass "the malformed file is named with its reason" || fail "malformed file not named"
+[ "$(echo "$out" | grep -c "^MISSING scenario")" = 1 ] &&
+  pass "only the malformed file is named" || fail "more than one scenario file was named"
+echo "$out" | grep -q "doctor: 1 problem(s)" &&
+  pass "the malformed file counts in the problem tally" || fail "problem tally missed the malformed file"
+
+# Dark with zero VALID REQUIRED scenarios: MISSING factory dark (plus the bad file).
+rm -rf "$store_dir"
+mkdir -p "$store_dir"
+write_scen t5-nr.md t5-nr "Not required" false
+printf -- '---\nid: t6-bad\n' >"$store_dir/t6-bad.md" # unclosed frontmatter
+out=$(doct); rc=$?
+expect "dark with zero valid required scenarios fails" "1" "$rc"
+echo "$out" | grep -q "^MISSING factory dark:" &&
+  pass "the unseeded dark factory is flagged MISSING" || fail "no MISSING factory dark line"
+echo "$out" | grep -q "^MISSING scenario t6-bad.md: " &&
+  pass "the malformed file is named beside the dark flag" || fail "malformed file lost beside the dark flag"
+echo "$out" | grep -q "doctor: 2 problem(s)" &&
+  pass "both problems are tallied" || fail "problem tally wrong for dark + malformed"
+
+# Dark with an EMPTY store dir: the dark flag stands on its own.
+rm -rf "$store_dir"
+mkdir -p "$store_dir"
+out=$(doct); rc=$?
+expect "dark with an empty store dir fails" "1" "$rc"
+echo "$out" | grep -q "^MISSING factory dark:" &&
+  pass "empty store dir trips the dark flag" || fail "empty store dir did not trip the dark flag"
+echo "$out" | grep -q "^MISSING scenario" &&
+  fail "an empty store dir named phantom files" || pass "no phantom file lines for an empty store dir"
+
+mkcfg '' # restore the base fixture config
+rm -rf "$store_dir"
+
 # --- doctor.sh: extension runtime -------------------------------------------
 # Stub the installed extension and a stub node_modules (offline stand-ins for the
 # real packages; doctor must only see that they resolve).
