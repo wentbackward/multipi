@@ -70,6 +70,12 @@ Then dispatch implementers per the normal rules. If the analyst came back `STATU
   tickets from different areas.
 - After every report, gate or merge, dispatch the next startable ticket in the SAME turn. Continuous
   work is the norm; stopping to narrate is not.
+- **Cycle cleanup (only when `.devloop.json` sets `"factory": "dark"`):** once per loop cycle —
+  after merges settle, before the next dispatch wave — run `scripts/cleanup-worktrees.sh --apply`.
+  It removes CLOSED and STALE ticket worktrees (clean ones only; the dirty-keep rule is
+  unchanged) and prints the REMOVED/KEPT evidence. The script is DRYRUN by default: in
+  collaborative mode it only lists candidates, and deletion needs an operator who consents
+  with `--apply` — you never run `--apply` yourself in collaborative mode.
 
 ## 3. Dispatch
 
