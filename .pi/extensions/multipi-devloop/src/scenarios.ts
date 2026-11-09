@@ -42,7 +42,8 @@ export interface Verdict {
  * Outcome of scanStore: a scanned list, or a NAMED reason when the store cannot be read
  * (regular file at the store path, unreadable dir, or one unreadable .md file). A MISSING
  * dir is still `ok: true` with an empty list — missing is a note, not a failure; the doctor
- * and the stage decide what to print.
+ * and the stage decide what to print. The startability consumers (dispatch/stop gate) read an
+ * error result as NO coverage (fail-closed, see coveredTicketsFromScan).
  */
 export type ScanResult = { ok: true; files: ScenarioFile[] } | { ok: false; reason: string };
 
@@ -132,6 +133,16 @@ export function coveredTicketNumbers(files: ScenarioFile[]): number[] {
 		if (m) nums.add(Number(m[1]));
 	}
 	return [...nums].sort((a, b) => a - b);
+}
+
+/**
+ * Coverage as a function of a SCAN, not a file list (gate red on the stacked #12→#19 train):
+ * ok → the tickets its valid files cover; error → NONE. Fail-closed: a store the scanner
+ * cannot fully read proves no coverage, so it is treated like an empty store (nothing
+ * startable), never like a wildcard — docs/DECISIONS.md (2026-11-09).
+ */
+export function coveredTicketsFromScan(scan: ScanResult): number[] {
+	return coveredTicketNumbers(scan.ok ? scan.files : []);
 }
 
 /**
