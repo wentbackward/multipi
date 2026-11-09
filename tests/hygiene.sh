@@ -59,8 +59,10 @@ expect ".devloop.json exposes the hygiene check to the gate (non-heavy)" \
 
 # --- fake-gh issue list: numeric ordering ------------------------------------
 list_numbers() { # list_numbers STATE -> space-separated issue numbers, in order
+  # Layout-agnostic: real gh (and the fake) emit ONE compact array line.
   FAKE_GH_DIR="$work/gh" "$plugin/tests/fake-gh" issue list --state "$1" --json number \
-    | sed -n 's/.*"number":\([0-9]*\).*/\1/p' | tr '\n' ' ' | sed -e 's/ $//'
+    | grep -oE '"number"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' \
+    | tr '\n' ' ' | sed -e 's/ $//'
 }
 expect "issue list is empty for a fresh fake gh (open)" \
   "0" "$(FAKE_GH_DIR="$work/gh" "$plugin/tests/fake-gh" issue list --state open >/dev/null 2>&1; echo $?)"
