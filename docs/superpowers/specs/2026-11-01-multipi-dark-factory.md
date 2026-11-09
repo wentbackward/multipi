@@ -223,7 +223,7 @@ forbids it and the gate's red output contains only `missing` lines.
 
 **Automated in dark:** scenario writing at ticket creation (with the issue title-list for the
 human), the scenario gate stage, worktree/branch cleanup each cycle (closed = merged-and-closed
-or not-planned, closed-with-`--include` equivalent; stale = no PR, no open issue, idle
+or not-planned, closed-with-`--include` equivalent; stale = no live PR, no open issue, idle
 `cleanup.stale_days`, default 14; clean worktrees only — the dirty-keep rule is unchanged),
 re-dispatch of crashed/watched children (already loop behaviour), and re-gating after fixes
 (already loop behaviour).
