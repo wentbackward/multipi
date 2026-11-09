@@ -376,6 +376,80 @@ rc=$?
 echo "$out"
 expect "merge-train refuses a replay conflict" "3" "$rc"
 
+# --- merge-train.sh: train-ref cleanup (#26) ----------------------------------
+# The aborted gates above (feat/3..9) each left their train-<branch> ref behind:
+# the cleanup below may only delete the refs of the train it just fully merged.
+tref() { git -C "$gate" rev-parse -q --verify "refs/heads/train-$1" 2>/dev/null; }
+new10() { # new10 BRANCH FILE CONTENT: a branch on origin/main with one new file + notes
+  git checkout -q -B "$1" origin/main
+  echo "$3" >"$2" && git add "$2" && git commit -q -m "feat: $2 (Refs #10)" && git push -q -u origin "$1"
+  printf 'feat: %s (#10)\n\nCloses #10\n' "$2" >"$("$plugin/scripts/paths.sh" notes "$1")"
+}
+new10 feat/10-a a10.txt alpha
+new10 feat/10-b b10.txt bravo
+bash "$plugin/scripts/gate-train.sh" feat/10-a feat/10-b >/dev/null 2>&1
+expect "a two-branch train gates green" "0" "$?"
+
+# Mid-train stop: the second PR is blocked (fake-gh merge hold) -> exit 7 with the
+# first branch already merged; BOTH train refs must survive for the resume.
+touch "$FAKE_GH_DIR/feat_10-b.merge-hold"
+out=$(bash "$plugin/scripts/merge-train.sh" feat/10-a feat/10-b 2>&1)
+rc=$?
+echo "$out"
+expect "merge-train stops at the blocked PR with exit 7" "7" "$rc"
+echo "$out" | grep -q "PR for feat/10-b is OPEN" && pass "blocked PR is named with its state" ||
+  fail "blocked PR state line missing"
+expect "first row merged, second still pending" \
+  "feat/10-a|merged;feat/10-b|pending" \
+  "$(awk '{print $1"|"$4}' "$work/home/project/train-green.txt" | paste -sd';')"
+expect "the pending branch's train ref survived the interruption" \
+  "$(awk '$1 == "feat/10-b" {print $3}' "$work/home/project/train-green.txt")" "$(tref feat/10-b)"
+[ -n "$(tref feat/10-a)" ] && pass "the lower branch's train ref is still load-bearing" ||
+  fail "the lower branch's train ref was deleted although stacked branches were pending"
+git fetch -q origin
+expect "the first branch really reached origin/main" "feat: a10.txt (#10)" \
+  "$(git log --format=%s -1 origin/main)"
+
+# Resume WITHOUT re-gating: only the pending branch, same order.
+rm -f "$FAKE_GH_DIR/feat_10-b.merge-hold"
+out=$(bash "$plugin/scripts/merge-train.sh" feat/10-b 2>&1)
+rc=$?
+echo "$out"
+expect "an interrupted train resumes without re-gating" "0" "$rc"
+expect "origin main carries both squashes, in gate order" "feat: b10.txt (#10)|feat: a10.txt (#10)" \
+  "$(git log --format=%s -2 origin/main | paste -sd'|')"
+[ ! -f "$work/home/project/train-green.txt" ] && pass "the resume consumed the green record" ||
+  fail "green record still present after the resumed merge"
+expect "a fully merged train leaves no train refs" "" \
+  "$(git -C "$gate" for-each-ref refs/heads/train-feat/10-a refs/heads/train-feat/10-b)"
+[ -n "$(tref feat/6-no-notes)" ] && pass "foreign train refs (aborted gates) are untouched" ||
+  fail "cleanup deleted train refs outside its own train"
+
+# Same invariants for a straightforward single-branch train.
+new10 feat/10-c c10.txt charlie
+bash "$plugin/scripts/gate-train.sh" feat/10-c >/dev/null 2>&1
+expect "a single-branch train gates green" "0" "$?"
+bash "$plugin/scripts/merge-train.sh" feat/10-c >/dev/null 2>&1
+expect "the single-branch train merges" "0" "$?"
+expect "the single-branch train's ref is gone" "" "$(tref feat/10-c)"
+out=$(bash "$plugin/scripts/merge-train.sh" feat/10-c 2>&1)
+expect "re-running after the train is gone refuses with exit 8 (refs absent)" "8" "$?"
+echo "$out" | grep -q "no green train recorded" && pass "the refusal names the missing green train" ||
+  fail "refusal line missing"
+
+# A recorded green train whose train ref vanished (manual deletion) still refuses,
+# via the rev-parse fallback: exit 8, not a crash and not a proceed.
+new10 feat/10-d d10.txt delta
+bash "$plugin/scripts/gate-train.sh" feat/10-d >/dev/null 2>&1
+expect "feat/10-d gates green" "0" "$?"
+git -C "$gate" branch -q -D train-feat/10-d
+out=$(bash "$plugin/scripts/merge-train.sh" feat/10-d 2>&1)
+rc=$?
+echo "$out"
+expect "a vanished train ref is refused with exit 8" "8" "$rc"
+echo "$out" | grep -q "not the gated head" && pass "the refusal names the vanished ref" ||
+  fail "vanished-ref refusal line missing"
+
 # --- doctor.sh ----------------------------------------------------------------
 out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
 rc=$?

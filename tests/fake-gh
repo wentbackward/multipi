@@ -9,6 +9,10 @@
 # Issues live in $FAKE_GH_DIR/issues (open) and issues-closed, one file per
 # number (line 1 title, line 2 body); labels in labels/<n>.
 #
+# Test seam: while $FAKE_GH_DIR/<slug>.merge-hold exists, `pr merge` refuses the
+# merge and the PR stays OPEN (a temporarily blocked PR, e.g. failing CI) — this
+# lets the smoke test stop a merge train deterministically mid-train.
+#
 # Supported surface (everything the multipi scripts and extension call):
 #   auth status
 #   pr view <branch> [--json state]        0 open, 1 none
@@ -83,6 +87,7 @@ case "${1:-} ${2:-}" in
     ;;
   "pr merge"|"pr squash-merge")
     branch=$3
+    [ -f "$dir/$(key "$branch").merge-hold" ] && { echo "fake gh: merge held for $branch" >&2; exit 1; }
     origin=$(git remote get-url origin)
     expected=""
     [[ " $* " == *" --match-head-commit "* ]] && expected=$(printf '%s\n' "$@" | grep -A1 -- --match-head-commit | tail -1)
