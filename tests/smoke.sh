@@ -1201,6 +1201,9 @@ printf '%s\n' "$out" | grep -qF "KEPT  $wt_base/issue-stale-old  (tracker unreac
 printf '%s\n' "$out" | grep -qF "KEPT  $wt_base/issue-2026-backup  (tracker unreachable — cannot classify)" &&
   pass "under an issue-list failure the untracked-number candidate is KEPT" ||
   fail "the untracked-number candidate was not kept as unclassifiable"
+printf '%s\n' "$out" | grep -qF "WARN  tracker fetch failed (issue list --state open): fake gh: simulated transient failure (issue list)" &&
+  pass "a tracker fetch failure warns on one line carrying gh's stderr (diagnostics for the dark cycle)" ||
+  fail "no one-line WARN carried gh's stderr on the tracker fetch failure"
 expect "the issue-list-failure summary lists nothing for removal" \
   "cleanup: 0 removed, 0 dry-run, 14 kept" "$(printf '%s\n' "$out" | tail -1)"
 
@@ -1217,6 +1220,51 @@ printf '%s\n' "$out" | grep -qF "KEPT  $wt_base/issue-$cl_n  (pr query failed �
   fail "the closed-ticket candidate was not kept as unclassifiable"
 expect "the pr-query-failure summary lists nothing for removal" \
   "cleanup: 0 removed, 0 dry-run, 14 kept" "$(printf '%s\n' "$out" | tail -1)"
+
+# Fail-closed (review round-3 must-fix): a FAILED local age probe is
+# unclassifiable, NEVER "ancient" — a negative signal must not drive deletion,
+# the same rule as the tracker. A git shim makes `log -1 --format=%ct` fail.
+logshim_dir="$work/git-log-shim"
+logshim_real=$(command -v git)
+mkdir -p "$logshim_dir"
+cat >"$logshim_dir/git" <<EOF
+#!/usr/bin/env bash
+# Fail ONLY the age probe (`git [-C <wt>] log ...`); every other invocation
+# passes through to the real git with its arguments untouched.
+args=("\$@")
+subcmd="\${args[0]:-}"
+[ "\$subcmd" = "-C" ] && subcmd="\${args[2]:-}"
+if [ "\$subcmd" = "log" ]; then
+  echo "fatal: simulated unreadable history (log)" >&2
+  exit 1
+fi
+exec "$logshim_real" "\$@"
+EOF
+chmod +x "$logshim_dir/git"
+out=$(PATH="$logshim_dir:$PATH" cw)
+echo "$out"
+[ "$(printf '%s\n' "$out" | grep -c '^REMOVED')" = 0 ] &&
+  [ "$(printf '%s\n' "$out" | grep -c '^DRYRUN')" = 2 ] &&
+  pass "a failing age probe demotes exactly the age-gated candidates (closed classifications stay positive)" ||
+  fail "the failing age probe leaked beyond the candidates whose age it could not read"
+printf '%s\n' "$out" | grep -qF "KEPT  $wt_base/issue-stale-old  (commit age unreadable — cannot classify)" &&
+  pass "under a failing age probe the stale candidate is KEPT (cannot classify)" ||
+  fail "the stale candidate was not kept as unclassifiable under a failing age probe"
+printf '%s\n' "$out" | grep -qF "KEPT  $wt_base/issue-2026-backup  (commit age unreadable — cannot classify)" &&
+  pass "under a failing age probe the untracked-number candidate is KEPT" ||
+  fail "the untracked-number candidate was not kept as unclassifiable under a failing age probe"
+printf '%s\n' "$out" | grep -qF "KEPT  $wt_base/issue 42 spaced  (commit age unreadable — cannot classify)" &&
+  pass "under a failing age probe the spaced-path candidate is KEPT" ||
+  fail "the spaced-path candidate was not kept as unclassifiable under a failing age probe"
+[ -n "$(printf '%s\n' "$out" | grep "^KEPT  $wt_base/issue-stale-young")" ] &&
+  printf '%s\n' "$out" | grep "^KEPT  $wt_base/issue-stale-young" | grep -qF "commit age unreadable — cannot classify" &&
+  pass "even the too-young worktree cannot prove its age, so it is kept (a negative signal never deletes)" ||
+  fail "the young worktree was not kept as unclassifiable under a failing age probe"
+printf '%s\n' "$out" | grep -qF "DRYRUN $wt_base/issue-$cl_n  (closed: no live PR" &&
+  pass "a failing age probe does not demote the closed-ticket classification (the failure stays local)" ||
+  fail "the failing age probe demoted an unrelated positive classification"
+expect "the failing-age-probe summary lists nothing for removal" \
+  "cleanup: 0 removed, 2 dry-run, 12 kept" "$(printf '%s\n' "$out" | tail -1)"
 
 # The scenario store is owner data: populate it, then --apply must leave every file.
 mkdir -p "$store_dir"
@@ -1296,6 +1344,51 @@ printf '%s\n' "$out" | grep -qF "WARN  feat/branchdel-old: local branch delete F
 expect "the branch-delete-failure summary" \
   "cleanup: 1 removed, 0 dry-run, 9 kept" "$(printf '%s\n' "$out" | tail -1)"
 git branch -q -D feat/branchdel-old  # tidy the simulated survivor
+
+# Abandoned-PR corner (review round-3 folded 3, pinned): a branch whose only PR
+# is CLOSED (unmerged) has NO LIVE PR — it is not ticket-protected; after the
+# idle window it is a plain STALE candidate (rationale: docs/DECISIONS.md).
+git worktree add -q "$wt_base/issue-abandoned" -b feat/abandoned-old origin/main
+GIT_COMMITTER_DATE="2020-01-05T00:00:00Z" \
+  git -C "$wt_base/issue-abandoned" commit -q --allow-empty -m "chore: abandoned commit"
+gh pr create --head feat/abandoned-old --base main --title "feat: abandoned" >/dev/null
+echo CLOSED >"$FAKE_GH_DIR/feat_abandoned-old.state"
+out=$(cw)
+printf '%s\n' "$out" | grep -qE "DRYRUN $wt_base/issue-abandoned  \(stale: last commit [0-9]+d old \(> 2d limit\)\)" &&
+  pass "a closed-unmerged PR does not protect: the branch falls into the STALE age gate" ||
+  fail "the abandoned-PR branch was not classified as a stale candidate (protected by a dead PR?)"
+expect "the abandoned-PR summary (only the new candidate)" \
+  "cleanup: 0 removed, 1 dry-run, 9 kept" "$(printf '%s\n' "$out" | tail -1)"
+out=$(cw --apply)
+printf '%s\n' "$out" | grep -qF "REMOVED $wt_base/issue-abandoned  (stale:" &&
+  pass "--apply removes the idle abandoned-PR branch as stale" ||
+  fail "the idle abandoned-PR branch was not removed as stale"
+[ ! -d "$wt_base/issue-abandoned" ] && [ -z "$(git branch --list feat/abandoned-old)" ] &&
+  pass "the abandoned-PR worktree and its branch are gone" ||
+  fail "the abandoned-PR worktree or branch remains"
+expect "the abandoned-PR applied summary" "cleanup: 1 removed, 0 dry-run, 9 kept" \
+  "$(printf '%s\n' "$out" | tail -1)"
+
+# Default stale_days=14, config-FREE (review round-3 folded 2): with NO cleanup
+# key at all the age gate must run at the 14-day default, not the 2-day override.
+mkcfg ''
+git worktree add -q "$wt_base/issue-default-3d" -b feat/default-3d origin/main
+GIT_COMMITTER_DATE="$(date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)" \
+  git -C "$wt_base/issue-default-3d" commit -q --allow-empty -m "chore: three days old"
+git worktree add -q "$wt_base/issue-default-30d" -b feat/default-30d origin/main
+GIT_COMMITTER_DATE="2020-01-05T00:00:00Z" \
+  git -C "$wt_base/issue-default-30d" commit -q --allow-empty -m "chore: thirty-plus days old"
+out=$(cw)
+printf '%s\n' "$out" | grep -qF "KEPT  $wt_base/issue-default-3d  (idle 3d within 14d — too young to be stale)" &&
+  pass "without a config the age gate defaults to 14d: a 3-day-old branch is kept" ||
+  fail "the age gate did not default to 14 days (a 3-day-old branch was stale-removable)"
+printf '%s\n' "$out" | grep -qE "DRYRUN $wt_base/issue-default-30d  \(stale: last commit [0-9]+d old \(> 14d limit\)\)" &&
+  pass "without a config the 14d default still bites: an ancient branch is a stale candidate" ||
+  fail "an ancient branch was not stale-classified under the 14d default"
+expect "the default-stale-days summary" "cleanup: 0 removed, 1 dry-run, 10 kept" \
+  "$(printf '%s\n' "$out" | tail -1)"
+git worktree remove -q "$wt_base/issue-default-3d"; git branch -q -D feat/default-3d
+git worktree remove -q "$wt_base/issue-default-30d"; git branch -q -D feat/default-30d
 
 # Operator errors: an unknown flag is a usage error.
 cw --bogus >/dev/null 2>&1
