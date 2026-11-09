@@ -191,9 +191,11 @@ git checkout -q main
   pass "a store-off train produces no stage log (stage not invoked)" ||
   fail "a store-off train produced a stage log"
 
-# The stage config must be COMMITTED on the gated branch: the gate reads .devloop.json
-# from what is checked out at the train top. The store (outside the repo) is seeded once;
-# a canned bash judge decides, as in the stage section below.
+# The stage config must be COMMITTED on the gated branch: all three config readers (the
+# gate's on/off call, the stage, the doctor) resolve .devloop.json from the MAIN
+# worktree — the same single main-root config, whatever is checked out at the train top —
+# and the fixture checks the gated branch out in the main worktree. The store (outside
+# the repo) is seeded once; a canned bash judge decides, as in the stage section below.
 gate_store="$work/home/project/scenarios"
 rm -rf "$gate_store" && mkdir -p "$gate_store" "$work/gate-rules"
 printf -- '---\nid: t10-a\ntitle: Gate stage scenario\nrequired: true\n---\n## Steps\ndo the SENTINEL-SCENE-13 thing\n' >"$gate_store/t10-a.md"
@@ -1404,9 +1406,10 @@ printf '%s\n' "$out" | grep -qF "KEPT  $wt_base/issue-$cl_n  (pr query failed �
   pass "under a pr-query failure the closed-ticket candidate is KEPT (cannot classify)" ||
   fail "the closed-ticket candidate was not kept as unclassifiable"
 # Diagnostics (symmetric with the issue-list fetch WARN): every per-branch pr-query
-# failure gets its own one-line WARN carrying gh's stderr — 7 worktrees reach the pr
-# query in this fixture (open-issue/dirty/on-remote keeps all happen before it).
-[ "$(printf '%s\n' "$out" | grep -c '^WARN  pr query failed')" = 7 ] &&
+# failure gets its own one-line WARN carrying gh's stderr — 8 worktrees reach the pr
+# query in this fixture (open-issue/dirty/on-remote keeps all happen before it; the
+# open-PR keep happens ON the pr query, so its worktree reaches it too).
+[ "$(printf '%s\n' "$out" | grep -c '^WARN  pr query failed')" = 8 ] &&
   pass "every per-branch pr-query failure warns on its own line" ||
   fail "the pr-query failure WARN count is wrong (diagnostics lost?)"
 printf '%s\n' "$out" | grep -qF "WARN  pr query failed (feat/stale-old): fake gh: simulated transient failure (pr list)" &&
