@@ -1229,7 +1229,7 @@ logshim_real=$(command -v git)
 mkdir -p "$logshim_dir"
 cat >"$logshim_dir/git" <<EOF
 #!/usr/bin/env bash
-# Fail ONLY the age probe (`git [-C <wt>] log ...`); every other invocation
+# Fail ONLY the age probe (git [-C <wt>] log ...); every other invocation
 # passes through to the real git with its arguments untouched.
 args=("\$@")
 subcmd="\${args[0]:-}"
