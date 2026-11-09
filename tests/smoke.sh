@@ -225,6 +225,32 @@ gate_store_cfg() { # store-on project config, the base unit check kept
 EOF
 }
 
+# The candidate probe must check the SAME three files the stage requires (config.ts +
+# scenarios.ts + scenario-run.ts). Run the gate from a SCRIPTS COPY whose fallback
+# candidate ($scripts_dir/../extension/src) is absent, leaving one INCOMPLETE candidate
+# (config.ts only) in the project: a probe that accepts config.ts alone reads it as
+# runnable and dies inside the stage (exit 2); the symmetric probe degrades to
+# pre-stage behaviour and the train still gates green.
+git checkout -q -B feat/11-probe origin/main
+gate_store_cfg
+git add -A && git commit -q -m "feat: store on, probe pin (Refs #11)" && git push -q -u origin feat/11-probe
+rm -rf "$work/scriptscopy" && cp -r "$plugin/scripts" "$work/scriptscopy"
+probe_ext="$work/project/.pi/extensions/multipi-devloop/src"
+mkdir -p "$probe_ext"
+cp "$plugin/extension/src/config.ts" "$probe_ext/config.ts"
+rm -f "$work/gjudge-ran" "$work/home/project/train-green.txt"
+out=$(bash "$work/scriptscopy/gate-train.sh" feat/11-probe 2>&1)
+rc=$?
+echo "$out"
+expect "the gate candidate probe requires all three stage modules" "0" "$rc"
+[ ! -f "$work/home/project/logs/train-scenarios.log" ] &&
+  pass "an incomplete candidate never runs the stage" || fail "the incomplete candidate ran the stage"
+printf '%s' "$out" | grep -qi "scenario" &&
+  fail "the degraded probe leaked scenario talk onto the gate output" ||
+  pass "the degraded probe keeps the exact pre-stage output"
+git -C "$gate" branch -q -D train-feat/11-probe
+rm -rf "$work/scriptscopy" "$work/project/.pi" "$work/home/project/train-green.txt"
+
 # Store on + failing check: scenarios skipped + TRAIN RED, exit 1, the stage never runs.
 git checkout -q -B feat/12-redcheck origin/main
 echo BROKEN >>src.txt
@@ -380,13 +406,13 @@ expect "merge-train refuses a replay conflict" "3" "$rc"
 # The aborted gates above (feat/3..9) each left their train-<branch> ref behind:
 # the cleanup below may only delete the refs of the train it just fully merged.
 tref() { git -C "$gate" rev-parse -q --verify "refs/heads/train-$1" 2>/dev/null; }
-new10() { # new10 BRANCH FILE CONTENT: a branch on origin/main with one new file + notes
+stage_branch() { # stage_branch BRANCH FILE CONTENT: a branch on origin/main with one new file + notes
   git checkout -q -B "$1" origin/main
   echo "$3" >"$2" && git add "$2" && git commit -q -m "feat: $2 (Refs #10)" && git push -q -u origin "$1"
   printf 'feat: %s (#10)\n\nCloses #10\n' "$2" >"$("$plugin/scripts/paths.sh" notes "$1")"
 }
-new10 feat/10-a a10.txt alpha
-new10 feat/10-b b10.txt bravo
+stage_branch feat/10-a a10.txt alpha
+stage_branch feat/10-b b10.txt bravo
 bash "$plugin/scripts/gate-train.sh" feat/10-a feat/10-b >/dev/null 2>&1
 expect "a two-branch train gates green" "0" "$?"
 
@@ -426,7 +452,7 @@ expect "a fully merged train leaves no train refs" "" \
   fail "cleanup deleted train refs outside its own train"
 
 # Same invariants for a straightforward single-branch train.
-new10 feat/10-c c10.txt charlie
+stage_branch feat/10-c c10.txt charlie
 bash "$plugin/scripts/gate-train.sh" feat/10-c >/dev/null 2>&1
 expect "a single-branch train gates green" "0" "$?"
 bash "$plugin/scripts/merge-train.sh" feat/10-c >/dev/null 2>&1
@@ -439,7 +465,7 @@ echo "$out" | grep -q "no green train recorded" && pass "the refusal names the m
 
 # A recorded green train whose train ref vanished (manual deletion) still refuses,
 # via the rev-parse fallback: exit 8, not a crash and not a proceed.
-new10 feat/10-d d10.txt delta
+stage_branch feat/10-d d10.txt delta
 bash "$plugin/scripts/gate-train.sh" feat/10-d >/dev/null 2>&1
 expect "feat/10-d gates green" "0" "$?"
 git -C "$gate" branch -q -D train-feat/10-d
@@ -449,6 +475,40 @@ echo "$out"
 expect "a vanished train ref is refused with exit 8" "8" "$rc"
 echo "$out" | grep -q "not the gated head" && pass "the refusal names the vanished ref" ||
   fail "vanished-ref refusal line missing"
+
+# A REFUSED train-ref delete (e.g. the ref is checked out elsewhere) is printed, not
+# silently tolerated — the residue must be diagnosable, not a silent permanent leak.
+# A git shim refuses only `branch -q -D train-*` deletions.
+bdshim_dir="$work/git-bdshim"
+bdshim_real=$(command -v git)
+mkdir -p "$bdshim_dir"
+cat >"$bdshim_dir/git" <<EOF
+#!/usr/bin/env bash
+args=("\$@")
+bd=0
+for a in "\${args[@]}"; do
+  case "\$a" in
+    branch) bd=1 ;;
+    train-*) [ "\$bd" = 1 ] && { echo "error: simulated refusal to delete a train ref" >&2; exit 1; } ;;
+  esac
+done
+exec "$bdshim_real" "\$@"
+EOF
+chmod +x "$bdshim_dir/git"
+stage_branch feat/10-e e10.txt echo
+bash "$plugin/scripts/gate-train.sh" feat/10-e >/dev/null 2>&1
+expect "feat/10-e gates green" "0" "$?"
+out=$(PATH="$bdshim_dir:$PATH" bash "$plugin/scripts/merge-train.sh" feat/10-e 2>&1)
+rc=$?
+echo "$out"
+expect "a refused train-ref delete does not change the merge's exit" "0" "$rc"
+printf '%s\n' "$out" | grep -qF "KEPT train-feat/10-e (delete refused: error: simulated refusal to delete a train ref)" &&
+  pass "the refused train-ref delete is printed with its reason" ||
+  fail "no KEPT line carrying the refusal reason (a silent residue?)"
+[ -n "$(tref feat/10-e)" ] &&
+  pass "the refused ref really survives the merge run" ||
+  fail "the sim-refused ref vanished anyway"
+git -C "$gate" branch -q -D train-feat/10-e
 
 # --- doctor.sh ----------------------------------------------------------------
 out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
@@ -469,6 +529,19 @@ echo "$out" | grep -q "note    orphaned local branch dl-orphan-pin" &&
   pass "orphaned local branch is noted" || fail "orphaned local branch not noted (want: 'note    orphaned local branch dl-orphan-pin')"
 echo "$out" | grep -q "problem(s)" &&
   fail "the orphan note was counted as a problem" || pass "the orphan note is not a problem"
+
+# An ABSENT remote must not read as "every branch not on origin": with no resolvable
+# remote the orphan scan is skipped (it cannot classify), not faked.
+git remote rename origin origin-moved
+out=$(bash "$plugin/scripts/doctor.sh" 2>&1); rc=$?
+echo "$out"
+[ "$rc" -ne 0 ] && pass "an absent remote is still a named problem" ||
+  fail "the absent remote went unnoticed"
+printf '%s' "$out" | grep -q "orphaned local branch dl-orphan-pin" &&
+  fail "an absent remote was read as 'every branch not on origin'" ||
+  pass "the orphan scan is skipped when the remote is absent"
+git remote rename origin-moved origin
+
 git branch -q -D dl-orphan-pin
 mv .devloop.json .devloop.json.bak
 out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
@@ -1330,6 +1403,15 @@ unset FAKE_GH_FAIL_PR_LIST
 printf '%s\n' "$out" | grep -qF "KEPT  $wt_base/issue-$cl_n  (pr query failed — cannot classify)" &&
   pass "under a pr-query failure the closed-ticket candidate is KEPT (cannot classify)" ||
   fail "the closed-ticket candidate was not kept as unclassifiable"
+# Diagnostics (symmetric with the issue-list fetch WARN): every per-branch pr-query
+# failure gets its own one-line WARN carrying gh's stderr — 7 worktrees reach the pr
+# query in this fixture (open-issue/dirty/on-remote keeps all happen before it).
+[ "$(printf '%s\n' "$out" | grep -c '^WARN  pr query failed')" = 7 ] &&
+  pass "every per-branch pr-query failure warns on its own line" ||
+  fail "the pr-query failure WARN count is wrong (diagnostics lost?)"
+printf '%s\n' "$out" | grep -qF "WARN  pr query failed (feat/stale-old): fake gh: simulated transient failure (pr list)" &&
+  pass "the pr-query WARN carries gh's stderr" ||
+  fail "the pr-query WARN is missing gh's stderr"
 expect "the pr-query-failure summary lists nothing for removal" \
   "cleanup: 0 removed, 0 dry-run, 14 kept" "$(printf '%s\n' "$out" | tail -1)"
 
@@ -1377,6 +1459,42 @@ printf '%s\n' "$out" | grep -qF "DRYRUN $wt_base/issue-$cl_n  (closed: no live P
   fail "the failing age probe demoted an unrelated positive classification"
 expect "the failing-age-probe summary lists nothing for removal" \
   "cleanup: 0 removed, 2 dry-run, 12 kept" "$(printf '%s\n' "$out" | tail -1)"
+
+# A FAILED `git status --porcelain` probe is unclassifiable, NEVER "clean" (reading
+# empty-on-failure as clean would let a negative signal drive deletion). A git shim
+# makes status fail.
+statshim_dir="$work/git-status-shim"
+statshim_real=$(command -v git)
+mkdir -p "$statshim_dir"
+cat >"$statshim_dir/git" <<EOF
+#!/usr/bin/env bash
+args=("\$@")
+subcmd="\${args[0]:-}"
+[ "\$subcmd" = "-C" ] && subcmd="\${args[2]:-}"
+if [ "\$subcmd" = "status" ]; then
+  echo "fatal: simulated status probe failure" >&2
+  exit 1
+fi
+exec "$statshim_real" "\$@"
+EOF
+chmod +x "$statshim_dir/git"
+out=$(PATH="$statshim_dir:$PATH" cw)
+echo "$out"
+[ "$(printf '%s\n' "$out" | grep -c '^DRYRUN')" = 0 ] &&
+  [ "$(printf '%s\n' "$out" | grep -c '^REMOVED')" = 0 ] &&
+  pass "a failing status probe produces no removal candidates" ||
+  fail "a failing status probe produced candidates (fail-open!)"
+printf '%s\n' "$out" | grep -qF "KEPT  $wt_base/issue-stale-old  (status probe failed — cannot classify)" &&
+  pass "under a failing status probe the candidate is KEPT (cannot classify)" ||
+  fail "the failing status probe was not read as unclassifiable"
+printf '%s\n' "$out" | grep -qF "KEPT  $wt_base/issue-$dt_n  (status probe failed — cannot classify)" &&
+  pass "even the dirty worktree reads unclassifiable when its status probe fails" ||
+  fail "the dirty worktree was not kept as unclassifiable under a failing status probe"
+printf '%s' "$out" | grep -q "dirty — uncommitted work" &&
+  fail "a failing status probe was read as dirty (or clean)" ||
+  pass "a failing status probe is neither clean nor dirty"
+expect "the status-probe-failure summary lists nothing for removal" \
+  "cleanup: 0 removed, 0 dry-run, 14 kept" "$(printf '%s\n' "$out" | tail -1)"
 
 # The scenario store is owner data: populate it, then --apply must leave every file.
 mkdir -p "$store_dir"
