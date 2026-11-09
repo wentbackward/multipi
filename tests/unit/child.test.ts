@@ -107,6 +107,28 @@ test("spawnPi marks the child process with MULTIPI_CHILD (extension guard)", asy
 	assert.equal(fs.readFileSync(f, "utf8"), "1");
 });
 
+test("spawnPi stamps MULTIPI_CHILD_ROLE next to MULTIPI_CHILD (role guard seam)", async () => {
+	const os = await import("node:os");
+	const fs = await import("node:fs");
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "multi-pi-role-"));
+	const f = path.join(dir, "role.txt");
+	const c = path.join(dir, "child.txt");
+	await spawnPi({
+		task: "x", cwd: process.cwd(), role: "implementer",
+		env: { MULTIPI_PI_BIN: FAKE_PI, FAKE_PI_ECHO_ROLE: f, FAKE_PI_ECHO_ENV: c },
+	});
+	assert.equal(fs.readFileSync(c, "utf8"), "1", "MULTIPI_CHILD still set");
+	assert.equal(fs.readFileSync(f, "utf8"), "implementer");
+});
+
+test("spawnPi omits MULTIPI_CHILD_ROLE when no role is given", async () => {
+	const os = await import("node:os");
+	const fs = await import("node:fs");
+	const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "multi-pi-role-")), "role.txt");
+	await spawnPi({ task: "x", cwd: process.cwd(), env: { MULTIPI_PI_BIN: FAKE_PI, FAKE_PI_ECHO_ROLE: f } });
+	assert.equal(fs.readFileSync(f, "utf8"), "unset");
+});
+
 // --- watchdog: a silent child is killed, not waited on -----------------------
 
 test("watchdog kills a child that emits no output for silenceMs", { timeout: 30_000 }, async () => {
