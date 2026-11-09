@@ -83,6 +83,22 @@ export function storeCounts(files: ScenarioFile[]): StoreCounts {
 }
 
 /**
+ * Ticket numbers covered by at least one VALID scenario whose id follows the `t<ticket>-<slug>`
+ * convention (spec §4 startability rule). The prefix is exact — `t123-` never covers ticket 12,
+ * and an id without the `-` suffix (`t12`) covers nothing. Invalid files (including the loser
+ * of a duplicate id) never cover their ticket. Result is deduplicated and ascending.
+ */
+export function coveredTicketNumbers(files: ScenarioFile[]): number[] {
+	const nums = new Set<number>();
+	for (const f of files) {
+		if (!f.valid) continue;
+		const m = /^t(\d+)-/.exec(f.id ?? "");
+		if (m) nums.add(Number(m[1]));
+	}
+	return [...nums].sort((a, b) => a - b);
+}
+
+/**
  * Pinned sealed-share rule (spec §5.5): `int(sha256(id) first 10 hex chars, 16) mod 1000 <
  * sealedShare * 1000`. The digest is pinned so the seal cannot drift across platforms or
  * versions; the choice depends only on the id.

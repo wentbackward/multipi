@@ -216,15 +216,15 @@ test("coveredTicketNumbers maps valid t<ticket>- ids to ticket numbers, deduplic
 	);
 });
 
-test("coveredTicketNumbers: invalid files never cover their ticket", () => {
+test("coveredTicketNumbers: invalid files never cover their ticket (duplicate loser included)", () => {
 	withStore(
 		{
 			"missing-required.md": VALID.replace("t12-close-position-clears-alert", "t41-broken").replace(/^required: .*$\n/m, ""),
-			"duplicate.md": VALID.replace("t12-close-position-clears-alert", "t41-dup-a"),
-			"duplicate2.md": VALID.replace("t12-close-position-clears-alert", "t41-dup-a"), // loser of the duplicate id
+			"duplicate.md": VALID.replace("t12-close-position-clears-alert", "t42-dup-a"), // valid winner covers 42
+			"duplicate2.md": VALID.replace("t12-close-position-clears-alert", "t42-dup-a"), // invalid loser adds nothing
 		},
 		(_dir, files) => {
-			assert.equal(coveredTicketNumbers(files).includes(41), false, "no valid t41- scenario remains");
+			assert.deepEqual(coveredTicketNumbers(files), [42], "the broken t41- file covers nothing; the duplicate loser neither twice nor at all");
 		},
 	);
 });
