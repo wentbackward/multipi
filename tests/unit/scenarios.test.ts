@@ -2,7 +2,7 @@
 // Runs under plain node (type stripping) — no @earendil-works/* imports, no network.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { scanStore, storeCounts, isSealed, parseVerdict, foldJudgeRun, coveredTicketNumbers, type ScenarioFile } from "../../extension/src/scenarios.ts";
@@ -36,7 +36,9 @@ function withStore(files: Record<string, string>, fn: (storeDir: string, files: 
 			mkdirSync(path.dirname(p), { recursive: true });
 			writeFileSync(p, content);
 		}
-		fn(storeDir, scanStore(storeDir));
+		const r = scanStore(storeDir);
+		if (!r.ok) throw new Error(`unexpected scan error: ${r.reason}`);
+		fn(storeDir, r.files);
 	} finally {
 		rmSync(storeDir, { recursive: true, force: true });
 	}
@@ -56,7 +58,7 @@ test("scanStore finds *.md at any depth and ignores non-md files", () => {
 	});
 });
 
-test("scanStore skips nothing under .git at any depth", () => {
+test("scanStore skips everything under .git at any depth", () => {
 	withStore({
 		"good.md": VALID,
 		".git/x.md": VALID.replace("t12-", "t99-"),
@@ -70,9 +72,38 @@ test("scanStore skips nothing under .git at any depth", () => {
 	});
 });
 
-test("scanStore returns [] for a missing store dir", () => {
+test("scanStore returns an error result (not a throw) when the store path is a regular file", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "np-scenarios-"));
+	try {
+		const file = path.join(dir, "store-file");
+		writeFileSync(file, "not a directory\n");
+		const r = scanStore(file);
+		assert.equal(r.ok, false, "a regular file at the store path is an error result");
+		assert.match(r.reason ?? "", /not a directory|ENOTDIR|unreadable/i, "the reason names the defect");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("scanStore returns an error result (not a throw) for an unreadable store dir", () => {
+	if (typeof process.getuid === "function" && process.getuid() === 0) return; // root bypasses permission bits
+	const dir = mkdtempSync(path.join(tmpdir(), "np-scenarios-"));
+	const locked = path.join(dir, "locked");
+	mkdirSync(locked);
+	chmodSync(locked, 0);
+	try {
+		const r = scanStore(locked);
+		assert.equal(r.ok, false, "an unreadable store dir is an error result, never an EACCES throw");
+		assert.match(r.reason ?? "", /unreadable|EACCES/i, "the reason names the defect");
+	} finally {
+		chmodSync(locked, 0o755);
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("scanStore returns an empty ok result for a missing store dir", () => {
 	const missing = path.join(mkdtempSync(path.join(tmpdir(), "np-scenarios-")), "not-there");
-	assert.deepEqual(scanStore(missing), []);
+	assert.deepEqual(scanStore(missing), { ok: true, files: [] });
 });
 
 test("rejects a scenario missing id", () => {

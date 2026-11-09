@@ -38,8 +38,9 @@ function agentsDir(fx: ReturnType<typeof makeFixture>): string {
 }
 
 /** Write a child report to a scratch file and point the FAKE_PI_REPORT seam at it. */
+let reportSeq = 0; // per-process counter: the scratch name must be deterministic and unique without randomness
 function fakeReport(fx: ReturnType<typeof makeFixture>, content: string): void {
-	const p = path.join(fx.dir, `report-${Math.random().toString(36).slice(2)}.md`);
+	const p = path.join(fx.dir, `report-${++reportSeq}.md`);
 	writeFileSync(p, content);
 	process.env.FAKE_PI_REPORT = p;
 }
@@ -451,11 +452,39 @@ test("findOpenTicket: a genuinely missing ticket is refused after the single ret
 	const fx = scenarioWriterFx();
 	setupEnv(fx);
 	try {
+		process.env.MULTIPI_LIST_LAG_RETRY_MS = "100"; // the seam: no real 1.5 s wall-clock wait in tests
 		const t0 = Date.now();
 		const issue = await findOpenTicket("", 9999);
 		assert.equal(issue, undefined, "refused, not guessed");
-		assert.ok(Date.now() - t0 >= 1400, "the single retry happened");
-	} finally { fx.cleanup(); }
+		assert.ok(Date.now() - t0 >= 100, "the single retry happened");
+	} finally {
+		delete process.env.MULTIPI_LIST_LAG_RETRY_MS;
+		fx.cleanup();
+	}
+});
+
+test("findOpenTicket honours MULTIPI_LIST_LAG_RETRY_MS (the retry wait is a documented env seam)", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	try {
+		const n = createIssue(fx, "Created moments ago");
+		const issuesDir = path.join(fx.dir, "gh", "issues");
+		process.env.MULTIPI_LIST_LAG_RETRY_MS = "100";
+		// Hide the ticket from the first list; it reappears well before the SHORTENED retry fires,
+		// so the re-list after the 100 ms seam wait is what finds it (a default 1500 ms wait would
+		// still find it but the elapsed bound below proves the seam set the delay).
+		renameSync(path.join(issuesDir, String(n)), path.join(issuesDir, `.${n}.hidden`));
+		setTimeout(() => renameSync(path.join(issuesDir, `.${n}.hidden`), path.join(issuesDir, String(n))), 30);
+		const t0 = Date.now();
+		const issue = await findOpenTicket("", n);
+		const dt = Date.now() - t0;
+		assert.equal(issue?.number, n, "the shortened retry still re-lists and finds the ticket");
+		assert.ok(dt >= 100, `the configured 100 ms wait happened (took ${dt} ms)`);
+		assert.ok(dt < 1500, "the seam shortened the default 1500 ms wait");
+	} finally {
+		delete process.env.MULTIPI_LIST_LAG_RETRY_MS;
+		fx.cleanup();
+	}
 });
 
 const SC_WRITER_BODY = [
@@ -610,6 +639,7 @@ test("dispatch(scenario-writer) refuses when the scenario store is off in the co
 test("dispatch(scenario-writer) requires a ticket and finds it among open issues", async () => {
 	const fx = scenarioWriterFx();
 	setupEnv(fx);
+	process.env.MULTIPI_LIST_LAG_RETRY_MS = "50"; // the not-found refusal retries once; the seam keeps it off the wall clock
 	try {
 		const ctx = ctxWithAgents(fx);
 		const res1 = await call(ctx, "devloop.dispatch", { role: "scenario-writer" });
@@ -618,7 +648,10 @@ test("dispatch(scenario-writer) requires a ticket and finds it among open issues
 		const res2 = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: 9999 });
 		assert.equal(res2.isError, true);
 		assert.match(textOf(res2), /not found among open issues/);
-	} finally { fx.cleanup(); }
+	} finally {
+		delete process.env.MULTIPI_LIST_LAG_RETRY_MS;
+		fx.cleanup();
+	}
 });
 
 test("dispatch(scenario-writer) refuses a second writer on the same ticket while one is in flight", async () => {
