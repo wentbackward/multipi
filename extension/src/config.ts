@@ -18,6 +18,21 @@ export interface HeavyConfig {
 export interface StopGateConfig { requireCleanTree: boolean; maxBlocks: number; }
 export interface MergeConfig { method: string; deleteBranch: boolean; }
 
+/** Operating mode preset (dark-factory spec §1); see scenariosOn for the defaults it sets. */
+export type FactoryMode = "collaborative" | "dark";
+
+/** Scenario store settings (dark-factory spec §2). The block's mere presence turns the store on. */
+export interface ScenariosConfig {
+	dir?: string;
+	run?: string;
+	runSeconds: number;
+	judge?: string;
+	judgeSeconds: number;
+	pass: number;
+	minSatisfaction: number;
+	sealed: number;
+}
+
 export interface DevloopConfig {
 	/** Main worktree root (where .devloop.json lives). */
 	root: string;
@@ -31,6 +46,10 @@ export interface DevloopConfig {
 	gateWorktree?: string;
 	/** Single dir holding all issue worktrees (default: <stateDir>/worktrees/<repo>; relative resolves against the repo PARENT). */
 	worktreeDir?: string;
+	/** Operating mode preset: "dark" turns scenarios on unless explicitly off; anything else is "collaborative". */
+	factory: FactoryMode;
+	/** Scenario store: an object (block present ⇒ store on in any mode); false (explicit off, wins even in dark); absent ⇒ on only in dark. */
+	scenarios?: ScenariosConfig | false;
 	/** Watchdog: kill a child that emits no output for this many minutes (default 30). */
 	childSilenceMinutes: number;
 	notesDir?: string;
@@ -47,6 +66,8 @@ export interface Paths {
 	logsDir: string;
 	gateDir: string;
 	worktreeDir: string;
+	/** Scenario store dir (spec §2): default <stateDir>/scenarios, a sibling of the worktrees dir. */
+	scenariosDir: string;
 }
 
 function str(v: unknown, d = ""): string {
@@ -85,6 +106,22 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): D
 	const h = (raw.heavy ?? {}) as Record<string, unknown>;
 	const sg = (raw.stop_gate ?? {}) as Record<string, unknown>;
 	const mg = (raw.merge ?? {}) as Record<string, unknown>;
+	let scenarios: ScenariosConfig | false | undefined;
+	if (raw.scenarios === false) {
+		scenarios = false; // explicit off — wins even in a dark factory (spec §9)
+	} else if (typeof raw.scenarios === "object" && raw.scenarios !== null && !Array.isArray(raw.scenarios)) {
+		const so = raw.scenarios as Record<string, unknown>;
+		scenarios = {
+			dir: str(so.dir) || undefined,
+			run: str(so.run) || undefined,
+			runSeconds: num(so.run_seconds, 120),
+			judge: str(so.judge) || undefined,
+			judgeSeconds: num(so.judge_seconds, 600),
+			pass: num(so.pass, 0.8),
+			minSatisfaction: num(so.min_satisfaction, 0.9),
+			sealed: num(so.sealed, 0.2),
+		};
+	}
 	const checksRaw = Array.isArray(raw.checks) ? raw.checks : [];
 	const checks: CheckSpec[] = checksRaw.map((c, i) => {
 		if (typeof c === "string") return { name: `check-${i + 1}`, command: c, heavy: true };
@@ -107,6 +144,8 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): D
 		gateSetup: str(raw.gate_setup) || undefined,
 		gateWorktree: str(raw.gate_worktree) || undefined,
 		worktreeDir: str(raw.worktree_dir) || undefined,
+		factory: raw.factory === "dark" ? "dark" : "collaborative",
+		scenarios,
 		childSilenceMinutes: num(raw.child_silence_minutes, 30),
 		notesDir: str(raw.notes_dir) || undefined,
 		logsDir: str(raw.logs_dir) || undefined,
@@ -126,6 +165,14 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): D
 	};
 }
 
+/** The scenario-store switch (spec §1/§9): an explicit false is off even in dark; a present
+ * block is on in any mode; absent, the dark preset turns it on and collaborative leaves it off. */
+export function scenariosOn(cfg: DevloopConfig): boolean {
+	if (cfg.scenarios === false) return false;
+	if (cfg.scenarios) return true;
+	return cfg.factory === "dark";
+}
+
 /** State directory, mirroring scripts/lib/common.sh: $MULTIPI_HOME/<repo> (default ~/.multipi). */
 export function resolveState(cwd: string, env: NodeJS.ProcessEnv = process.env): string {
 	const root = mainRoot(cwd) ?? cwd;
@@ -135,21 +182,30 @@ export function resolveState(cwd: string, env: NodeJS.ProcessEnv = process.env):
 
 export function resolvePaths(cfg: DevloopConfig, env: NodeJS.ProcessEnv = process.env): Paths {
 	const state = resolveState(cfg.root, env);
+	// Like scripts/lib/common.sh ($HOME), `~/` expands against the HOME the caller gave us,
+	// falling back to the OS home so process.env callers behave exactly as before.
+	const home = env.HOME || os.homedir();
 	const resolveOpt = (p?: string): string => {
 		if (!p) return "";
-		if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
+		if (p.startsWith("~/")) return path.join(home, p.slice(2));
 		return p.startsWith("/") ? p : path.join(cfg.root, p);
 	};
 	// All issue worktrees live in ONE dir per project (plus the gate worktree inside it),
 	// so the repo's parent directory holds a single entry instead of one folder per ticket.
-	const resolveWt = (p: string): string => (p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p.startsWith("/") ? p : path.join(path.dirname(cfg.root), p));
+	const resolveWt = (p: string): string => (p.startsWith("~/") ? path.join(home, p.slice(2)) : p.startsWith("/") ? p : path.join(path.dirname(cfg.root), p));
 	const wt = path.resolve(cfg.worktreeDir ? resolveWt(cfg.worktreeDir) : path.join(state, "worktrees", path.basename(cfg.root)));
+	// Scenario store (spec §2): scenarios.dir resolves like worktree_dir (absolute, ~/, or
+	// relative to the repo's PARENT — the store can never live inside the repo or its
+	// worktrees); default <stateDir>/scenarios, a sibling of the worktrees dir.
+	const sc = cfg.scenarios && typeof cfg.scenarios === "object" ? cfg.scenarios : undefined;
+	const scDir = path.resolve(sc?.dir ? resolveWt(sc.dir) : path.join(state, "scenarios"));
 	return {
 		stateDir: state,
 		notesDir: path.resolve(resolveOpt(cfg.notesDir) || path.join(state, "notes")),
 		logsDir: path.resolve(resolveOpt(cfg.logsDir) || path.join(state, "logs")),
 		gateDir: path.resolve(resolveOpt(cfg.gateWorktree) || path.join(wt, "gate")),
 		worktreeDir: wt,
+		scenariosDir: scDir,
 	};
 }
 
