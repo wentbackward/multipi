@@ -7,11 +7,13 @@
 # branch's rebased head as train-<branch>. A branch already stacked on the previous one in the train replays
 # only its own commits (rebase --onto), so no branch ever carries foreign commits. Then it runs every check
 # of .devloop.json "checks" once on the top of the stack; heavy checks run through heavy.sh, so the
-# machine-wide slot limit and memory cap apply.
+# machine-wide slot limit and memory cap apply. When the scenario store is on (dark-factory spec §5), the
+# scenario stage (scenario-stage.sh) then runs on the train top: a red stage is TRAIN RED (no record), the
+# stage's exit 2 propagates as the gate's exit 2, and a failed check prints `scenarios skipped` instead.
 #
 # Exit: 0 TRAIN GREEN (recorded for merge-train.sh), 1 TRAIN RED (includes gate_setup failure),
-# 2 usage/config, 3 rebase conflict (the output names the branch: drop it from the train,
-# rebase it after the others merge).
+# 2 usage/config (includes a stage usage/config error), 3 rebase conflict (the output names the branch:
+# drop it from the train, rebase it after the others merge).
 set -u
 scripts_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
@@ -106,6 +108,44 @@ for ((i = 0; i < count; i++)); do
   fi
 done
 printf '%s' "$summary" | sed '/^$/d'
+
+# --- scenario stage (dark-factory spec §5) ---------------------------------------
+# The on/off call uses the SAME pure module (config.ts: loadConfig + scenariosOn) the stage
+# and the doctor use, so all three agree; it reads the config of the TRAIN TOP, which is
+# what is checked out here. When the call cannot be made (no node, no modules), the stage
+# is skipped: the gate degrades to its pre-stage behaviour and the doctor reports the
+# defect — an undeterminable store is not a green light for anything.
+scen_src=""
+for cand in "$DL_ROOT/.pi/extensions/multipi-devloop/src" "$scripts_dir/../extension/src"; do
+  if [ -f "$cand/config.ts" ]; then scen_src=$cand; break; fi
+done
+scen_on=off
+if [ -n "$scen_src" ] && command -v node >/dev/null 2>&1; then
+  detected=$(
+    SCEN_SRC=$scen_src node --input-type=module -e '
+const { loadConfig, scenariosOn } = await import(process.env.SCEN_SRC + "/config.ts");
+const cfg = loadConfig(process.cwd());
+process.stdout.write(cfg && scenariosOn(cfg) ? "on" : "off");
+' 2>/dev/null
+  )
+  [ "$detected" = "on" ] && scen_on=on
+fi
+if [ "$scen_on" = on ] && [ -n "$all_green" ]; then
+  # The stage runs on the train top and inherits the gate's stdout; its own lines land in
+  # train-scenarios.log. The stage never prints the TRAIN word — this gate owns it. A red
+  # stage is a red train WITHOUT the record; the stage's exit 2 (usage/config) propagates
+  # as the gate's exit 2, like the gate's own config errors.
+  "$scripts_dir/scenario-stage.sh"
+  scen_rc=$?
+  if [ "$scen_rc" -ne 0 ]; then
+    git checkout -q --detach "$DL_REMOTE/$DL_BASE"
+    [ "$scen_rc" -eq 2 ] && exit 2
+    echo "TRAIN RED"
+    exit 1
+  fi
+elif [ "$scen_on" = on ]; then
+  echo "scenarios skipped"
+fi
 
 git checkout -q --detach "$DL_REMOTE/$DL_BASE"
 if [ -n "$all_green" ]; then
