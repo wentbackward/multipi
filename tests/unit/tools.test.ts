@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry } from "../../extension/src/tools.ts";
+import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket } from "../../extension/src/tools.ts";
 import { makeFixture } from "../fixtures.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -429,6 +429,34 @@ test("dispatch(analyst) plans from a spec, writes no ticket, records a done entr
 // ---------------------------------------------------------------------------
 // Scenario-writer dispatch (dark-factory spec §4; ticket #11).
 // ---------------------------------------------------------------------------
+
+test("findOpenTicket: one bounded retry recovers a ticket missing on the first list (GitHub list lag)", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	try {
+		const n = createIssue(fx, "Created moments ago");
+		const issuesDir = path.join(fx.dir, "gh", "issues");
+		// Simulate GitHub's list lag: the ticket is hidden from the first list and
+		// reappears well before the bounded retry fires.
+		renameSync(path.join(issuesDir, String(n)), path.join(issuesDir, `.${n}.hidden`));
+		setTimeout(() => renameSync(path.join(issuesDir, `.${n}.hidden`), path.join(issuesDir, String(n))), 400);
+		const t0 = Date.now();
+		const issue = await findOpenTicket("", n);
+		assert.equal(issue?.number, n, "the retry found the ticket");
+		assert.ok(Date.now() - t0 >= 1400, "the retry waited before re-listing");
+	} finally { fx.cleanup(); }
+});
+
+test("findOpenTicket: a genuinely missing ticket is refused after the single retry", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	try {
+		const t0 = Date.now();
+		const issue = await findOpenTicket("", 9999);
+		assert.equal(issue, undefined, "refused, not guessed");
+		assert.ok(Date.now() - t0 >= 1400, "the single retry happened");
+	} finally { fx.cleanup(); }
+});
 
 const SC_WRITER_BODY = [
 	"## Why",

@@ -17,12 +17,13 @@ import {
 	assembleAnalystBrief,
 	assembleScenarioWriterBrief,
 	parseScenarioLines,
+	scenarioLinesForTicket,
 	buildScenarioComment,
 } from "./brief.ts";
 import * as childreg from "./childreg.ts";
 import { spawnPi, type ChildResult } from "./child.ts";
 import { discoverRoles, findRole } from "./roles.ts";
-import { listOpenIssues, listClosedIssueNumbers, addLabel, latestComment, addComment } from "./issues.ts";
+import { listOpenIssues, listClosedIssueNumbers, addLabel, latestComment, addComment, type Issue } from "./issues.ts";
 import {
 	evaluateStopGate,
 	runFastCheck,
@@ -110,6 +111,23 @@ function inFlightList(state: DispatchState): string {
 
 function git(args: string[], cwd: string): void {
 	execFileSync("git", args, { cwd, stdio: "pipe" });
+}
+
+/** Delay for the single retry when GitHub's issue list lags a just-created ticket. */
+const ISSUE_LIST_LAG_RETRY_MS = 1500;
+
+/**
+ * Find an open ticket with one bounded retry. GitHub's list endpoint briefly lags a
+ * just-created issue — precisely the moment at which the scenario-writer (and the
+ * implementer) gets dispatched — so re-list once after a short wait before refusing.
+ */
+export async function findOpenTicket(repoSlug: string, ticket: number): Promise<Issue | undefined> {
+	let issue = listOpenIssues(repoSlug).find((i) => i.number === ticket);
+	if (!issue) {
+		await new Promise((r) => setTimeout(r, ISSUE_LIST_LAG_RETRY_MS));
+		issue = listOpenIssues(repoSlug).find((i) => i.number === ticket);
+	}
+	return issue;
 }
 
 /**
@@ -213,7 +231,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 		if (state[key]?.status === "running") {
 			return { ...text(`a scenario-writer for #${ticket} is already running. In-flight: ${inFlightList(state)}`), isError: true };
 		}
-		const issue = listOpenIssues(ctx.repoSlug).find((i) => i.number === ticket);
+		const issue = await findOpenTicket(ctx.repoSlug, ticket);
 		if (!issue) return { ...text(`ticket #${ticket} not found among open issues (already merged/closed?)`), isError: true };
 		const entry: DispatchEntry = {
 			pid: 0,
@@ -240,9 +258,11 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 		let extra = "";
 		const verdict = classifyReport(role.name, res.finalText);
 		if (verdict === "done" && !res.aborted) {
-			const lines = parseScenarioLines(res.finalText);
+			// Only this ticket's own lines (t<ticket>-) may land on its review list; a writer
+			// reporting a foreign id cannot pollute it.
+			const lines = scenarioLinesForTicket(ticket, parseScenarioLines(res.finalText));
 			if (lines.length === 0) {
-				extra = "\n(no scenario lines in the report; nothing commented)";
+				extra = "\n(no scenario lines for this ticket in the report; nothing commented)";
 			} else {
 				try {
 					addComment(ctx.repoSlug, ticket, buildScenarioComment(ticket, lines));
@@ -320,13 +340,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 		return { ...text(`capacity full: ${runningImplementers.length}/${cap} implementers in flight: ${inFlightList(state)}. Wait for a report (or cancel a ticket) and dispatch again.`), isError: true };
 	}
 
-	const issues = listOpenIssues(ctx.repoSlug);
-	let issue = issues.find((i) => i.number === ticket);
-	if (!issue) {
-		// GitHub's list endpoint briefly lags a just-created issue; one bounded retry, then refuse.
-		await new Promise((r) => setTimeout(r, 1500));
-		issue = listOpenIssues(ctx.repoSlug).find((i) => i.number === ticket);
-	}
+	const issue = await findOpenTicket(ctx.repoSlug, ticket);
 	if (!issue) return { ...text(`ticket #${ticket} not found among open issues (already merged/closed?)`), isError: true };
 	const slug = branchSlug(issue.title);
 	const branch = prev?.branch ?? (slug ? `feat/${ticket}-${slug}` : `feat/${ticket}`);
