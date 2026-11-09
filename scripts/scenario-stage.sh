@@ -108,7 +108,24 @@ if (!cfg) process.exit(0);
 if (!scenariosOn(cfg)) { process.stdout.write(JSON.stringify({ on: false })); process.exit(0); }
 const s = cfg.scenarios && typeof cfg.scenarios === "object" ? cfg.scenarios : {};
 const p = resolvePaths(cfg);
-const files = scanStore(p.scenariosDir);
+const scanned = scanStore(p.scenariosDir);
+// The config keys ride along in EVERY case, storeError included: the "run is not
+// configured" check (a config defect, which outranks any store-state verdict) must still
+// run first, and a storeError must not masquerade as a missing run command.
+const cfgKeys = {
+  on: true, mode: cfg.factory,
+  run: s.run ?? null, runSeconds: s.runSeconds ?? 120,
+  judge: s.judge ?? null, judgeSeconds: s.judgeSeconds ?? 600,
+  pass: s.pass ?? 0.8, minSatisfaction: s.minSatisfaction ?? 0.9, sealed: s.sealed ?? 0.2,
+};
+if (!scanned.ok) {
+  // Store exists but is unreadable (regular file, permissions, unreadable .md file):
+  // carry the defect-class reason up (it never names the store path) and let the gate
+  // decide the verdict line.
+  process.stdout.write(JSON.stringify({ ...cfgKeys, storeError: scanned.reason }));
+  process.exit(0);
+}
+const files = scanned.files;
 const counts = storeCounts(files);
 const scenarios = files.filter((f) => f.valid).map((f) => ({
   id: f.id,
@@ -117,10 +134,7 @@ const scenarios = files.filter((f) => f.valid).map((f) => ({
   sealed: isSealed(f.id, s.sealed ?? 0.2),
 }));
 process.stdout.write(JSON.stringify({
-  on: true, mode: cfg.factory,
-  run: s.run ?? null, runSeconds: s.runSeconds ?? 120,
-  judge: s.judge ?? null, judgeSeconds: s.judgeSeconds ?? 600,
-  pass: s.pass ?? 0.8, minSatisfaction: s.minSatisfaction ?? 0.9, sealed: s.sealed ?? 0.2,
+  ...cfgKeys,
   total: counts.total, required: counts.required, invalid: counts.invalid,
   scenarios,
 }));
@@ -157,6 +171,10 @@ pass_floor=$(json_get pass <<<"$meta_json")
 min_sat=$(json_get minSatisfaction <<<"$meta_json")
 
 # --- store gates (red before any process is started) ------------------------------
+# The store path exists but cannot be read: red with the named defect class only — never
+# the store path (the no-leak rule pins the stage's stdout to counts and classes).
+store_error=$(json_get storeError <<<"$meta_json")
+[ -z "$store_error" ] || { say "scenarios red: cannot read the store ($store_error)"; exit 1; }
 invalid=$(json_get invalid <<<"$meta_json")
 total=$(json_get total <<<"$meta_json")
 req_count=$(json_get required <<<"$meta_json")
@@ -292,7 +310,7 @@ fs.appendFileSync(p.resultsFile, JSON.stringify(rec) + "\n");
     )
     [ -n "$score" ] && best=$score
     # Rejudge once when the best so far sits below the floor (invalid verdicts score 0).
-    if [ "$run_no" -eq 1 ] && awk -v b="${best:-0}" -v p="$pass_floor" 'BEGIN { exit !(b < p) }'; then
+    if [ "$run_no" -eq 1 ] && LC_ALL=C awk -v b="${best:-0}" -v p="$pass_floor" 'BEGIN { exit !(b < p) }'; then
       run_no=2
     else
       run_no=3
@@ -348,14 +366,14 @@ judged=$(json_get judged <<<"$agg_json")
 u_count=$(json_len unsat <<<"$agg_json")
 s_judged=$(json_get sealedJudged <<<"$agg_json")
 s_unsat=$(json_get sealedUnsat <<<"$agg_json")
-mean_fmt=$(awk -v m="$mean_raw" 'BEGIN { printf "%.2f", m }')
+mean_fmt=$(LC_ALL=C awk -v m="$mean_raw" 'BEGIN { printf "%.2f", m }')
 
 u=0
 while [ "$u" -lt "$u_count" ]; do
   # Sealed scenarios are counted only: never named, never described (overfitting check).
   if [ "$(json_get "unsat.$u.sealed" <<<"$agg_json")" = "false" ]; then
     u_id=$(json_get "unsat.$u.id" <<<"$agg_json")
-    u_score=$(awk -v s="$(json_get "unsat.$u.score" <<<"$agg_json")" 'BEGIN { printf "%.2f", s }')
+    u_score=$(LC_ALL=C awk -v s="$(json_get "unsat.$u.score" <<<"$agg_json")" 'BEGIN { printf "%.2f", s }')
     u_tag=scored
     [ "$(json_get "unsat.$u.required" <<<"$agg_json")" = "true" ] && u_tag=required
     # The note is the sanctioned feedback: the judge's missing text, or — when both runs

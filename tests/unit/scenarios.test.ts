@@ -2,10 +2,10 @@
 // Runs under plain node (type stripping) — no @earendil-works/* imports, no network.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { scanStore, storeCounts, isSealed, parseVerdict, foldJudgeRun, coveredTicketNumbers, type ScenarioFile } from "../../extension/src/scenarios.ts";
+import { scanStore, storeCounts, isSealed, parseVerdict, foldJudgeRun, coveredTicketNumbers, coveredTicketsFromScan, type ScenarioFile } from "../../extension/src/scenarios.ts";
 
 const VALID = `---
 id: t12-close-position-clears-alert
@@ -36,7 +36,9 @@ function withStore(files: Record<string, string>, fn: (storeDir: string, files: 
 			mkdirSync(path.dirname(p), { recursive: true });
 			writeFileSync(p, content);
 		}
-		fn(storeDir, scanStore(storeDir));
+		const r = scanStore(storeDir);
+		if (!r.ok) throw new Error(`unexpected scan error: ${r.reason}`);
+		fn(storeDir, r.files);
 	} finally {
 		rmSync(storeDir, { recursive: true, force: true });
 	}
@@ -56,7 +58,7 @@ test("scanStore finds *.md at any depth and ignores non-md files", () => {
 	});
 });
 
-test("scanStore skips nothing under .git at any depth", () => {
+test("scanStore skips everything under .git at any depth", () => {
 	withStore({
 		"good.md": VALID,
 		".git/x.md": VALID.replace("t12-", "t99-"),
@@ -70,9 +72,62 @@ test("scanStore skips nothing under .git at any depth", () => {
 	});
 });
 
-test("scanStore returns [] for a missing store dir", () => {
+test("scanStore returns an error result (not a throw) when the store path is a regular file", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "np-scenarios-"));
+	try {
+		const file = path.join(dir, "store-file");
+		writeFileSync(file, "not a directory\n");
+		const r = scanStore(file);
+		assert.equal(r.ok, false, "a regular file at the store path is an error result");
+		assert.match(r.reason ?? "", /not a directory|ENOTDIR|unreadable/i, "the reason names the defect");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("scanStore returns an error result (not a throw) for an unreadable store dir", () => {
+	if (typeof process.getuid === "function" && process.getuid() === 0) return; // root bypasses permission bits
+	const dir = mkdtempSync(path.join(tmpdir(), "np-scenarios-"));
+	const locked = path.join(dir, "locked");
+	mkdirSync(locked);
+	chmodSync(locked, 0);
+	try {
+		const r = scanStore(locked);
+		assert.equal(r.ok, false, "an unreadable store dir is an error result, never an EACCES throw");
+		assert.match(r.reason ?? "", /unreadable|EACCES/i, "the reason names the defect");
+	} finally {
+		chmodSync(locked, 0o755);
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("scanStore returns an error result (not a throw) when a store .md file is unreadable", () => {
+	if (typeof process.getuid === "function" && process.getuid() === 0) return; // root bypasses permission bits
+	const storeDir = mkdtempSync(path.join(tmpdir(), "np-scenarios-"));
+	try {
+		const locked = path.join(storeDir, "locked.md");
+		writeFileSync(locked, "hidden\n");
+		chmodSync(locked, 0);
+		try {
+			const r = scanStore(storeDir);
+			assert.equal(
+				r.ok,
+				false,
+				"one unreadable file in a readable store is an error result, never an EACCES throw",
+			);
+			assert.match(r.reason ?? "", /unreadable|EACCES/i, "the reason names the defect class");
+			assert.ok(!(r.reason ?? "").includes(storeDir), "the reason never carries the store path");
+		} finally {
+			chmodSync(locked, 0o644);
+		}
+	} finally {
+		rmSync(storeDir, { recursive: true, force: true });
+	}
+});
+
+test("scanStore returns an empty ok result for a missing store dir", () => {
 	const missing = path.join(mkdtempSync(path.join(tmpdir(), "np-scenarios-")), "not-there");
-	assert.deepEqual(scanStore(missing), []);
+	assert.deepEqual(scanStore(missing), { ok: true, files: [] });
 });
 
 test("rejects a scenario missing id", () => {
@@ -246,6 +301,40 @@ test("coveredTicketNumbers: empty store covers nothing", () => {
 	withStore({}, (_dir, files) => {
 		assert.deepEqual(coveredTicketNumbers(files), []);
 	});
+});
+
+// --- coveredTicketsFromScan: the ScanResult -> covered-tickets seam (spec §4 startability) ---
+
+test("coveredTicketsFromScan: an ok result passes its valid files' tickets through", () => {
+	withStore(
+		{
+			"a.md": VALID.replace("t12-close-position-clears-alert", "t12-first"),
+			"broken.md": VALID.replace("t12-close-position-clears-alert", "t41-broken").replace(/^required: .*$\n/m, ""),
+		},
+		(_dir, _files) => {
+			assert.deepEqual(coveredTicketsFromScan({ ok: true, files: _files }), [12], "valid t12- covers; the invalid t41- file never does");
+		},
+	);
+});
+
+test("coveredTicketsFromScan: an error result covers NOTHING (fail-closed) — unreadable store ≠ wildcard", () => {
+	// Direct construction of the error result (defect-class reason only):
+	assert.deepEqual(coveredTicketsFromScan({ ok: false, reason: "store is unreadable (EACCES)" }), []);
+	// And via the real path: a readable store with an unreadable dir entry yields the error result,
+	// which must not cover the ticket its (now unverifiable) files would have covered:
+	const dir = mkdtempSync(path.join(tmpdir(), "np-scenarios-"));
+	try {
+		const locked = path.join(dir, "locked");
+		mkdirSync(locked);
+		writeFileSync(path.join(dir, "ok.md"), VALID.replace("t12-close-position-clears-alert", "t12-still-here"));
+		chmodSync(locked, 0);
+		const r = scanStore(dir);
+		assert.equal(r.ok, false, "the unreadable subdir makes the whole store scan fail");
+		assert.deepEqual(coveredTicketsFromScan(r), [], "even a t12- file sitting in the readable part covers nothing once the scan failed");
+	} finally {
+		chmodSync(path.join(dir, "locked"), 0o755);
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 // --- isSealed: pinned digest contract (spec §5.5) ---

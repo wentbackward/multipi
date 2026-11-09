@@ -5,9 +5,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { loadConfig, resolveState, scenariosOn } from "../../extension/src/config.ts";
-import { resolvePaths } from "../../extension/src/config.ts";
-import { repoSlugFromRemote } from "../../extension/src/config.ts";
+import { loadConfig, resolveState, scenariosOn, resolvePaths, repoSlugFromRemote } from "../../extension/src/config.ts";
 import { makeFixture, BASE_CONFIG } from "../fixtures.ts";
 
 test("loadConfig reads the repo config with defaults filled", () => {

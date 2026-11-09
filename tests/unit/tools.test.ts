@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync, chmodSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket } from "../../extension/src/tools.ts";
 import { makeFixture } from "../fixtures.ts";
@@ -38,8 +38,9 @@ function agentsDir(fx: ReturnType<typeof makeFixture>): string {
 }
 
 /** Write a child report to a scratch file and point the FAKE_PI_REPORT seam at it. */
+let reportSeq = 0; // per-process counter: the scratch name must be deterministic and unique without randomness
 function fakeReport(fx: ReturnType<typeof makeFixture>, content: string): void {
-	const p = path.join(fx.dir, `report-${Math.random().toString(36).slice(2)}.md`);
+	const p = path.join(fx.dir, `report-${++reportSeq}.md`);
 	writeFileSync(p, content);
 	process.env.FAKE_PI_REPORT = p;
 }
@@ -451,11 +452,39 @@ test("findOpenTicket: a genuinely missing ticket is refused after the single ret
 	const fx = scenarioWriterFx();
 	setupEnv(fx);
 	try {
+		process.env.MULTIPI_LIST_LAG_RETRY_MS = "100"; // the seam: no real 1.5 s wall-clock wait in tests
 		const t0 = Date.now();
 		const issue = await findOpenTicket("", 9999);
 		assert.equal(issue, undefined, "refused, not guessed");
-		assert.ok(Date.now() - t0 >= 1400, "the single retry happened");
-	} finally { fx.cleanup(); }
+		assert.ok(Date.now() - t0 >= 100, "the single retry happened");
+	} finally {
+		delete process.env.MULTIPI_LIST_LAG_RETRY_MS;
+		fx.cleanup();
+	}
+});
+
+test("findOpenTicket honours MULTIPI_LIST_LAG_RETRY_MS (the retry wait is a documented env seam)", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	try {
+		const n = createIssue(fx, "Created moments ago");
+		const issuesDir = path.join(fx.dir, "gh", "issues");
+		process.env.MULTIPI_LIST_LAG_RETRY_MS = "100";
+		// Hide the ticket from the first list; it reappears well before the SHORTENED retry fires,
+		// so the re-list after the 100 ms seam wait is what finds it (a default 1500 ms wait would
+		// still find it but the elapsed bound below proves the seam set the delay).
+		renameSync(path.join(issuesDir, String(n)), path.join(issuesDir, `.${n}.hidden`));
+		setTimeout(() => renameSync(path.join(issuesDir, `.${n}.hidden`), path.join(issuesDir, String(n))), 30);
+		const t0 = Date.now();
+		const issue = await findOpenTicket("", n);
+		const dt = Date.now() - t0;
+		assert.equal(issue?.number, n, "the shortened retry still re-lists and finds the ticket");
+		assert.ok(dt >= 100, `the configured 100 ms wait happened (took ${dt} ms)`);
+		assert.ok(dt < 1500, "the seam shortened the default 1500 ms wait");
+	} finally {
+		delete process.env.MULTIPI_LIST_LAG_RETRY_MS;
+		fx.cleanup();
+	}
 });
 
 const SC_WRITER_BODY = [
@@ -610,6 +639,7 @@ test("dispatch(scenario-writer) refuses when the scenario store is off in the co
 test("dispatch(scenario-writer) requires a ticket and finds it among open issues", async () => {
 	const fx = scenarioWriterFx();
 	setupEnv(fx);
+	process.env.MULTIPI_LIST_LAG_RETRY_MS = "50"; // the not-found refusal retries once; the seam keeps it off the wall clock
 	try {
 		const ctx = ctxWithAgents(fx);
 		const res1 = await call(ctx, "devloop.dispatch", { role: "scenario-writer" });
@@ -618,7 +648,10 @@ test("dispatch(scenario-writer) requires a ticket and finds it among open issues
 		const res2 = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: 9999 });
 		assert.equal(res2.isError, true);
 		assert.match(textOf(res2), /not found among open issues/);
-	} finally { fx.cleanup(); }
+	} finally {
+		delete process.env.MULTIPI_LIST_LAG_RETRY_MS;
+		fx.cleanup();
+	}
 });
 
 test("dispatch(scenario-writer) refuses a second writer on the same ticket while one is in flight", async () => {
@@ -707,6 +740,59 @@ test("dispatch(implementer) (store on, covered by a valid t<n>- scenario): proce
 		const labels = readFileSync(path.join(fx.dir, "gh", "labels", String(n)), "utf8").trim().split("\n");
 		assert.ok(labels.includes("dl/in-progress") && labels.includes("dl/in-review"), JSON.stringify(labels));
 	} finally { fx.cleanup(); }
+});
+
+/** Lock the scenario store dir (permission 0) so scanStore gets the unreadable-store error path. */
+function lockStoreDir(fx: ReturnType<typeof makeFixture>): string {
+	const d = path.join(fx.dir, "home", "proj", "scenarios");
+	chmodSync(d, 0);
+	return d;
+}
+function unlockStoreDir(d: string): void {
+	chmodSync(d, 0o755);
+}
+
+test("stop gate (store on, store unreadable): covers nothing — fail-closed, the gate settles without crashing", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	let storeDir = "";
+	const origError = console.error;
+	let gateErrors = "";
+	try {
+		console.error = (msg: unknown) => { gateErrors += String(msg) + "\n"; };
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Covered but store locked");
+		seedScenario(fx, `t${n}-covers-it`); // covered while the store is readable
+		storeDir = lockStoreDir(fx);
+		const d = await evaluateSettle(ctx.cwd);
+		assert.equal(d, undefined, "an unreadable store is treated as no coverage: nothing startable, the gate settles (fail-closed)");
+		assert.ok(!gateErrors.includes("devloop stop-gate error"), "the gate settled cleanly — no swallowed store-scan throw: " + gateErrors);
+	} finally {
+		console.error = origError;
+		if (storeDir) unlockStoreDir(storeDir);
+		fx.cleanup();
+	}
+});
+
+test("dispatch(implementer) (store on, store unreadable): refuses as not startable — unreadable store = nothing covered (fail-closed)", async () => {
+	const fx = scenarioWriterFx();
+	setupEnv(fx);
+	let storeDir = "";
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Locked store ticket");
+		seedScenario(fx, `t${n}-would-cover-it`); // covered while the store is readable
+		storeDir = lockStoreDir(fx);
+		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		assert.equal(res.isError, true, textOf(res));
+		const t = textOf(res);
+		assert.match(t, new RegExp(`ticket #${n} is not startable`), t);
+		assert.match(t, new RegExp(`t${n}-`), "the refusal names the t<ticket>- prefix that cannot be confirmed covered");
+		assert.ok(!existsSync(path.join(fx.dir, "home", "proj", "worktrees")), "no worktree for a refused dispatch");
+	} finally {
+		if (storeDir) unlockStoreDir(storeDir);
+		fx.cleanup();
+	}
 });
 
 test("stop gate (store off): coverage fields absent — a store-less config behaves exactly as before", async () => {

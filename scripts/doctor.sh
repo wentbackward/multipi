@@ -70,12 +70,17 @@ if (cfg) {
   const report = { mode: cfg.factory, on, source };
   if (on) {
     const store = resolvePaths(cfg).scenariosDir;
-    const files = scanStore(store);
-    const counts = storeCounts(files);
+    const scanned = scanStore(store);
     report.store = store;
-    report.total = counts.total;
-    report.required = counts.required;
-    report.invalid = files.filter((f) => !f.valid).map((f) => ({ file: f.file, reason: f.reason || "unknown" }));
+    if (scanned.ok) {
+      const counts = storeCounts(scanned.files);
+      report.total = counts.total;
+      report.required = counts.required;
+      report.invalid = scanned.files.filter((f) => !f.valid).map((f) => ({ file: f.file, reason: f.reason || "unknown" }));
+    } else {
+      // Named reason only (never the store path — the reason text carries the defect class).
+      report.scanError = scanned.reason;
+    }
   }
   process.stdout.write(JSON.stringify(report));
 }
@@ -90,25 +95,50 @@ if (cfg) {
       echo "        factory $f_mode, scenarios $([ "$f_on" = "true" ] && echo on || echo off) ($f_source)"
       if [ "$f_on" = "true" ]; then
         f_store=$(json_get store <<<"$factory_json")
-        f_total=$(json_get total <<<"$factory_json")
-        f_required=$(json_get required <<<"$factory_json")
-        echo "        store         $f_store ($f_total scenarios, $f_required required)"
-        inv_count=$(json_len invalid <<<"$factory_json")
-        inv_i=0
-        while [ "$inv_i" -lt "$inv_count" ]; do
-          missing "scenario $(json_get "invalid.$inv_i.file" <<<"$factory_json"): $(json_get "invalid.$inv_i.reason" <<<"$factory_json")"
-          inv_i=$((inv_i + 1))
-        done
-        if [ ! -d "$f_store" ]; then
-          optional "scenario store not created yet: $f_store"
-        elif [ "$f_mode" = "dark" ] && [ "$f_required" -eq 0 ]; then
-          missing "factory dark: no valid required scenario in $f_store (seed the store)"
+        f_scanerr=$(json_get scanError <<<"$factory_json")
+        if [ -n "$f_scanerr" ]; then
+          # The store path exists but cannot be read (regular file, permissions): a config
+          # defect the operator fixes, never a crash of the scan — the doctor names it.
+          missing "scenario store: $f_scanerr ($f_store)"
+        else
+          f_total=$(json_get total <<<"$factory_json")
+          f_required=$(json_get required <<<"$factory_json")
+          echo "        store         $f_store ($f_total scenarios, $f_required required)"
+          inv_count=$(json_len invalid <<<"$factory_json")
+          inv_i=0
+          while [ "$inv_i" -lt "$inv_count" ]; do
+            missing "scenario $(json_get "invalid.$inv_i.file" <<<"$factory_json"): $(json_get "invalid.$inv_i.reason" <<<"$factory_json")"
+            inv_i=$((inv_i + 1))
+          done
+          if [ ! -d "$f_store" ]; then
+            optional "scenario store not created yet: $f_store"
+          elif [ "$f_mode" = "dark" ] && [ "$f_required" -eq 0 ]; then
+            missing "factory dark: no valid required scenario in $f_store (seed the store)"
+          fi
         fi
       fi
     fi
   fi
   if [ -f "$DL_ROOT/AGENTS.md" ]; then ok "AGENTS.md"; else missing "AGENTS.md (run the devloop setup skill)"; fi
   if [ -f "$DL_ROOT/docs/DECISIONS.md" ]; then ok "docs/DECISIONS.md"; else optional "no docs/DECISIONS.md"; fi
+fi
+
+# Orphaned local branches (review of #15): a local branch with no worktree and no remote
+# counterpart is the residue of a failed `git branch -D` after a worktree removal. It is
+# NOTED, never counted — notes are advisory, and deleting a branch is the operator's consent
+# (the same collector-not-bulldozer stance as cleanup-worktrees.sh).
+if [ -n "$DL_ROOT" ]; then
+  checked=""
+  while IFS= read -r line; do
+    case $line in branch*) checked+="${line#branch }"$'\n' ;; esac
+  done < <(git -C "$DL_ROOT" worktree list --porcelain 2>/dev/null)
+  while IFS= read -r br; do
+    [ -n "$br" ] || continue
+    [ "$br" = "$DL_BASE" ] && continue
+    git -C "$DL_ROOT" rev-parse -q --verify "$DL_REMOTE/$br" >/dev/null 2>&1 && continue
+    case "$checked" in *"refs/heads/$br"$'\n'*) continue ;; esac
+    optional "orphaned local branch $br (no worktree, not on $DL_REMOTE — a failed branch -D?)"
+  done < <(git -C "$DL_ROOT" for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)
 fi
 
 # Extension runtime: the installed extension imports typebox and the pi package at load time;

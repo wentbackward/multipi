@@ -143,7 +143,8 @@ The store must stay invisible to the agents whose work is judged by it.
   store, or a shell glob whose expansion intersects it. Blocked calls return a short refusal
   naming the guard (the child sees *that* it is blocked, never *why* in detail).
 - **Layered with the rest:** the orchestrator never puts the store path or scenario text in
-  a guarded role's prompt, and the briefs never name the store (smoke-asserted) — the hook is
+  a guarded role's prompt, and the briefs never name the store (unit-asserted in
+  `tests/unit/brief.test.ts`) — the hook is
   the backstop, the brief is the first wall.
 - **Honest limits** (documented, matching the reference): a script the agent writes that
   opens the store, a path assembled at run time, or a recursive search of an ancestor
@@ -237,7 +238,9 @@ anything in `AGENTS.md` safety rules, and spending beyond what the checks spend.
 
 New `.devloop.json` keys: `factory` (§1), `scenarios` block (§2), `cleanup.stale_days`
 (default 14). New documented env seams: `MULTIPI_CHILD_ROLE` (§3),
-`MULTIPI_SCENARIO_FILE|ID|TARGET` (§5). Gate exit codes: the scenario stage participates in
+`MULTIPI_SCENARIO_FILE|ID|TARGET` (§5), and `MULTIPI_LIST_LAG_RETRY_MS` — the one bounded
+list-lag retry delay of `findOpenTicket` (default 1500 ms; tests drive dispatch without the
+real wall-clock wait). Gate exit codes: the scenario stage participates in
 the existing gate verdict — `scenarios red`/`scenarios skipped` are TRAIN-RED/skipped lines
 within the current contract (no new exit codes). Role files: `agents/scenario-writer.md`,
 `agents/scenario-judge.md`. New script: `scripts/scenario-stage.sh`. New state: the store dir

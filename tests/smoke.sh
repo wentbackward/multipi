@@ -63,14 +63,14 @@ expect "worktree dir defaults under state, not beside the repo" \
   "$work/home/project/worktrees/project" "$(cfg_out 'dl_worktree_dir')"
 expect "gate dir defaults inside the worktree dir" \
   "$work/home/project/worktrees/project/gate" "$(cfg_out 'dl_gate_dir')"
-cp .devloop.json /tmp/.smoke-devloop-backup
+cp .devloop.json "$work/.smoke-devloop-backup"
 printf '{"worktree_dir":"/tmp/elsewhere"}' > .devloop.json
 expect "worktree dir honours an explicit worktree_dir" \
   "/tmp/elsewhere" "$(bash -c ". \"$plugin/scripts/lib/common.sh\" && dl_load_config required && dl_worktree_dir")"
 printf '{"worktree_dir":"~/wt-home"}' > .devloop.json
 expect "worktree dir ~/ expands against HOME" \
   "$work/home2/wt-home" "$(cd "$work/project" && HOME="$work/home2" bash -c ". \"$plugin/scripts/lib/common.sh\" && dl_load_config required && dl_worktree_dir")"
-mv /tmp/.smoke-devloop-backup .devloop.json
+mv "$work/.smoke-devloop-backup" .devloop.json
 
 # Scenario store (dark-factory spec §2): defaults under state, sibling of the worktrees dir.
 expect "scenarios dir defaults under state, sibling of the worktrees dir" \
@@ -459,6 +459,17 @@ echo "$out" | grep -q "doctor: ready" && pass "doctor prints ready" || fail "doc
 echo "$out" | grep -q "extension runtime" &&
   fail "doctor probed the extension runtime without an installed extension" ||
   pass "doctor silently skips the extension runtime check"
+
+# Orphaned local branch (a failed `git branch -D` after a worktree removal): a NOTE that
+# names the branch, never a problem count — the run stays ready.
+git branch dl-orphan-pin
+out=$(bash "$plugin/scripts/doctor.sh" 2>&1); rc=$?
+expect "doctor stays ready with an orphaned local branch" "0" "$rc"
+echo "$out" | grep -q "note    orphaned local branch dl-orphan-pin" &&
+  pass "orphaned local branch is noted" || fail "orphaned local branch not noted (want: 'note    orphaned local branch dl-orphan-pin')"
+echo "$out" | grep -q "problem(s)" &&
+  fail "the orphan note was counted as a problem" || pass "the orphan note is not a problem"
+git branch -q -D dl-orphan-pin
 mv .devloop.json .devloop.json.bak
 out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
 rc=$?
@@ -578,6 +589,20 @@ echo "$out" | grep -q "^MISSING factory dark:" &&
   pass "empty store dir trips the dark flag" || fail "empty store dir did not trip the dark flag"
 echo "$out" | grep -q "^MISSING scenario" &&
   fail "an empty store dir named phantom files" || pass "no phantom file lines for an empty store dir"
+
+# Store path exists as a REGULAR FILE: the scan yields a named error, doctor reports a
+# MISSING line (defect class + resolved path) — never a crash, never the "not created
+# yet" note for a path that IS there.
+rm -rf "$store_dir"
+printf 'not a dir\n' >"$store_dir"
+out=$(doct); rc=$?
+expect "doctor fails when the store path is a regular file" "1" "$rc"
+echo "$out" | grep -qF "MISSING scenario store: store path is not a directory (ENOTDIR) ($store_dir)" &&
+  pass "the file-store is named with its defect class and resolved path" ||
+  fail "file-store MISSING line wrong (want: MISSING scenario store: store path is not a directory (ENOTDIR) ($store_dir))"
+echo "$out" | grep -q "not created yet" &&
+  fail "a file store was misreported as not created yet" || pass "no not-created-yet note for a file store"
+rm -f "$store_dir"
 
 mkcfg '' # restore the base fixture config
 rm -rf "$store_dir"
@@ -914,6 +939,19 @@ reset_ss
 out=$(stage); rc=$?
 expect "stage exits 0 when the store is off" "0" "$rc"
 expect "store off prints the skipped line" "scenarios skipped" "$out"
+
+# Store path exists as a REGULAR FILE: red at the named defect class (the symmetric stage
+# pin for the doctor's file-store MISSING line) — exit 1, the exact red line, and the store
+# path must not reach the stage's stdout (the no-leak rule).
+reset_ss
+ss_cfg "$work/run-ok.sh" "bash $work/judge.sh"
+rm -rf "$store_dir" && printf 'not a dir\n' >"$store_dir"
+out=$(stage); rc=$?
+expect "a file store makes the stage red" "1" "$rc"
+expect "the storeError red line is pinned" "scenarios red: cannot read the store (store path is not a directory (ENOTDIR))" "$out"
+echo "$out" | grep -qF "$store_dir" &&
+  fail "the store path leaked onto stage stdout for a file store" || pass "no store path on stage stdout for a file store"
+rm -f "$store_dir"
 
 # Green baseline: configured judge template (canned bash), TERM-resistant run proves the
 # stage-end SIGKILL escalation, all seams and log files asserted, leak sentinels must not

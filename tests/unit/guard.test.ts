@@ -61,6 +61,35 @@ test("refuses a bash command that cd's into the store", () => {
 	assert.equal(hits("bash", { command: `cd /h/st && ls scen/a.md` }), true, "relative path after cd into a sibling is resolved against the new cwd");
 });
 
+test("refuses a cd whose -X-style flags precede the in-store target", () => {
+	// `cd -P scen` must move the base dir exactly like `cd scen`: the flags are options, not the target.
+	assert.equal(hits("bash", { command: "cd -P scen && cat a.md" }, "/h/st"), true, "flag before a relative target is ignored");
+	assert.equal(hits("bash", { command: `cd -P ${STORE}/sub && cat a.md` }), true);
+	assert.equal(hits("bash", { command: "cd -- scen && cat a.md" }, "/h/st"), true, "`--` is a flag, not the target");
+	// `cd -` (previous directory) has no resolvable target and stays out of scope.
+	assert.equal(hits("bash", { command: "cd - && cat a.md" }, "/h/st"), false);
+});
+
+test("refuses a subshell cd whose relative target lands inside the store", () => {
+	// `(cd /h/st && ...)` is the same cd for the reader of the command line: a subshell paren
+	// does not hide the directory change from the rest of the command.
+	assert.equal(hits("bash", { command: "(cd /h/st && ls scen/a.md)" }), true);
+	assert.equal(hits("bash", { command: `(cd /h/st && cat scen/b.md)` }), true, "attached paren form is stripped too");
+	// A subshell cd OUTSIDE the store stays allowed.
+	assert.equal(hits("bash", { command: "(cd /h/else && cat x.md)" }), false);
+});
+
+test("refuses a nested-subshell cd (ALL leading parens stripped)", () => {
+	// `((cd scen && cat a.md))`: stripping exactly one paren leaves `(cd`, which is not a
+	// recognizable cd — the RELATIVE target then evaded the tracker entirely (reproduced
+	// false in review round 1). Nested subshells repeat the paren: strip them ALL.
+	assert.equal(hits("bash", { command: "((cd scen && cat a.md))" }, "/h/st"), true, "double parens, relative target");
+	assert.equal(hits("bash", { command: "((cd /h/st && ls scen/a.md))" }), true, "double parens, attached form");
+	assert.equal(hits("bash", { command: `(((cd ${STORE} && cat a.md)))` }), true, "triple parens, absolute target");
+	// Nested subshells that never enter the store stay allowed.
+	assert.equal(hits("bash", { command: "((cd /h/else && cat x.md))" }), false);
+});
+
 test("refuses a bash command naming an absolute in-store path", () => {
 	assert.equal(hits("bash", { command: `cat ${STORE}/a.md` }), true);
 	assert.equal(hits("bash", { command: `ls ${STORE}` }), true);

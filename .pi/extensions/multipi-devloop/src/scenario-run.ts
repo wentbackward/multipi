@@ -85,6 +85,10 @@ export async function spawnSystemRun(opts: {
 	}
 	// The child holds its own copy of the fd; the runner closes its copy and may exit now.
 	closeSync(logFd);
+	// No-op 'error' handler, symmetric with spawnJudge: an unhandled 'error' on the ChildProcess
+	// (spawn failure surfacing late, after unref or after this function returned) would crash
+	// the stage's node one-shot; the group's liveness is decided by the poll loop / stopGroup.
+	proc.on("error", () => {});
 	const pgid = proc.pid ?? -1;
 	const fd = openSync(opts.logFile, "r");
 	let cursor = 0;
