@@ -114,8 +114,19 @@ function git(args: string[], cwd: string): void {
 	execFileSync("git", args, { cwd, stdio: "pipe" });
 }
 
-/** Delay for the single retry when GitHub's issue list lags a just-created ticket. */
-const ISSUE_LIST_LAG_RETRY_MS = 1500;
+/** Default delay for the single retry when GitHub's issue list lags a just-created ticket. */
+export const LIST_LAG_RETRY_MS_DEFAULT = 1500;
+
+/**
+ * The one bounded list-lag retry wait. Documented env seam `MULTIPI_LIST_LAG_RETRY_MS` (ms):
+ * tests drive dispatch without the real 1.5 s wall-clock wait; unset or non-positive values
+ * fall back to the 1500 ms default. (Supersedes the no-seam clause of the 2026-11-09
+ * findOpenTicket DECISIONS entry — review of #11, round 2.)
+ */
+function listLagRetryMs(): number {
+	const raw = Number(process.env.MULTIPI_LIST_LAG_RETRY_MS);
+	return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : LIST_LAG_RETRY_MS_DEFAULT;
+}
 
 /**
  * Find an open ticket with one bounded retry. GitHub's list endpoint briefly lags a
@@ -125,7 +136,7 @@ const ISSUE_LIST_LAG_RETRY_MS = 1500;
 export async function findOpenTicket(repoSlug: string, ticket: number): Promise<Issue | undefined> {
 	let issue = listOpenIssues(repoSlug).find((i) => i.number === ticket);
 	if (!issue) {
-		await new Promise((r) => setTimeout(r, ISSUE_LIST_LAG_RETRY_MS));
+		await new Promise((r) => setTimeout(r, listLagRetryMs()));
 		issue = listOpenIssues(repoSlug).find((i) => i.number === ticket);
 	}
 	return issue;
