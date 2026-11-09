@@ -3,6 +3,7 @@
 // script (via node -e) and the startability rule all share one notion of valid/sealed/satisfied.
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import type { Dirent } from "node:fs";
 import path from "node:path";
 
 /** One scanned scenario file (per-file result; names never leave doctor). */
@@ -37,27 +38,52 @@ export interface Verdict {
 	missing: string;
 }
 
+/**
+ * Outcome of scanStore: a scanned list, or a NAMED reason when the store cannot be read
+ * (regular file at the store path, unreadable dir). A MISSING dir is still `ok: true` with an
+ * empty list — missing is a note, not a failure; the doctor and the stage decide what to print.
+ */
+export type ScanResult = { ok: true; files: ScenarioFile[] } | { ok: false; reason: string };
+
 export type VerdictResult = { ok: true; verdict: Verdict } | { ok: false; reason: string };
 
 /**
- * Scan the store: `*.md` at any depth, nothing under `.git`. A missing store dir scans to []
- * (a missing store is a note, not a failure — the doctor decides what to print). Files are
- * processed in path-sorted order, which makes the duplicate-id winner deterministic.
+ * Scan the store: `*.md` at any depth, nothing under `.git`. A missing store dir scans to an
+ * EMPTY list (a missing store is a note, not a failure — the doctor decides what to print);
+ * a store path that exists but cannot be read (regular file, permission denied) is an ERROR
+ * RESULT with a named reason — the stage and the doctor must not crash on a broken store
+ * (review of #10). Files are processed in path-sorted order, which makes the duplicate-id
+ * winner deterministic.
  */
-export function scanStore(storeDir: string): ScenarioFile[] {
-	if (!existsSync(storeDir)) return [];
+export function scanStore(storeDir: string): ScanResult {
+	if (!existsSync(storeDir)) return { ok: true, files: [] };
 	const mdFiles: string[] = [];
-	const walk = (dir: string, rel: string): void => {
-		for (const entry of readdirSync(dir, { withFileTypes: true })) {
-			if (entry.name === ".git") continue;
-			const r = rel === "" ? entry.name : `${rel}/${entry.name}`;
-			if (entry.isDirectory()) walk(path.join(dir, entry.name), r);
-			else if (entry.isFile() && entry.name.endsWith(".md")) mdFiles.push(r);
-		}
-	};
-	walk(storeDir, "");
-	mdFiles.sort();
+	try {
+		const walk = (dir: string, rel: string, entries: Dirent[]): void => {
+			for (const entry of entries) {
+				if (entry.name === ".git") continue;
+				const r = rel === "" ? entry.name : `${rel}/${entry.name}`;
+				// Symlinked .md files and dirs are skipped (isFile/isDirectory are false for a
+				// symlink): deliberate cycle-safety — a symlinked subtree could loop or reach
+				// outside the store, and nothing judged should enter the store through a link.
+				if (entry.isDirectory()) {
+					const sub = readdirSync(path.join(dir, entry.name), { withFileTypes: true }); // throws on an unreadable subdir
+					walk(path.join(dir, entry.name), r, sub);
+				} else if (entry.isFile() && entry.name.endsWith(".md")) mdFiles.push(r);
+			}
+		};
+		walk(storeDir, "", readdirSync(storeDir, { withFileTypes: true }));
+	} catch (e) {
+		const code = (e as NodeJS.ErrnoException).code ?? "";
+		// The reason carries the defect CLASS, never the store PATH or an fs error string
+		// (those embed the path) — the stage may print the reason and the store path must not
+		// reach a train's stdout (smoke-pinned no-leak rule).
+		const reason =
+			code === "ENOTDIR" ? "store path is not a directory (ENOTDIR)" : `store dir is unreadable (${code || "unknown error"})`;
+		return { ok: false, reason };
+	}
 
+	mdFiles.sort();
 	const files = mdFiles.map((rel) => validateFile(rel, readFileSync(path.join(storeDir, rel), "utf8")));
 	const seen = new Set<string>();
 	for (const f of files) {
@@ -70,7 +96,7 @@ export function scanStore(storeDir: string): ScenarioFile[] {
 		}
 		seen.add(f.id);
 	}
-	return files;
+	return { ok: true, files };
 }
 
 /** total / required (valid files only) / invalid counts. */
