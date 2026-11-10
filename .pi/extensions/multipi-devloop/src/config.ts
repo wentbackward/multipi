@@ -18,6 +18,25 @@ export interface HeavyConfig {
 export interface StopGateConfig { requireCleanTree: boolean; maxBlocks: number; }
 export interface MergeConfig { method: string; deleteBranch: boolean; }
 
+/** Permission-policy posture (permission-policy spec §3): what an UNMATCHED call does. */
+export type PolicyPosture = "allow" | "ask";
+
+/** Permission-policy knobs (permission-policy spec §6/§7.3/§11-P1). The `policy` block of .devloop.json.
+ * Rule arrays live in the sibling permissions.json (loaded by extension/src/policy.ts). */
+export interface PolicyConfig {
+	/** Default-allow with curated deny/ask classes (operator-confirmed); "ask" is the strict flip (future). */
+	posture: PolicyPosture;
+	/** Repo allowlist: "self" or absolute main-repo paths. Self-only is the default. */
+	repos: string[];
+	/** Foreign absolute paths where a mutation ASKS instead of denying (spec §7.1). */
+	secondaries: string[];
+	/** Ask-token TTL in minutes (spec §6; consumed by the phase-2 mint). */
+	tokenTtlMinutes: number;
+}
+
+/** Confirmed defaults (operator 2026-11-09): default-allow, self-only, no secondaries, 10 min TTL. */
+export const DEFAULT_POLICY: PolicyConfig = { posture: "allow", repos: ["self"], secondaries: [], tokenTtlMinutes: 10 };
+
 /** Operating mode preset (dark-factory spec §1); see scenariosOn for the defaults it sets. */
 export type FactoryMode = "collaborative" | "dark";
 
@@ -57,6 +76,8 @@ export interface DevloopConfig {
 	heavy: HeavyConfig;
 	stopGate: StopGateConfig;
 	merge: MergeConfig;
+	/** Ask-token TTL / repo allowlist / posture (spec §11-P1); always present, defaults when the block is absent. */
+	policy: PolicyConfig;
 	deploy?: string;
 }
 
@@ -78,6 +99,29 @@ function num(v: unknown, d: number): number {
 }
 function bool(v: unknown, d: boolean): boolean {
 	return typeof v === "boolean" ? v : d;
+}
+
+/** Parse the `policy` block (permission-policy spec §11-P1). Absent ⇒ confirmed defaults.
+ * Garbage posture coerces to the default (config-layer discipline, cf. factory); a repos list
+ * with ANY untrusted entry (not "self", not an absolute path) invalidates the whole list to
+ * ["self"] — widening the allowlist is a fail-closed direction, not a per-entry filter.
+ * secondaries keep only absolute paths (dropping an entry can only tighten). */
+export function parsePolicyBlock(raw: unknown): PolicyConfig {
+	const o = (typeof raw === "object" && raw !== null && !Array.isArray(raw)) ? (raw as Record<string, unknown>) : {};
+	const reposRaw = Array.isArray(o.repos) ? o.repos : null;
+	let repos: string[];
+	if (reposRaw === null || reposRaw.length === 0) {
+		repos = ["self"];
+	} else if (reposRaw.every((r) => r === "self" || (typeof r === "string" && r.startsWith("/")))) {
+		repos = [...new Set(reposRaw as string[])];
+	} else {
+		repos = ["self"]; // one untrusted entry ⇒ the list is untrusted ⇒ self-only (fail closed)
+	}
+	const secondaries = Array.isArray(o.secondaries)
+		? [...new Set(o.secondaries.filter((s): s is string => typeof s === "string" && s.startsWith("/")))]
+		: [];
+	const ttl = typeof o.token_ttl_minutes === "number" && Number.isFinite(o.token_ttl_minutes) && o.token_ttl_minutes > 0 ? o.token_ttl_minutes : 10;
+	return { posture: o.posture === "ask" ? "ask" : "allow", repos, secondaries, tokenTtlMinutes: ttl };
 }
 
 /** Root of the main worktree containing cwd (mirrors scripts/lib/common.sh dl_main_root). */
@@ -161,6 +205,7 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): D
 		},
 		stopGate: { requireCleanTree: bool(sg.require_clean_tree, true), maxBlocks: num(sg.max_blocks, 5) },
 		merge: { method: str(mg.method, "squash"), deleteBranch: bool(mg.delete_branch, true) },
+		policy: parsePolicyBlock(raw.policy),
 		deploy: str(raw.deploy) || undefined,
 	};
 }

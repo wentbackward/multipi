@@ -218,3 +218,63 @@ test("repoSlugFromRemote parses https and ssh remote urls", () => {
 	assert.equal(repoSlugFromRemote(dir, "origin"), "acme/widget");
 	assert.equal(repoSlugFromRemote(dir, "nope"), "");
 });
+
+// --- policy block (permission-policy spec §11-P1: the policy knobs schema) ---
+
+test("loadConfig: no policy block gives the confirmed defaults (allow, self-only, no secondaries, 10 min TTL)", () => {
+	const fx = makeFixture(BASE_CONFIG);
+	try {
+		const cfg = loadConfig(fx.repo);
+		assert.deepEqual(cfg?.policy, { posture: "allow", repos: ["self"], secondaries: [], tokenTtlMinutes: 10 });
+	} finally { fx.cleanup(); }
+});
+
+test("loadConfig: an explicit policy block parses all four knobs", () => {
+	const fx = makeFixture('{"policy": {"posture": "ask", "repos": ["self", "/srv/other"], "secondaries": ["/srv/other"], "token_ttl_minutes": 30}}');
+	try {
+		const cfg = loadConfig(fx.repo);
+		assert.deepEqual(cfg?.policy, { posture: "ask", repos: ["self", "/srv/other"], secondaries: ["/srv/other"], tokenTtlMinutes: 30 });
+	} finally { fx.cleanup(); }
+});
+
+test("loadConfig: a partial policy block fills defaults per key", () => {
+	const fx = makeFixture('{"policy": {"token_ttl_minutes": 5}}');
+	try {
+		const cfg = loadConfig(fx.repo);
+		assert.deepEqual(cfg?.policy, { posture: "allow", repos: ["self"], secondaries: [], tokenTtlMinutes: 5 });
+	} finally { fx.cleanup(); }
+});
+
+test("loadConfig: garbage posture coerces to the allow default (config-layer coercion discipline)", () => {
+	const fx = makeFixture('{"policy": {"posture": "nope"}}');
+	try {
+		assert.equal(loadConfig(fx.repo)?.policy?.posture, "allow");
+	} finally { fx.cleanup(); }
+});
+
+test("loadConfig: a repos list with one untrusted entry fails closed to self-only", () => {
+	for (const bad of ['{"policy": {"repos": ["self", "./relative"]}}', '{"policy": {"repos": ["self", 42]}}', '{"policy": {"repos": "self"}}']) {
+		const fx = makeFixture(bad);
+		try {
+			assert.deepEqual(loadConfig(fx.repo)?.policy?.repos, ["self"], bad);
+		} finally { fx.cleanup(); }
+	}
+});
+
+test("loadConfig: repos dedupes while keeping order; secondaries keep only absolute paths", () => {
+	const fx = makeFixture('{"policy": {"repos": ["self", "/a", "/a", "/b"], "secondaries": ["/ok", "relative", 7, "/dup", "/ok"]}}');
+	try {
+		const p = loadConfig(fx.repo)?.policy;
+		assert.deepEqual(p?.repos, ["self", "/a", "/b"]);
+		assert.deepEqual(p?.secondaries, ["/ok", "/dup"]);
+	} finally { fx.cleanup(); }
+});
+
+test("loadConfig: token_ttl_minutes falls back to 10 when missing, non-numeric or non-positive", () => {
+	for (const bad of ['{"policy": {}}', '{"policy": {"token_ttl_minutes": "ten"}}', '{"policy": {"token_ttl_minutes": 0}}']) {
+		const fx = makeFixture(bad);
+		try {
+			assert.equal(loadConfig(fx.repo)?.policy?.tokenTtlMinutes, 10, bad);
+		} finally { fx.cleanup(); }
+	}
+});
