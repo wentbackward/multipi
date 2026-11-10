@@ -134,8 +134,8 @@ function stripDotSlash(p: string): string {
 	let s = p;
 	while (s.startsWith("./")) s = s.slice(2);
 	// `.//.env` → `/​.env` would be a silent RELATIVE→ABSOLUTE reclassification; when the
-	// original was dot-relative, keep the result relative (`.//.env` ⇒ `.env`).
-	if (s.startsWith("/") && p.startsWith(".")) s = "." + s;
+	// original was dot-relative, collapse the leading slash back into the dot (`.//.env` ⇒ `.env`).
+	if (s.startsWith("/") && p.startsWith(".")) s = "." + s.slice(1);
 	return s;
 }
 
