@@ -17,8 +17,7 @@ import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { loadConfig, resolvePaths } from "./config.ts";
 import {
-	evaluate, loadPolicy, hasTrustedAncestor,
-	formatPolicyDeny, formatPolicyAsk, redactActionSummary,
+	evaluate, loadPolicy, hasTrustedAncestor, formatPolicyDeny, formatPolicyAsk, redactActionSummary, DEVLOAD_ERROR_MARKER,
 	type PolicyContext,
 } from "./policy.ts";
 
@@ -109,7 +108,7 @@ function main(): void {
 	// loadConfig returns null for missing AND unparseable, so the first row is told apart
 	// with an existsSync on the version-controlled config at the acting root.
 	const policy = loadPolicy(a.root);
-	if (!policy.ok && policy.error?.startsWith(".devloop.json")) {
+	if (!policy.ok && policy.error?.startsWith(DEVLOAD_ERROR_MARKER)) {
 		let present = false;
 		try { present = existsSync(path.join(a.root, ".devloop.json")); } catch { present = false; }
 		if (!present) {

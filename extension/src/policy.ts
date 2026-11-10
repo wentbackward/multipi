@@ -89,6 +89,13 @@ export const RULE_GH_PR_MERGE = "gh:pr-merge";
 /** The shim's own fail-closed id: the evaluator could not be consulted at all. */
 export const RULE_SHIM_ERROR = "policy:shim-error";
 
+/** Marker prefix of the .devloop.json load error — the ONLY stable coupling between
+ * policy.ts's error wording and the consumers that discriminate missing-vs-corrupt
+ * (the P2 hook and the P3 driver). If the wording moves, it moves HERE, and the
+ * consumers keep working (P3 review round-6 should-fix: a bare string-prefix check
+ * would silently flip a corrupt config to INACTIVE = self-disarm). */
+export const DEVLOAD_ERROR_MARKER = ".devloop.json";
+
 /** What one call declares to be doing (hook/shim extract this from the tool arguments). */
 export interface PolicyContext {
 	/** Who is acting (e.g. "orchestrator"); carried for the audit log, rules do not scope on it (v1). */
@@ -224,7 +231,7 @@ export function loadPolicy(root: string, env: NodeJS.ProcessEnv = process.env): 
 	const scopeRoot = mainRootOf(root);
 	const cfg = loadConfig(root, env);
 	const base: Policy = { ok: false, root, scopeRoot, config: DEFAULT_POLICY, rules: [], hasPermissionsFile: false };
-	if (!cfg) return { ...base, error: ".devloop.json missing or unparseable" };
+	if (!cfg) return { ...base, error: `${DEVLOAD_ERROR_MARKER} missing or unparseable` };
 	const permPath = path.join(root, "permissions.json");
 	if (!existsSync(permPath)) return { ok: true, root, scopeRoot, config: cfg.policy, rules: [], hasPermissionsFile: false };
 	let parsed: unknown;

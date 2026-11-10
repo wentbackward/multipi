@@ -23,7 +23,7 @@ shim_init() {
   # config (the acting repo's own config, if it has one, is a different loop — its base is
   # not ours to protect here; DECISIONS 2026-11-10).
   SIM_BASE_BRANCH=main
-  SIM_SCRIPTS_DIR=$(cd "$SIM_SHIM_DIR/.." 2>/dev/null && pwd)
+  SIM_SCRIPTS_DIR=$(cd "$SIM_SHIM_DIR/.." 2>/dev/null && pwd -P)
   if [ -n "$SIM_SCRIPTS_DIR" ] && [ -f "$SIM_SCRIPTS_DIR/lib/common.sh" ]; then
     # shellcheck source=lib/common.sh
     . "$SIM_SCRIPTS_DIR/lib/common.sh"
@@ -147,7 +147,9 @@ shim_decide() {
     drv+=(--target "$SIM_TARGET")
   fi
   local x
-  for x in "${_SIM_DECIDE_EXTRA[@]}"; do
+  # Guarded expansion: the array is legitimately empty on most calls, and the project floor
+  # is bash 4+ (unguarded "${arr[@]}" on an empty array dies under set -u before 4.4).
+  for x in ${_SIM_DECIDE_EXTRA[@]+"${_SIM_DECIDE_EXTRA[@]}"}; do
     drv+=("$x")
   done
   [ "$SIM_PUSH_FORCE" = 1 ] && drv+=(--push-force)
@@ -174,6 +176,18 @@ _shim_json_escape() { # minimal JSON string escaper for the fallback audit line
   printf '%s' "$s"
 }
 
+# Minimal mirror of the driver's redactActionSummary for the ONE path that bypasses it:
+# scrub the token-dir shape and bound the length (a commit message may carry a token path
+# and the fallback line must not print it raw — P3 review round-6 should-fix).
+_shim_redact_summary() {
+  local s=$1
+  # Double-quoted program: the class excludes whitespace, both quotes, backtick and the
+  # shell meta set — the token-path shape the driver's TOKEN_DIR_RE scrubs.
+  s=$(printf '%s' "$s" | sed -E "s#(~|\$HOME|\$\{HOME\}|/)[^[:space:]\"'\`|;&<>]*dev-loop-tokens[^[:space:]\"'\`|;&<>]*#<token-dir>#g")
+  s=${s:0:160}
+  printf '%s' "$s"
+}
+
 # Best-effort audit append for the ONE case the driver cannot serve (itself broken): the
 # deny still lands in the log, shaped like every other line (layer=shim, seven fields).
 # A failing append never breaks the verdict.
@@ -189,7 +203,7 @@ shim_audit_fallback() { # shim_audit_fallback RULEID VERDICT SUMMARY
   {
     mkdir -p "$logs" 2>/dev/null || return 0
     printf '{"ts":"%s","event":"verdict","session":"-","actor":"shim","ruleId":"%s","verdict":"%s","actionSummary":"%s","layer":"shim"}\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(_shim_json_escape "$rule")" "$verdict" "$(_shim_json_escape "$summary")" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(_shim_json_escape "$rule")" "$verdict" "$(_shim_json_escape "$(_shim_redact_summary "$summary")")" \
       >>"$logs/policy-audit.jsonl" 2>/dev/null
   } || true
   return 0

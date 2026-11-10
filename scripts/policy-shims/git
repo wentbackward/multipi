@@ -71,6 +71,14 @@ if [ "$i" -ge "${#args[@]}" ]; then
 fi
 sub=${args[$i]}
 
+# git's own documentation/invocation-meta flags pass through without consulting the
+# evaluator — parity with the gh shim's --help/--version treatment (round-6 should-fix).
+_k=$i
+while [ "$_k" -lt "${#args[@]}" ]; do
+  case "${args[$_k]}" in -h | --help | --version) exec "$REAL_GIT" "$@" ;; esac
+  _k=$((_k + 1))
+done
+
 force=0; base=0; tags=0; dest_unknown=0
 case "$sub" in
   commit | am | reset)
