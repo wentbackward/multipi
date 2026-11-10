@@ -20,9 +20,12 @@
 // command never confers trust.
 //
 // Verdict order (fixed): unusable policy ⇒ deny (fail closed) → structural git-target rules
-// (worst target wins; unresolvable/foreign ⇒ deny, secondary ⇒ ask) → trusted exemption
-// (string rules only, spec §5) → install.sh structural rule (foreign target ⇒ deny/ask by
-// secondaries) → string rules (deny > ask > allow) → posture default.
+// (worst target wins; unresolvable/foreign ⇒ deny, secondary ⇒ ask) → install.sh structural
+// rule (foreign target ⇒ deny, secondary ⇒ ask) → trusted exemption (string rules ONLY,
+// spec §5 — the exemption can NEVER lift a structural rule; the 2026-11-09 oneshot failure
+// class is the one no exemption reopens) → string rules (deny > ask > allow) → posture default.
+// `gitTargets` entries must be main-repo ROOTS (the parent of the rev-parse git-dir); the P3
+// shim converts --git-common-dir output to the root before calling.
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { DEFAULT_POLICY, loadConfig, type PolicyConfig } from "./config.ts";
@@ -44,8 +47,12 @@ export interface Policy {
 	ok: boolean;
 	/** Why the policy is unusable (bad .devloop.json, bad permissions.json, bad rule). */
 	error?: string;
-	/** Main repo root — the "self" of every repo-scope decision. */
+	/** The repo root the policy files were loaded FROM (a checkout may be a linked
+	 * worktree): permissions.json and scripts-identity resolve here. */
 	root: string;
+	/** The MAIN worktree root this checkout belongs to — the "self" of every
+	 * repo-scope decision (worktree paths normalize here; see mainRootOf). */
+	scopeRoot: string;
 	config: PolicyConfig;
 	rules: PolicyRule[];
 	/** Whether a permissions.json existed next to the config. */
@@ -98,7 +105,13 @@ function escapeRe(s: string): string {
 
 /** Bash pattern → anchored regex: `prefix:*` is prefix shorthand; `*` → `.*` (spans anything). */
 function bashRe(pattern: string): RegExp {
-	if (pattern.endsWith(":*")) return new RegExp(`^${escapeRe(pattern.slice(0, -2))}.*`, "s");
+	// `prefix:*` prefix shorthand anchored to a TOKEN START: the stem must end at whitespace
+	// or end-of-line, so `Bash(sudo:*)` does not admit `sudoku`, and an ALLOW prefix cannot
+	// over-admit (`Bash(git log:*)` does not admit `git logspam`).
+	if (pattern.endsWith(":*")) {
+		const stem = escapeRe(pattern.slice(0, -2));
+		return new RegExp(`^${stem}(?=\\s|$).*`, "s");
+	}
 	return new RegExp(`^${pattern.split("*").map(escapeRe).join(".*")}$`, "s");
 }
 
@@ -132,17 +145,48 @@ function compileRule(raw: string, cls: "deny" | "ask" | "allow"): PolicyRule {
 }
 
 /**
- * Load the policy from a main repo root: the `policy` block of <root>/.devloop.json plus the
- * sibling <root>/permissions.json (either the operator's wrapped shape
- * {"permissions":{"deny","allow","ask"}} or bare {deny,allow,ask}). Any JSON/shape/rule error
- * makes the policy UNUSABLE (ok:false) — fail closed; a MISSING file is not an error.
+ * Normalize any repo path (main or linked worktree) to the MAIN worktree root by reading the
+ * `.git` entry: a directory ⇒ already the common root; a file ⇒ the worktree's `gitdir:`
+ * pointer, whose third ancestor is the main root. Unresolvable input is returned as-is
+ * (the caller's semantics, documented — never a silent re-scope to the wrong repo).
+ */
+function mainRootOf(p: string): string {
+	try {
+		const ge = path.join(p, ".git");
+		const st = statSync(ge);
+		if (st.isDirectory()) return p;
+		if (st.isFile()) {
+			const line = readFileSync(ge, "utf8").split("\n").find((l) => l.startsWith("gitdir:"));
+			const gd = line ? line.slice(line.indexOf(":") + 1).trim() : null;
+			// gd = <main>/.git/worktrees/<name>
+			return gd ? path.dirname(path.dirname(path.dirname(gd))) : p;
+		}
+	} catch {
+		return p;
+	}
+	return p;
+}
+
+/**
+ * Load the policy from a repo root — MAIN or LINKED WORKTREE (both accepted):
+ * - the `.devloop.json` policy block follows loadConfig's own main-root resolution
+ *   (unchanged dark-factory behaviour); the sibling `permissions.json` (operator's
+ *   wrapped shape {"permissions":{"deny","allow","ask"}} or bare {deny,allow,ask}) loads
+ *   from the GIVEN checkout, and scripts-identity resolves against it (the train under
+ *   gate carries its own seed);
+ * - the SELF of repo-scope decisions is the COMMON repository: `scopeRoot` is
+ *   normalized from the worktree's `.git` gitdir pointer (see mainRootOf), so a policy
+ *   loaded inside any worktree never re-scopes "self" to that one worktree.
+ * Any JSON/shape/rule error makes the policy UNUSABLE (ok:false) — fail closed; a
+ * MISSING file is not an error.
  */
 export function loadPolicy(root: string, env: NodeJS.ProcessEnv = process.env): Policy {
+	const scopeRoot = mainRootOf(root);
 	const cfg = loadConfig(root, env);
-	const base: Policy = { ok: false, root, config: DEFAULT_POLICY, rules: [], hasPermissionsFile: false };
+	const base: Policy = { ok: false, root, scopeRoot, config: DEFAULT_POLICY, rules: [], hasPermissionsFile: false };
 	if (!cfg) return { ...base, error: ".devloop.json missing or unparseable" };
 	const permPath = path.join(root, "permissions.json");
-	if (!existsSync(permPath)) return { ok: true, root, config: cfg.policy, rules: [], hasPermissionsFile: false };
+	if (!existsSync(permPath)) return { ok: true, root, scopeRoot, config: cfg.policy, rules: [], hasPermissionsFile: false };
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(readFileSync(permPath, "utf8"));
@@ -173,7 +217,7 @@ export function loadPolicy(root: string, env: NodeJS.ProcessEnv = process.env): 
 			}
 		}
 	}
-	return { ok: true, root, config: cfg.policy, rules, hasPermissionsFile: true };
+	return { ok: true, root, scopeRoot, config: cfg.policy, rules, hasPermissionsFile: true };
 }
 
 type TargetClass = "self" | "allowed" | "secondary" | "foreign";
@@ -182,25 +226,13 @@ type TargetClass = "self" | "allowed" | "secondary" | "foreign";
  * a whitelisted secondary asks; anything else is foreign (spec §7.1/§7.3). */
 function classifyTarget(policy: Policy, target: string): TargetClass {
 	const t = path.resolve(target);
-	const r = path.resolve(policy.root);
+	const r = path.resolve(policy.scopeRoot);
 	if (t === r || t.startsWith(r + path.sep)) return "self";
 	const repos = policy.config.repos.filter((x) => x !== "self").map((x) => path.resolve(x));
 	if (repos.includes(t)) return "allowed";
 	const secs = policy.config.secondaries.map((x) => path.resolve(x));
 	if (secs.includes(t)) return "secondary";
 	return "foreign";
-}
-
-/** True when the program (resolved from the repo root) IS an installed scripts/*.sh file by
- * realpath (spec §5: identity, not name or a path string the model composed). */
-export function isTrustedProgram(program: string, root: string): boolean {
-	if (/\s/.test(program) || program === "~" || program.startsWith("~/")) return false; // unresolvable ⇒ not trusted
-	const scripts = realOrNull(path.join(root, "scripts"));
-	if (!scripts) return false;
-	const real = realOrNull(path.resolve(root, program));
-	if (!real) return false;
-	const inScripts = real === scripts || real.startsWith(scripts + path.sep);
-	return inScripts && real.endsWith(".sh") && isFileReal(real);
 }
 
 function realOrNull(p: string): string | null {
@@ -210,19 +242,35 @@ function realOrNull(p: string): string | null {
 		return null;
 	}
 }
-function isFileReal(p: string): boolean {
+
+/** Resolve `token` (from the repo root) to a REAL file inside the installed scripts/ dir,
+ * or null. Single source of the identity rule (spec §5): realpath, no symlink escape. */
+function realInstalledScript(token: string, root: string): string | null {
+	const scripts = realOrNull(path.join(root, "scripts"));
+	if (!scripts) return null;
+	const real = realOrNull(path.resolve(root, token));
+	if (!real || (real !== scripts && !real.startsWith(scripts + path.sep))) return null;
 	try {
-		return statSync(p).isFile();
+		return statSync(real).isFile() ? real : null;
 	} catch {
-		return false;
+		return null;
 	}
 }
 
-/** Is this top-level token the installed install.sh (by realpath)? */
+/** True when the program (resolved from the repo root) IS an installed scripts/*.sh file by
+ * realpath (spec §5: identity, not name or a path string the model composed). */
+export function isTrustedProgram(program: string, root: string): boolean {
+	if (/\s/.test(program) || program === "~" || program.startsWith("~/")) return false; // unresolvable ⇒ not trusted
+	return realInstalledScript(program, root)?.endsWith(".sh") ?? false;
+}
+
+/** Is this top-level token the installed install.sh (by realpath)? Both sides of the
+ * comparison must be REAL: a missing scripts dir is "not the install script", never a
+ * null===null match. */
 function isInstalledInstallScript(token: string, root: string): boolean {
-	const scripts = realOrNull(path.join(root, "scripts"));
-	if (!scripts) return false;
-	return realOrNull(path.resolve(root, token)) === path.join(scripts, "install.sh");
+	const real = realInstalledScript(token, root);
+	const want = realOrNull(path.join(root, "scripts", "install.sh"));
+	return real !== null && want !== null && real === want;
 }
 
 const RANK: Record<PolicyVerdict, number> = { deny: 2, ask: 1, allow: 0 };
@@ -273,19 +321,25 @@ export function evaluate(policy: Policy, ctx: PolicyContext): PolicyDecision {
 
 	const tool = ctx.tool.toLowerCase(); // pi names tools lowercase; both rule layers key off the same value
 
-	// 2. Trusted-program exemption (spec §5): the REVIEWED SCRIPT CODE is the authorized actor,
-	//    so string rules do not apply — structural ones already ran above and always do.
-	if (ctx.trusted) {
-		return { verdict: "allow", ruleId: RULE_TRUSTED_EXEMPT, reason: "trusted-program exemption: string rules not applied (spec §5); structural target rules still apply" };
-	}
-
-	// 3. Oneshot install rule: install.sh acting on a target. The target is the first
-	//    non-flag argument; relative/~ targets cannot be resolved with certainty from this
-	//    context ⇒ unresolvable ⇒ deny (spec §7.2), never a guess.
+	// 2. Oneshot install rule: install.sh acting on a target. Runs BEFORE the trusted
+	//    exemption: an installed install.sh is trusted for STRING rules, but a foreign
+	//    INSTALL TARGET is the exact 2026-11-09 failure class no exemption may reopen
+	//    (spec §7.1). The target is the first non-flag argument; relative/~ targets
+	//    cannot be resolved with certainty from this context ⇒ unresolvable ⇒ deny
+	//    (spec §7.2), never a guess.
 	if (tool === "bash" && typeof ctx.command === "string") {
 		const d = evaluateInstall(policy, ctx.command);
 		if (d) return d;
+	}
 
+	// 3. Trusted-program exemption (spec §5): the REVIEWED SCRIPT CODE is the authorized
+	//    actor, so string rules do not apply — all structural rules above already ran and
+	//    ALWAYS do (the exemption lifts nothing structural).
+	if (ctx.trusted) {
+		return { verdict: "allow", ruleId: RULE_TRUSTED_EXEMPT, reason: "trusted-program exemption: string rules not applied (spec §5); structural rules already decided above" };
+	}
+
+	if (tool === "bash" && typeof ctx.command === "string") {
 		// 4. String rules (the tripwire layer); deny > ask > allow, first rule per class wins.
 		const hits = matchRules(policy, "bash", ctx.command);
 		const winner = hits.deny ?? hits.ask ?? hits.allow;

@@ -66,6 +66,7 @@
       "Bash(*cleanup-worktrees.sh *--apply*)",
       "Bash(git tag *)",
       "Bash(*git*push*--tags*)",
+      "Bash(*push* refs/tags/*)",
       "Bash(*gh pr merge*)",
       "Bash(*git push* main)",
       "Bash(*git push* main *)"

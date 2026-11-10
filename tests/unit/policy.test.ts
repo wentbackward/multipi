@@ -4,6 +4,7 @@
 // everything is a temp git fixture or a plain string.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, symlinkSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -138,6 +139,7 @@ test("Bash rules: `prefix:*` is prefix shorthand (bare prefix and continuations 
 		assert.equal(ev("git log"), "deny");
 		assert.equal(ev("git log -5 --stat"), "deny");
 		assert.equal(ev("git lo"), "allow", "a shorter/different stem is not a continuation of the prefix");
+		assert.equal(ev("git logspam"), "allow", "prefix is anchored at a token start — `git log:*` must not admit `git logspam`");
 	});
 });
 
@@ -394,6 +396,21 @@ test("trusted exemption never lifts the STRUCTURAL rules (foreign target, unreso
 	});
 });
 
+test("trusted + install.sh: the install structural rule outranks the exemption (the 2026-11-09 failure class no exemption reopens)", () => {
+	policyFx((root, cfg, file) => {
+		cfg(JSON.stringify({ policy: { secondaries: ["/somewhere/secondary"] } }));
+		file("permissions.json", perms());
+		file("scripts/install.sh", "#!/usr/bin/env bash\ntrue\n");
+		const p = loadPolicy(root);
+		const foreign = evaluate(p, { ...ORCH, command: `${root}/scripts/install.sh /somewhere/foreign`, trusted: true });
+		assert.equal(foreign.verdict, "deny", "trusted install.sh with a FOREIGN target is still denied");
+		assert.equal(foreign.ruleId, RULE_ONESHOT_INSTALL_FOREIGN);
+		const secondary = evaluate(p, { ...ORCH, command: `scripts/install.sh /somewhere/secondary`, trusted: true });
+		assert.equal(secondary.verdict, "ask", "trusted install.sh with a SECONDARY target still asks");
+		assert.equal(secondary.ruleId, RULE_ONESHOT_INSTALL_SECONDARY);
+	});
+});
+
 // --- the dogfood seed ----------------------------------------------------------
 
 test("seeded permissions.json: parses, and encodes the operator's dialect + the oneshot-delta base-branch push ask", () => {
@@ -416,4 +433,24 @@ test("seeded permissions.json: parses, and encodes the operator's dialect + the 
 	assert.equal(askOf("git tag v1").verdict, "ask", "tag creation asks");
 	assert.equal(askOf("gh pr merge 42").verdict, "ask", "freeform pr merge asks");
 	assert.equal(askOf("git push -u origin HEAD").verdict, "allow", "feature-branch push stays clean");
+});
+
+test("loadPolicy from a LINKED WORKTREE: self normalizes to the common repo; files stay with the checkout", () => {
+	policyFx((root, cfg, file) => {
+		cfg(JSON.stringify({}));
+		file("permissions.json", perms(["Bash(sudo:*)"]));
+		// A second linked worktree of the SAME repo: scopeRoot must be the common root,
+		// so "self" never re-scopes to one worktree — the inference hole the spec bars.
+		const wt = path.join(path.dirname(root), "proj-wt");
+		execFileSync("git", ["-C", root, "worktree", "add", "-q", "--detach", wt], { stdio: "pipe" });
+		const fromMain = loadPolicy(root);
+		const fromWt = loadPolicy(wt);
+		assert.equal(fromMain.scopeRoot, root, "the main worktree's scopeRoot is itself");
+		assert.equal(fromWt.scopeRoot, root, "a linked worktree normalizes to the common root");
+		assert.notEqual(evaluate(fromWt, { ...ORCH, command: "git push", gitTargets: [root] }).ruleId, RULE_ONESHOT_FOREIGN,
+			"the repo's own main root is never foreign, from either view");
+		assert.equal(fromMain.rules.length, 1, "rules load from the checkout's own permissions.json");
+		assert.equal(fromWt.rules.length, 0, "the worktree checkout has no sibling file of its own — absent, not borrowed");
+		assert.equal(evaluate(fromMain, { ...ORCH, command: "sudo reboot" }).verdict, "deny");
+	});
 });
