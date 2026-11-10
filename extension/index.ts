@@ -195,12 +195,6 @@ function ensureTicker(): void {
 }
 
 /**
- * Guard-only child mode (spec §3): exactly one block-capable tool_call hook that refuses calls
- * naming the scenario store. The store path comes from the child's own committed .devloop.json
- * (no env seam carries it); an unparseable config or unresolvable store path fails closed —
- * every guarded call gets the generic refusal.
- */
-/**
  * The Layer-2 shim PATH (permission-policy spec §4-L2, ticket #41): ONE string operation at
  * session_start — prepend <main root>/scripts/policy-shims to this process's PATH so every
  * bash tool of the session resolves git/gh through the policy wrapper. Absent dir ⇒ the loop
@@ -222,6 +216,12 @@ function registerPolicyShimPath(pi: ExtensionAPI): void {
 	});
 }
 
+/**
+ * Guard-only child mode (spec §3): exactly one block-capable tool_call hook that refuses calls
+ * naming the scenario store. The store path comes from the child's own committed .devloop.json
+ * (no env seam carries it); an unparseable config or unresolvable store path fails closed —
+ * every guarded call gets the generic refusal.
+ */
 function registerStoreGuard(pi: ExtensionAPI, childCwd: string): void {
 	const g = initGuard(childCwd);
 	if (!g.enabled) return; // store off ⇒ register nothing, ever
