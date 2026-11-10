@@ -201,6 +201,21 @@ test("Read/Edit rules: leading `./` is normalized away (`.env` matches `Read(./.
 		assert.equal(ev("./.env"), "deny");
 		assert.equal(ev(".env.production"), "deny");
 		assert.equal(ev(".envrc"), "allow", "the literal dot of `./.env.*` must not elide");
+		assert.equal(ev(".//.env"), "deny", "dot-dot-slash spells the SAME file: it must not reclassify to absolute `/.env`");
+	});
+});
+
+test("classifyTarget: a symlinked root/target is still SELF (realpath comparison, no false foreign deny)", () => {
+	policyFx((root, cfg, file) => {
+		cfg("{}");
+		file("permissions.json", perms());
+		const p = loadPolicy(root);
+		// A symlink to the repo root: the path differs lexically but is the same repository.
+		const link = root + "-link";
+		symlinkSync(root, link);
+		const d = evaluate(p, { ...ORCH, command: "git commit", gitTargets: [link] });
+		assert.notEqual(d.ruleId, RULE_ONESHOT_FOREIGN, "a symlinked view of self must not be foreign");
+		assert.equal(d.verdict, "allow", "self-through-symlink passes to rules/posture");
 	});
 });
 
@@ -345,7 +360,8 @@ test("oneshot install rule: install.sh <foreign> ⇒ deny; <secondary> ⇒ ask; 
 		assert.equal(self.verdict, "allow", "self install falls through to rules/posture");
 		const flagged = ev(`scripts/install.sh --yes ${sec}`);
 		assert.equal(flagged.verdict, "ask", "flags are skipped when finding the target");
-		assert.equal(ev(`scripts/install.sh`).verdict, "allow", "no target: usage problem, not a policy one");
+		assert.equal(ev(`scripts/install.sh`).verdict, "deny", "no declared target defaults to cwd — unresolvable ⇒ deny (§7.2)");
+		assert.equal(ev(`scripts/install.sh`).ruleId, RULE_ONESHOT_UNRESOLVABLE);
 	});
 });
 

@@ -103,7 +103,9 @@ function escapeRe(s: string): string {
 	return s.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
 }
 
-/** Bash pattern → anchored regex: `prefix:*` is prefix shorthand; `*` → `.*` (spans anything). */
+/** Bash pattern → anchored regex: `prefix:*` is prefix shorthand (stem anchored to a token
+ * start; a `*` INSIDE the stem is an escaped literal — `a*b:*` ≙ literal prefix `a*b`);
+ * otherwise `*` → `.*` (spans anything). */
 function bashRe(pattern: string): RegExp {
 	// `prefix:*` prefix shorthand anchored to a TOKEN START: the stem must end at whitespace
 	// or end-of-line, so `Bash(sudo:*)` does not admit `sudoku`, and an ALLOW prefix cannot
@@ -131,6 +133,9 @@ function globRe(pattern: string): RegExp {
 function stripDotSlash(p: string): string {
 	let s = p;
 	while (s.startsWith("./")) s = s.slice(2);
+	// `.//.env` → `/​.env` would be a silent RELATIVE→ABSOLUTE reclassification; when the
+	// original was dot-relative, keep the result relative (`.//.env` ⇒ `.env`).
+	if (s.startsWith("/") && p.startsWith(".")) s = "." + s;
 	return s;
 }
 
@@ -224,13 +229,17 @@ type TargetClass = "self" | "allowed" | "secondary" | "foreign";
 
 /** Repo-scope decision for one resolved target: self or an explicit repos entry pass;
  * a whitelisted secondary asks; anything else is foreign (spec §7.1/§7.3). */
+/** Classify a RESOLVED target against self/allowlist/secondaries. Both sides are compared
+ * by realpath when the paths exist (a symlinked root or target must not turn SELF into
+ * foreign — a false deny would break the loop's own operations); lexical when missing. */
 function classifyTarget(policy: Policy, target: string): TargetClass {
-	const t = path.resolve(target);
-	const r = path.resolve(policy.scopeRoot);
+	const canon = (p: string) => realOrNull(p) ?? p;
+	const t = canon(path.resolve(target));
+	const r = canon(path.resolve(policy.scopeRoot));
 	if (t === r || t.startsWith(r + path.sep)) return "self";
-	const repos = policy.config.repos.filter((x) => x !== "self").map((x) => path.resolve(x));
+	const repos = policy.config.repos.filter((x) => x !== "self").map((x) => canon(path.resolve(x)));
 	if (repos.includes(t)) return "allowed";
-	const secs = policy.config.secondaries.map((x) => path.resolve(x));
+	const secs = policy.config.secondaries.map((x) => canon(path.resolve(x)));
 	if (secs.includes(t)) return "secondary";
 	return "foreign";
 }
@@ -383,7 +392,12 @@ function evaluateInstall(policy: Policy, command: string): PolicyDecision | null
 	if (!toks.length) return null;
 	if (!isInstalledInstallScript(toks[0], policy.root)) return null;
 	const target = toks.slice(1).find((t) => !t.startsWith("-"));
-	if (target === undefined) return null; // no target: usage error, not a policy question
+	if (target === undefined) {
+		// The real script's documented default installs into the CURRENT DIRECTORY — a target
+		// this layer cannot resolve with certainty. Spec §7.2's fail direction is deny, not
+		// "usage problem" (the one spelling of the oneshot failure that must not fall through).
+		return { verdict: "deny", ruleId: RULE_ONESHOT_UNRESOLVABLE, reason: "install.sh with no declared target defaults to the current directory, which is unresolvable from this context — failing closed (spec §7.2)" };
+	}
 	if (target === "~" || target.startsWith("~/") || !target.startsWith("/")) {
 		return { verdict: "deny", ruleId: RULE_ONESHOT_UNRESOLVABLE, reason: `install target ${target} is unresolvable from the declared context — failing closed (spec §7.2)` };
 	}

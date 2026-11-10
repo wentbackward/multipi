@@ -144,23 +144,29 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
 - 2026-11-09 — The doctor's factory one-shot captures its stderr to a temp file instead of `/dev/null` (ticket #37): on a failed import the note now carries the FIRST LINE of node's error — `factory report unavailable (node import failed: (node:…) Warning: Failed to load the ES module: … Make sure to set "type": "module" …)` — the #15 WARN pattern (diagnose, don't hide; compare cleanup-worktrees' stderr-carrying WARN lines). The store-path rule is unaffected by construction: the store path enters the report only AFTER a successful import, so a first stderr line can never carry it — the paths that CAN appear are the extension's own source paths, which the spec does not forbid. Alternatives: keep the bare message (the defect this ticket closes — the #37 incident was undiagnosable from the note); print the full stderr (multi-line noise in a one-line note); special-case known error classes and map them (the error line IS the diagnosis — classification would fork node's messages into the loop).
 - 2026-11-09 — P1 permission-policy (spec 2026-11-09-multipi-permission-policy.md §3/§5/§7/§11): the policy schema and evaluator split along the dependency rule — `config.ts` parses the `.devloop.json` `policy` block (always typed, confirmed defaults when absent: posture allow, repos ["self"], secondaries [], token_ttl_minutes 10), and the pure `policy.ts` loads it plus the sibling `permissions.json` (operator's `{"permissions":{deny,allow,ask}}` dialect, bare arrays also accepted; a `permissions` key that is not an object is corruption, not absence). A repos entry that is neither "self" nor an absolute path invalidates the WHOLE list to ["self"] (widening the allowlist must be fail-closed, not a per-entry filter); secondaries drop only non-absolute entries (dropping tightens). Garbage posture coerces to "allow" — the config layer's coercion discipline (cf. factory preset) wins over tightening here, at the cost that a mistyped "ask" silently loosens; logged so the operator's eyes land on it when reading posture back via doctor (P4).
 - 2026-11-09 — P1 evaluator semantics pinned in tests/unit/policy.test.ts (spec §3 glob honesty, §7 oneshot rules): `permissions.json` present-but-broken (JSON/shape/rule) makes the policy UNUSABLE — ok:false denies EVERYTHING (`policy:unusable`), which is deliberately different from ABSENT (no file ⇒ zero rules ⇒ posture governs); "unusable ≠ absent" is itself a pinned test. Glob: Bash `prefix:*` = prefix shorthand and bare `*` spans ANY run (spaces/slashes, case-sensitive, anchored); Read/Edit `*` = one path component, `**` = any depth, `~` is a LITERAL segment (callers expand home first — the evaluator is env-free), leading `./` normalized away. The two string-inexpressible oneshot rules are STRUCTURAL in the evaluator, not entries in permissions.json: resolved git target / install.sh target outside {self, repos, secondaries} ⇒ deny, in secondaries ⇒ ask, unresolvable (null target, relative/~ install target — no cwd in the context, so resolving it would be guessing) ⇒ deny; worst target wins a multi-target call. Verdict order fixed: unusable-deny → structural targets → trusted exemption → install structural → string rules (deny>ask>allow) → posture.
-- 2026-11-09 — P1 trusted-program exemption is a CONTEXT FLAG (`ctx.trusted`) that the P3 shims will set from their PPID/env-marker proof, plus an exported `isTrustedProgram(program, root)` matcher (realpath inside <root>/scripts, .sh regular file, symlinks escaping the dir are NOT trusted — pinned). The exemption lifts STRING rules only: the structural target rules and the unusable-policy deny always still apply (the 2026-11-09 oneshot failure mode is the one class no exemption may reopen). Mentioning a script path in a command never confers trust (the flag is never derived from argv). Base-branch-push-ask is seeded as string rules against THIS stack's base branch `main` (`Bash(*git push* main[ *])`) since dialect cannot name "the base branch"; force variants stay flat-denied and precedence makes deny win, so the ask is pure defense-in-depth per the spec's ask list.
-- 2026-11-09 — P1 review fixes (spec 2026-11-09-multipi-permission-policy.md): (1) the
-  install.sh structural rule now runs BEFORE the trusted-program exemption — a proven
+- 2026-11-09 — P1 trusted-program exemption is a CONTEXT FLAG (`ctx.trusted`) that the P3 shims will set from their PPID/env-marker proof, plus an exported `isTrustedProgram(program, root)` matcher (realpath inside <root>/scripts, .sh regular file, symlinks escaping the dir are NOT trusted — pinned). The exemption lifts STRING rules only: the structural target rules and the unusable-policy deny always still apply (the 2026-11-09 oneshot failure mode is the one class no exemption may reopen). Mentioning a script path in a command never confers trust (the flag is never derived from argv). Base-branch-push-ask is seeded as string rules against THIS stack's base branch `main` (`Bash(*git push* main)` and `Bash(*git push* main *)`) since dialect cannot name "the base branch"; force variants stay flat-denied and precedence makes deny win, so the ask is pure defense-in-depth per the spec's ask list.
+- 2026-11-09 — P1 review fixes, rounds 1+2 (spec 2026-11-09-multipi-permission-policy.md).
+  (1) The install.sh structural rule runs BEFORE the trusted-program exemption: a proven
   trusted `install.sh` with a foreign target is the exact 2026-11-09 oneshot failure class,
   and no exemption may reopen it (spec §7.1); the fixed verdict order in the module header
   is the contract, test-pinned for trusted+foreign (deny) and trusted+secondary (ask).
-  (2) `Bash(prefix:*)` shorthand is anchored to a token start (`^stem(?=\s|$)`) so neither a
-  deny rule over-denies (`sudo:*` no longer matches `sudo install`) nor an allow rule
-  (3) `loadPolicy` splits its roots: `scopeRoot` — the SELF of every repo-scope
-  decision — normalizes a linked-worktree path to the MAIN root via the `.git` file's gitdir
-  pointer (unresolvable input stays as-is, documented), so "self" is the common repository,
-  never one worktree (the inference hole the spec bars); `root` stays the GIVEN checkout,
-  where permissions.json and scripts-identity resolve (a train under gate carries its own
-  seed). gitTargets entries remain the caller's (P3 shim's) obligation to pass as main-repo
-  roots. (4)
-  `realInstalledScript` is the single source of the scripts-dir realpath identity rule
-  (trusted program + install.sh); (5) the seeded ask list gained `Bash(*push* refs/tags/*)`
-  (tag-refspec pushes were escaping the §6 ask class). Alternative for (3): rejecting
-  worktree paths outright — rejected: every devloop child runs IN a worktree, so the
-  normalization is the only useful semantics.
+  (2) `Bash(prefix:*)` shorthand is anchored to a token start (`^stem(?=\s|$)`): a deny
+  prefix cannot over-admit its neighbours (`sudo:*` does not match `sudoku`), and an allow
+  prefix cannot either (`git log:*` does not admit `git logspam`); a `*` inside the stem
+  is an escaped literal (documented in the module header).
+  (3) `loadPolicy` splits its roots: `scopeRoot` — the SELF of every repo-scope decision —
+  normalizes a linked-worktree path to the MAIN root via the `.git` file's gitdir pointer
+  (unresolvable input stays as-is, documented), so "self" is the common repository, never
+  one worktree (the inference hole the spec bars); `root` stays the GIVEN checkout, where
+  permissions.json and scripts-identity resolve (a train under gate carries its own seed).
+  Alternative: rejecting worktree paths outright — rejected, every devloop child runs IN a
+  worktree, so normalization is the only useful semantics.
+  (4) `realInstalledScript` is the single source of the scripts-dir realpath identity rule
+  (trusted program + install.sh). Round-2 additions: (5) `stripDotSlash` no longer turns a
+  dot-relative path into an absolute one (`.//.env` ⇒ `.env`, not `/.env` — a relative
+  target the operator denied must stay denied); (6) `install.sh` with NO declared target
+  is unresolvable ⇒ deny (the real script defaults to the current directory; the one
+  spelling of the oneshot failure that must not fall through to the string rules); (7)
+  `classifyTarget` compares by realpath where the paths exist, so a symlinked view of self
+  is never misclassified as foreign (a false deny would break the loop's own operations).
+  gitTargets entries remain the caller's (P3 shim's) obligation to pass as main-repo roots.
