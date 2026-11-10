@@ -4,6 +4,7 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import * as childreg from "./src/childreg.ts";
 import { registerChildProcessGuards } from "./src/child.ts";
 import { GUARDED_ROLES, GUARD_REFUSAL, initGuard, callTouchesStore } from "./src/guard.ts";
+import { createPolicyEnforcer } from "./src/policyhook.ts";
 import { makeTools, evaluateSettle, formatEditedFile } from "./src/tools.ts";
 
 const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issue labels: open -> dl/in-progress (a child is working) -> dl/in-review (PR open) -> dl/approved (review VERDICT: APPROVE) -> dl/gated (batch gate green) -> dl/merged (squash-merged; then close the issue). dl/blocked marks tickets needing a human decision. Workflow: dispatch role agents with devloop.dispatch (one ticket per implementer; independent tickets in parallel, up to the slot cap); when reports land, review, then gate ALL dl/approved branches together with devloop.gate (in a deliberate merge order), and merge the green train with devloop.merge (same order). Check progress any time with devloop.status. When the operator asks to pause or stop the loop, call devloop.pause (it interrupts all children, writes HANDOFF.md, and comments the tickets), then settle. On a fresh session, step 0 of the devloop skill reads a HANDOFF.md if present and re-dispatches the interrupted children. Stop only when no open ticket is startable (unblocked with closed or in-flight dependencies) — the stop-gate enforces this for you.`;
@@ -11,15 +12,23 @@ const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issu
 /**
  * multipi dev-loop extension.
  *
- * Orchestrator sessions register the devloop.* control-plane tools and two hooks:
+ * Orchestrator sessions register the devloop.* control-plane tools and hooks:
  *  - agent_before_settle: the three-way stop gate (red fast check / dirty tree / startable tickets).
  *  - tool_result: format-on-edit after successful write/edit calls.
+ *  - tool_call: the permission-policy tripwire (spec 2026-11-09-multipi-permission-policy.md
+ *    §4-L1): the pure evaluator, loaded ONCE at extension load (no hot reload), blocks denies
+ *    with the tripwire text, asks with the §6 escalation directive, and audits to the state dir
+ *    (session-start policy hash, one line per non-default verdict; see src/policyhook.ts).
+ *  - session_start: records the session's effective policy hash into the audit log.
  * Child sessions (MULTIPI_CHILD) register NOTHING — except a child of a guarded role with the
  * scenario store on, which registers the guard-only mode: exactly ONE block-capable tool_call
- * hook refusing calls that touch the store (spec §3). No tools, no stop-gate, no UI either way.
+ * hook refusing calls that touch the store (spec §3). No tools, no stop-gate, no policy hook
+ * either way (P2 scope: the policy hook is the ORCHESTRATOR's; children meet the policy in the
+ * P3 shims, where it is meaningful).
  * The factory body stays allocation-light: no timers, no processes, no reads at load time —
- * everything is resolved lazily per invocation from the context's cwd (the guard is the
- * exception by design: it must know the store path BEFORE the first tool call).
+ * everything is resolved lazily per invocation from the context's cwd. Two load-time readers
+ * are the documented exceptions: the guard (it must know the store path BEFORE the first tool
+ * call) and the policy enforcer (§8: the effective policy is session-frozen and hashed).
  */
 export default function devloopExtension(pi: ExtensionAPI): void {
 	// A one-shot role child (spawnPi sets MULTIPI_CHILD) must not load the loop: registering the
@@ -62,6 +71,7 @@ export default function devloopExtension(pi: ExtensionAPI): void {
 	});
 
 	registerAgentVisibility(pi);
+	registerPolicyEnforcer(pi);
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +202,34 @@ function registerStoreGuard(pi: ExtensionAPI, childCwd: string): void {
 		if (!g.storeDir || callTouchesStore(g.storeDir, ctx.cwd, name, input)) {
 			return { block: true, reason: GUARD_REFUSAL };
 		}
+	});
+}
+
+/**
+ * P2 (permission-policy spec §4-L1/§8): the orchestrator's policy hook. The policy loads ONCE
+ * at extension load from the session's working dir (session-frozen: governance edits ride the
+ * ordinary pipeline and become visible on the NEXT session — self-loosening meanwhile shows up
+ * as POLICY DRIFT noise on every non-default verdict). Absent policy ⇒ hook inactive (loud
+ * one-time warning); broken policy ⇒ active, denying everything (fail closed). Children never
+ * reach this seat (the MULTIPI_CHILD branch above returns first).
+ */
+function registerPolicyEnforcer(pi: ExtensionAPI): void {
+	const enforcer = createPolicyEnforcer({ root: process.cwd(), actor: "orchestrator" });
+	const sessionIdOf = (ctx: ExtensionContext): string | null => {
+		try {
+			return ctx.sessionManager?.getSessionId?.() ?? null;
+		} catch {
+			return null;
+		}
+	};
+	pi.on("session_start", async (_e, ctx: ExtensionContext) => {
+		enforcer.noteSession(sessionIdOf(ctx));
+	});
+	pi.on("tool_call", async (event, ctx: ExtensionContext) => {
+		if (!enforcer.active) return; // absent policy: everything passes (the load-time warning said so)
+		const name = (event as { toolName?: string }).toolName ?? "";
+		const input = ((event as { input?: unknown }).input ?? {}) as Record<string, unknown>;
+		return enforcer.onToolCall({ toolName: name, input, sessionId: sessionIdOf(ctx) }) ?? undefined;
 	});
 }
 
