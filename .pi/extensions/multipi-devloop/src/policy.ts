@@ -133,9 +133,9 @@ function globRe(pattern: string): RegExp {
 function stripDotSlash(p: string): string {
 	let s = p;
 	while (s.startsWith("./")) s = s.slice(2);
-	// `.//.env` → `/​.env` would be a silent RELATIVE→ABSOLUTE reclassification; when the
-	// original was dot-relative, collapse the leading slash back into the dot (`.//.env` ⇒ `.env`).
-	if (s.startsWith("/") && p.startsWith(".")) s = "." + s.slice(1);
+	// `.//.env` → `/.env` would be a silent RELATIVE→ABSOLUTE reclassification: the first
+	// `./` strip consumed the original dot, so drop the leftover leading slash (⇒ `.env`).
+	if (s.startsWith("/") && p.startsWith(".")) s = s.slice(1);
 	return s;
 }
 
