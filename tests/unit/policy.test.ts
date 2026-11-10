@@ -11,9 +11,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeFixture } from "../fixtures.ts";
 import {
-	loadPolicy, evaluate, isTrustedProgram,
+	loadPolicy, evaluate, isTrustedProgram, hasTrustedAncestor,
+	formatPolicyDeny, formatPolicyAsk, redactActionSummary, ACTION_SUMMARY_MAX,
 	RULE_POLICY_UNUSABLE, RULE_ONESHOT_FOREIGN, RULE_ONESHOT_SECONDARY, RULE_ONESHOT_UNRESOLVABLE,
 	RULE_ONESHOT_INSTALL_FOREIGN, RULE_ONESHOT_INSTALL_SECONDARY, RULE_TRUSTED_EXEMPT,
+	RULE_BASE_BRANCH, RULE_FORCE_PUSH, RULE_GIT_TAG, RULE_TAG_PUSH,
+	RULE_GH_REPO_DELETE, RULE_GH_PR_MERGE,
 } from "../../extension/src/policy.ts";
 
 /** Scratch git repo; `cfg`/`file` rewrite .devloop.json / add files on disk before loadPolicy. */
@@ -490,4 +493,176 @@ test("loadPolicy from a LINKED WORKTREE: self normalizes to the common repo; fil
 		assert.equal(fromWt.rules.length, 0, "the worktree checkout has no sibling file of its own — absent, not borrowed");
 		assert.equal(evaluate(fromMain, { ...ORCH, command: "sudo reboot" }).verdict, "deny");
 	});
+});
+
+// --- P3 Layer-2 ground truth: refspec scope + dangerous gh classes (spec §4-L2, §5) -------
+// The P3 git/gh shims collect these facts from REAL argv + live git state and pass them in;
+// the strings alone never decide (the Layer-1 honesty limit, spec §9).
+
+test("layer-2: a push onto the base branch ⇒ deny policy:base-branch; trusted identity lifts it", () => {
+	policyFx((root, cfg, file) => {
+		cfg("{}");
+		file("permissions.json", perms());
+		const p = loadPolicy(root);
+		const d = evaluate(p, { ...ORCH, command: "git push origin main", gitTargets: [root], gitPush: { baseRef: true } });
+		assert.equal(d.verdict, "deny");
+		assert.equal(d.ruleId, RULE_BASE_BRANCH);
+		assert.match(d.reason ?? "", /merge-train/); // the reason says WHERE merges travel
+		const t = evaluate(p, { ...ORCH, command: "git push origin main", gitTargets: [root], gitPush: { baseRef: true }, trusted: true });
+		assert.equal(t.verdict, "allow", "a proven trusted program pushing base is the loop's own job");
+		assert.equal(t.ruleId, RULE_TRUSTED_EXEMPT);
+		assert.equal(evaluate(p, { ...ORCH, command: "git push origin main", gitTargets: [root] }).verdict, "allow",
+			"a NON-base push is not flagged by layer-2 at all");
+	});
+});
+
+test("layer-2: a force push ⇒ deny policy:force-push; force beats base when both are present", () => {
+	policyFx((root, cfg, file) => {
+		cfg("{}");
+		file("permissions.json", perms());
+		const p = loadPolicy(root);
+		const d = evaluate(p, { ...ORCH, command: "git push --force origin feat", gitTargets: [root], gitPush: { force: true } });
+		assert.equal(d.verdict, "deny");
+		assert.equal(d.ruleId, RULE_FORCE_PUSH);
+		const both = evaluate(p, { ...ORCH, command: "git push --force origin main", gitTargets: [root], gitPush: { force: true, baseRef: true } });
+		assert.equal(both.verdict, "deny");
+		assert.equal(both.ruleId, RULE_FORCE_PUSH, "deterministic winner when both fire (pinned order)");
+		const t = evaluate(p, { ...ORCH, command: "git push --force origin feat", gitTargets: [root], gitPush: { force: true }, trusted: true });
+		assert.equal(t.verdict, "allow", "the §5 exemption lifts exactly the force/base class");
+	});
+});
+
+test("layer-2: tag mutations ask (policy:git-tag, policy:tag-push) — the §6 ask list, trust-lifted", () => {
+	policyFx((root, cfg, file) => {
+		cfg("{}");
+		file("permissions.json", perms());
+		const p = loadPolicy(root);
+		const tag = evaluate(p, { ...ORCH, command: "git tag v1", gitTargets: [root], gitTagMutation: true });
+		assert.equal(tag.verdict, "ask");
+		assert.equal(tag.ruleId, RULE_GIT_TAG);
+		const tpush = evaluate(p, { ...ORCH, command: "git push origin --tags", gitTargets: [root], gitPush: { tags: true } });
+		assert.equal(tpush.verdict, "ask");
+		assert.equal(tpush.ruleId, RULE_TAG_PUSH);
+		assert.equal(evaluate(p, { ...ORCH, command: "git tag v1", gitTargets: [root], gitTagMutation: true, trusted: true }).verdict, "allow",
+			"a reviewed script tagging is §5-exempt");
+		assert.equal(evaluate(p, { ...ORCH, command: "git tag -l", gitTargets: [root] }).verdict, "allow",
+			"tag LISTING is not a mutation (the shim never passes gitTagMutation for it)");
+	});
+});
+
+test("layer-2: gh repo delete is a dangerous class — denied even for a trusted program; gh pr merge asks, trust-lifted", () => {
+	policyFx((root, cfg, file) => {
+		cfg("{}");
+		file("permissions.json", perms());
+		const p = loadPolicy(root);
+		const del = evaluate(p, { ...ORCH, command: "gh repo delete o/r", ghAction: "repo-delete" });
+		assert.equal(del.verdict, "deny");
+		assert.equal(del.ruleId, RULE_GH_REPO_DELETE);
+		const delT = evaluate(p, { ...ORCH, command: "gh repo delete o/r", ghAction: "repo-delete", trusted: true });
+		assert.equal(delT.verdict, "deny", "repo delete is NEVER trust-exempt (spec §4-L2 dangerous class)");
+		assert.equal(delT.ruleId, RULE_GH_REPO_DELETE);
+		const merge = evaluate(p, { ...ORCH, command: "gh pr merge 12", ghAction: "pr-merge" });
+		assert.equal(merge.verdict, "ask");
+		assert.equal(merge.ruleId, RULE_GH_PR_MERGE);
+		assert.equal(evaluate(p, { ...ORCH, command: "gh pr merge 12", ghAction: "pr-merge", trusted: true }).verdict, "allow",
+			"the ask list scopes pr merge to OUTSIDE a trusted program");
+	});
+});
+
+test("layer-2 ordering: repo-scope rules outrank the refspec rules; deny outranks ask within layer-2", () => {
+	policyFx((root, cfg, file) => {
+		cfg(JSON.stringify({ policy: { secondaries: ["/somewhere/secondary"] } }));
+		file("permissions.json", perms());
+		const p = loadPolicy(root);
+		const foreign = evaluate(p, { ...ORCH, command: "git push --force origin main", gitTargets: ["/foreign"], gitPush: { force: true, baseRef: true } });
+		assert.equal(foreign.ruleId, RULE_ONESHOT_FOREIGN, "a foreign target denies BEFORE any refspec fact is seen");
+		assert.equal(evaluate(p, { ...ORCH, command: "git push origin main", gitTargets: ["/somewhere/secondary"], gitPush: { baseRef: true } }).ruleId,
+			RULE_ONESHOT_SECONDARY, "the secondary-ask precedes the base-branch deny (target rules run first)");
+		const both = evaluate(p, { ...ORCH, command: "git push origin main", gitTargets: [root], gitPush: { baseRef: true, tags: true } });
+		assert.equal(both.verdict, "deny");
+		assert.equal(both.ruleId, RULE_BASE_BRANCH, "within layer-2 the deny outranks the tag ask");
+		const broken = { ...p, ok: false, error: "planted" };
+		assert.equal(evaluate(broken, { ...ORCH, command: "git push", gitPush: { force: true } }).ruleId, RULE_POLICY_UNUSABLE);
+	});
+});
+
+test("layer-2 facts are inert without the shim: absent gitPush/ghAction fields change no verdict", () => {
+	policyFx((root, cfg, file) => {
+		cfg("{}");
+		file("permissions.json", perms());
+		const p = loadPolicy(root);
+		assert.equal(evaluate(p, { ...ORCH, command: "git push --force origin main" }).verdict, "allow",
+			"the hook layer NEVER supplies refspec facts — a plain command line decides by string rules/posture only");
+	});
+});
+
+// --- P3 trusted-program ANCESTRY: the shim's identity proof (spec §5) -----------------------
+
+test("hasTrustedAncestor: identity = realpath under this repo's checkout scripts/ (.sh only, no escape)", () => {
+	policyFx((root, cfg, file) => {
+		cfg("{}");
+		file("scripts/train.sh", "#!/usr/bin/env bash\ntrue\n");
+		file("scripts/lib/helper.sh", "# lib helper\n");
+		file("scripts/policy-shims/git", "#!/usr/bin/env bash\ntrue\n"); // NOT .sh ⇒ never trusted
+		const outside = mkdtempSync(path.join(tmpdir(), "np-p3-outside-"));
+		writeFileSync(path.join(outside, "evil.sh"), "x\n");
+		symlinkSync(path.join(outside, "evil.sh"), path.join(root, "scripts", "link.sh"));
+		try {
+			assert.equal(hasTrustedAncestor([path.join(root, "scripts", "train.sh")], root), true, "directly under scripts/");
+			assert.equal(hasTrustedAncestor([path.join(root, "scripts", "lib", "helper.sh")], root), true, "nested scripts/lib");
+			assert.equal(hasTrustedAncestor(["scripts/train.sh"], root), false, "relative paths are not provenance (the shim passes absolutes)");
+			assert.equal(hasTrustedAncestor([path.join(root, "scripts", "policy-shims", "git")], root), false, "the shims themselves are not loop programs");
+			assert.equal(hasTrustedAncestor([path.join(root, "scripts", "link.sh")], root), false, "a symlink escaping the scripts dir is not trusted");
+			assert.equal(hasTrustedAncestor([path.join(outside, "evil.sh")], root), false, "a foreign script is not trusted");
+			assert.equal(hasTrustedAncestor([path.join(root, "scripts", "ghost.sh")], root), false, "a missing file is not trusted");
+			assert.equal(hasTrustedAncestor([], root), false, "no candidates, no trust");
+			assert.equal(hasTrustedAncestor(["~", "~/x.sh", "a b.sh"], root), false, "unresolvable spellings are not trusted");
+			// A LINKED WORKTREE of this repo: its scripts/ IS this repo's scripts dir.
+			const wt = path.join(path.dirname(root), "p3-wt");
+			execFileSync("git", ["-C", root, "worktree", "add", "-q", "--detach", wt], { stdio: "pipe" });
+			assert.equal(hasTrustedAncestor([path.join(wt, "scripts", "train.sh")], root), true, "worktree checkout of the same repo");
+			// A DIFFERENT repo with its own scripts/: never this repo's trusted program.
+			const other = path.join(path.dirname(root), "p3-other");
+			execFileSync("git", ["init", "-q", other], { stdio: "pipe" });
+			mkdirSync(path.join(other, "scripts"), { recursive: true });
+			writeFileSync(path.join(other, "scripts", "train.sh"), "#!/usr/bin/env bash\ntrue\n");
+			assert.equal(hasTrustedAncestor([path.join(other, "scripts", "train.sh")], root), false, "a foreign repo's scripts dir is not trusted");
+		} finally {
+			try { execFileSync("rm", ["-rf", outside], { stdio: "ignore" }); } catch { /* */ }
+		}
+	});
+});
+
+// --- the shared policy line + log hygiene (the shim emits the HOOK's exact shapes) ---------
+
+test("formatPolicyDeny/Ask: the pinned hook shapes the shim must reuse verbatim", () => {
+	assert.equal(
+		formatPolicyDeny({ verdict: "deny", ruleId: "Bash(sudo:*)", reason: "denied by rule: Bash(sudo:*)" }),
+		"DENIED Bash(sudo:*): denied by rule: Bash(sudo:*)",
+	);
+	assert.equal(
+		formatPolicyDeny({ verdict: "deny", reason: "no rule id" }),
+		"DENIED policy:unusable: no rule id",
+		"a missing rule id renders under the fail-closed id",
+	);
+	assert.equal(
+		formatPolicyAsk({ verdict: "ask", ruleId: "gh:pr-merge" }, "bash: gh pr merge 12"),
+		"ASK gh:pr-merge: bash: gh pr merge 12. Operator approval required: run 'multipi-approve gh:pr-merge' in your own shell, then retry.",
+	);
+	assert.match(
+		formatPolicyAsk({ verdict: "ask" }, "bash: x"),
+		/^ASK posture:ask: bash: x\. Operator approval required: run 'multipi-approve posture:ask'/,
+	);
+});
+
+test("redactActionSummary: token-dir paths scrubbed in every spelling, summary bounded", () => {
+	assert.equal(redactActionSummary("bash: git push \"~/.multipi/x/dev-loop-tokens/a.tok\""),
+		"bash: git push \"<token-dir>\"");
+	assert.equal(redactActionSummary("bash: cat $HOME/.multipi/x/dev-loop-tokens/b.tok"), "bash: cat <token-dir>");
+	assert.equal(redactActionSummary("bash: echo ${HOME}/.multipi/x/dev-loop-tokens"), "bash: echo <token-dir>");
+	assert.equal(redactActionSummary("bash: git status"), "bash: git status", "ordinary paths travel verbatim");
+	const long = "bash: " + "a".repeat(500);
+	const out = redactActionSummary(long);
+	assert.equal(out.length, ACTION_SUMMARY_MAX + 1, "bounded with the ellipsis (same contract as the hook)");
+	assert.ok(out.endsWith("…"));
 });
