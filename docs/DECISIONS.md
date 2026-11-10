@@ -273,3 +273,16 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
   that worktree (fatal gitfile), i.e. the forge is self-destructing, not a silent
   privilege gain. Unit pins: real worktree earns, nonexistent-admin forge fails,
   stolen-real-admin forge fails the round-trip.
+- 2026-11-10 — P3 review round-5 fixes. (1) gh verb derivation now skips global flags
+  INTERLEAVED between noun and verb (`gh pr -R o/r merge 12` is the same call as
+  `gh pr merge 12 -R o/r`; verified against the real gh) — an interleaved spelling must
+  not bypass the `gh:pr-merge` ask or the `gh:repo-delete` deny; pinned in the smoke
+  matrix (the real gh must never see the interleaved form). (2) shellcheck target back to
+  green (the redir string-capture was an SC2124/SC2086 regression; the array now expands
+  in the guarded-quoting form that is clean under set -u AND shellcheck). (3) Named
+  residual, added to the round-4 list: value-consuming short flags on a push
+  (`-c push.default=current origin feat`) — their VALUE is read as a positional, which the
+  destination scanner may class as `dest_unknown` ⇒ an over-DENY of a legal spelling
+  (fail-safe direction, rare in practice; special-casing `-c`/`-o` value semantics was
+  rejected as parser surface for a one-word false alarm). (4) The smoke audit-hygiene
+  check now uses an `if python3 … heredoc` form (no bare `$?` after a heredoc).

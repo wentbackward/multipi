@@ -44,7 +44,22 @@ if [ "$i" -ge "${#args[@]}" ] || [ "$((i + 1))" -ge "${#args[@]}" ]; then
   exec "$REAL_GH" "$@"                       # no noun+verb (bare `gh`, `gh --version`, …)
 fi
 noun=${args[$i]}
-verb=${args[$i + 1]}
+# Verb derivation must SKIP global flags interleaved between noun and verb (P3 review
+# round 5): `gh pr -R o/r merge 12` is the SAME call as `gh pr merge 12 -R o/r` — one
+# spelling must not bypass the classification (verified against the real gh).
+vi=$((i + 1))
+while [ "$vi" -lt "${#args[@]}" ]; do
+  va=${args[$vi]}
+  case "$va" in
+    -R | --repo | --hostname) [ "$((vi + 1))" -lt "${#args[@]}" ] || break; vi=$((vi + 2)) ;;
+    -q | -v | -h | --help | --version | -c | --color | --no-color | --api-version) vi=$((vi + 1)) ;;
+    --*=*) vi=$((vi + 1)) ;;
+    -*) break ;;  # unknown flag: stop skipping, it IS the verb position (classified or not)
+    *) break ;;   # the verb
+  esac
+done
+[ "$vi" -ge "${#args[@]}" ] && exec "$REAL_GH" "$@"   # noun with no verb: not a classified action
+verb=${args[$vi]}
 # A `--help`/`--version` ANYWHERE in the remainder is documentation, not an action:
 # `gh repo delete --help` must not classify as the delete (harmless over-deny closed).
 h=0

@@ -101,12 +101,13 @@ function main(): void {
 		}
 	};
 
-	// Load semantics mirror the P2 hook: no .devloop.json ⇒ the loop itself is non-functional
-	// here ⇒ INACTIVE (pass through); a missing permissions.json ⇒ not armed ⇒ INACTIVE.
-	// A PRESENT-BUT-BROKEN policy file is NOT inactive: it falls through to the unusable-deny
-	// (a corrupted config is agent-writable self-disarm of Layer-2 and must not pass everything
-	// through — P3 review round 2; loadConfig returns null for missing AND unparseable, so the
-	// distinction is an existsSync on the version-controlled config at the acting root).
+	// Load semantics mirror the P2 hook — the three-way armed/broken/inactive table:
+	//   .devloop.json MISSING                ⇒ INACTIVE (the loop itself is not installed here)
+	//   permissions.json missing, config OK  ⇒ INACTIVE (policy deliberately not armed)
+	//   ANY policy file present-but-broken   ⇒ DENY policy:unusable (fail closed: a corrupt
+	//   config is agent-writable self-disarm and must not pass everything through).
+	// loadConfig returns null for missing AND unparseable, so the first row is told apart
+	// with an existsSync on the version-controlled config at the acting root.
 	const policy = loadPolicy(a.root);
 	if (!policy.ok && policy.error?.startsWith(".devloop.json")) {
 		let present = false;

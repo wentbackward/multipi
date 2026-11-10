@@ -2579,6 +2579,13 @@ echo "$out" | grep -qF "ASK gh:pr-merge: pr merge 12. Operator approval required
   pass "P3 smoke: the pr-merge ask carries the exact §6 directive" || fail "P3 smoke: the pr-merge ask line is wrong: $out"
 expect "P3 smoke: the pr-merge ask is audited as verdict ask" "1" \
   "$(p3count '\"ruleId\":\"gh:pr-merge\",\"verdict\":\"ask\"')"
+n0_il=$(grep -c 'merge 12$' "$GH_CALLS" 2>/dev/null); n0_il=${n0_il:-0}
+out=$(p3gh pr -R o/r merge 12 2>&1); rc=$?
+expect "P3 smoke: the INTERLEAVED spelling 'gh pr -R o/r merge 12' is blocked too" "126" "$rc"
+echo "$out" | grep -qF "ASK gh:pr-merge:" && pass "P3 smoke: the interleaved spelling carries the same ask" ||
+  fail "P3 smoke: the interleaved pr-merge bypassed the class: $out"
+n1_il=$(grep -c 'merge 12$' "$GH_CALLS" 2>/dev/null); n1_il=${n1_il:-0}
+expect "P3 smoke: the real gh never saw the interleaved merge" "$n0_il" "$n1_il"
 
 # 10. passthrough: the real git receives the argv UNTOUCHED (a logging stand-in for it,
 #     first non-shim dir on PATH; it still execs the system git so the work happens).
@@ -2649,7 +2656,7 @@ echo "$out" | grep -q "cannot locate the real git" && pass "P3 smoke: the 127 re
   fail "P3 smoke: the 127 refusal line is wrong: $out"
 
 # 15. audit hygiene: every shim verdict line carries the hook's seven fields.
-python3 - "$P3_AUDIT" <<'PYEOF'
+if python3 - "$P3_AUDIT" <<'PYEOF'
 import json, sys
 bad = 0
 for line in open(sys.argv[1]):
@@ -2659,8 +2666,11 @@ for line in open(sys.argv[1]):
         bad += 1
 sys.exit(1 if bad else 0)
 PYEOF
-[ $? -eq 0 ] && pass "P3 smoke: every shim audit line carries the hook's seven fields (layer=shim, session=-)" ||
+then
+  pass "P3 smoke: every shim audit line carries the hook's seven fields (layer=shim, session=-)"
+else
   fail "P3 smoke: a shim audit line is malformed"
+fi
 
 # Teardown: leave the fixture the way the prior sections left it.
 mkcfg ''
