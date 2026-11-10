@@ -2495,6 +2495,22 @@ out=$(p3git push origin main: 2>&1); rc=$?
 expect "P3 smoke: deleting the base ref (main:) is denied as a base write" "126" "$rc"
 echo "$out" | grep -qF "DENIED policy:base-branch:" || fail "P3 smoke: the base-ref delete was not caught: $out"
 
+# 4b. spelling-variant holes (P3 review round 2): attached/clustered short flags must
+#     not bypass a rule class — `-fu` is the SAME call as `-f -u`, and `-Bname` is the
+#     canonical attached spelling of the ref-writing `-B name`.
+out=$(p3git push -fu origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: the -fu cluster force push is denied (same call as -f -u)" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:force-push:" && pass "P3 smoke: the -fu cluster carries the force rule id" ||
+  fail "P3 smoke: the -fu cluster bypassed force detection: $out"
+cd "$work/p3-foreign"
+out=$(PATH="$PSH:$PATH" git checkout -Bp3hole 2>&1); rc=$?
+cd "$work/project"
+expect "P3 smoke: the attached-form checkout -Bname in a foreign repo is denied" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: -Bname is classified as a ref write" ||
+  fail "P3 smoke: -Bname bypassed the ref-write class: $out"
+out=$(p3git tag -n5 2>&1); rc=$?
+expect "P3 smoke: the list spelling 'git tag -n5' is not classified as a tag mutation" "0" "$rc"
+
 # 6. the §5 identity exemption: a loop script under the installed scripts/ pushing base
 #    passes clean (this is merge-train's exact identity rule; the fixture script stands in
 #    for merge-train.sh, which carries the same parent-chain shape in production).
@@ -2582,6 +2598,17 @@ echo "$out" | grep -qF "DENIED policy:unusable:" && pass "P3 smoke: the broken-p
 cat >permissions.json <<'EOF'
 {"permissions":{"deny":[],"ask":[],"allow":[]}}
 EOF
+
+# 13b. a PRESENT-BUT-CORRUPT .devloop.json must not self-disarm Layer-2 (loadConfig cannot
+#      tell missing from unparseable; a corrupt config is agent-writable, so the shim
+#      distinguishes with existsSync and falls to the unusable deny).
+cp .devloop.json .devloop.json.arm
+echo '{broken' >.devloop.json
+out=$(p3git commit -q --allow-empty -m x 2>&1); rc=$?
+expect "P3 smoke: a corrupt .devloop.json does not disarm the shims" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:unusable:" && pass "P3 smoke: the corrupt-config deny names policy:unusable" ||
+  fail "P3 smoke: the corrupt-config deny line is wrong: $out"
+mv .devloop.json.arm .devloop.json
 
 # 14. a broken install (no git anywhere outside the shim dir) refuses with 127, never runs.
 mkdir -p "$work/p3-nogit"

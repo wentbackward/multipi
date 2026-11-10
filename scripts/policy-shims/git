@@ -60,11 +60,25 @@ case "$sub" in
   checkout | switch)
     # -B/-C re-WRITE a branch ref (the ticket's "checkout -B-style ref writes"); a plain
     # checkout and `-b` (create-only) are not ref writes (spec §4) and pass through.
+    # All THREE spellings count: standalone (`-B name`), attached short form (`-Bname`),
+    # and any short cluster containing the letter — over-consulting is harmless (a benign
+    # self op evaluates to ALLOW), under-consulting is the inverted fail direction.
     flag=0
-    [ "$sub" = "checkout" ] && flag="-B" || flag="-C"
+    ch="B"
+    [ "$sub" = "checkout" ] || ch="C"
     j=$((i + 1))
     while [ "$j" -lt "${#args[@]}" ]; do
-      [ "${args[$j]}" = "$flag" ] && { exec_policy_check=1; break; }
+      a="${args[$j]}"
+      case "$a" in
+        "$flag" | "$flag"*) exec_policy_check=1; break ;;
+        -?*)
+          rest="${a#-}"
+          case "$rest" in
+            --*) : ;;                     # long flag: never a short cluster
+            *"$ch"*) exec_policy_check=1; break ;;
+          esac
+          ;;
+      esac
       j=$((j + 1))
     done
     [ "${exec_policy_check:-0}" = 1 ] || exec "$REAL_GIT" "$@"
@@ -76,7 +90,7 @@ case "$sub" in
     j=$((i + 1)); listish=0; has_pos=0
     while [ "$j" -lt "${#args[@]}" ]; do
       case "${args[$j]}" in
-        -l | --list | -n | --points-at | -v | --verify-tags) listish=1 ;;
+        -l | --list | -n | -n[0-9]* | --points-at | --points-at=* | -v | --verify-tags) listish=1 ;;
         -*) : ;;
         *) has_pos=1 ;;
       esac
@@ -95,6 +109,13 @@ case "$sub" in
         --mirror) force=1; tags=1 ;;
         --dry-run) exec "$REAL_GIT" "$@" ;;   # a dry-run executes nothing: not a mutation
         --repo=* | --receive-pack=*) dest_unknown=1 ;;
+        -?*[-a-zA-Z]*)
+          # Short-flag CLUSTER: `-fu`, `-tf`, … parse char-by-char (git's grammar).
+          # `-f -u origin` and `-fu origin` are the SAME call: one spelling must not bypass.
+          for ch2 in $(printf '%s' "${args[$j]}" | tail -c +2 | fold -w1); do
+            case "$ch2" in f) force=1 ;; t) tags=1 ;; esac
+          done
+          ;;
         -*) : ;;
         *) positionals+=("${args[$j]}") ;;
       esac
@@ -143,7 +164,12 @@ case "$sub" in
         elif [ "$dst" = "HEAD" ] && [ "$cur" = "$SIM_BASE_BRANCH" ]; then
           base=1                            # HEAD resolves to the checked-out base branch
         elif [[ "$dst" == *heads/* ]] && [[ "$dst" == *"*"* || "$dst" == *"?"* ]]; then
-          base=1                            # a WILDCARD destination that could reach the base ref (a literal refs/heads/topic does not)
+          # A WILDCARD destination that could reach the base ref (a literal refs/heads/topic
+          # does not). Known over-deny (intentional, fail-safe direction): a literal topic
+          # whose name merely CONTAINS "heads/" (e.g. xheads/foo) is also treated as a
+          # wildcard destination — rarer than a base-reaching glob, and the cost is an ask
+          # line, not data.
+          base=1
         fi
       done
     fi
