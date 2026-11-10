@@ -1,6 +1,7 @@
 # multipi permission policy (draft for operator review)
 
-Date: 2026-11-09 · Status: DRAFT — not a contract until merged as spec
+Date: 2026-11-09 · Status: CONFIRMED by operator 2026-11-09 ("go for it" — proposed ask list,
+`policy.repos: ["self"]`, 10-min token TTL accepted as drafted)
 References: `docs/permission-example.json` (operator's command sample),
 `docs/permissions.local.example.json` (original claude-dev-loop local permissions),
 incident: 2026-11-09 unauthorized upgrade of a foreign repo (the "oneshot" incident).
@@ -156,7 +157,7 @@ An `ask` verdict blocks with a structured directive:
   self-approved-looking event is reviewable. The escalation-to-user
   container remains the ironclad option.
 
-**Ask list (proposed, operator to confirm):**
+**Ask list (confirmed 2026-11-09):**
 - `cleanup-worktrees.sh --apply` (the original file's exact precedent);
 - `git tag` (create/delete) and `git push --tags` / tag refspecs;
 - `gh pr merge` outside a trusted program;
@@ -252,6 +253,11 @@ driven by a fixture operator CLI.
 | # | Ticket | Depends on |
 |---|--------|-----------|
 | P1 | policy config + `policy.ts` evaluator + unit pins | — |
+
+**Configuration layout (confirmed):** loop policy knobs (`posture`, `repos`, `secondaries`,
+`token_ttl_minutes`) live in the `policy` block of `.devloop.json`; the rule arrays
+(`deny`/`allow`/`ask`, operator's dialect) live in a sibling `permissions.json` next to
+`.devloop.json` — seeded from the two reference samples, adapted to this stack's paths.
 | P2 | hook wiring (orchestrator) + audit log + policy hash | P1 |
 | P3 | git/gh shims + repo-scope/base-branch/force + trusted-program exemption | P1 (uses evaluator) |
 | P4 | doctor policy section + `policy.sh` (show/explain/audit) | P2, P3 |
