@@ -15,7 +15,6 @@
 # shim_dir is the CALLER's variable (dot-sourced context): SC2154 is suppressed file-wide.
 # shellcheck disable=SC2154
 shim_init() {
-  : "$1"                                     # "git" | "gh" — kept for symmetry with the caller
   SIM_SHIM_DIR=${shim_dir}
   _SIM_DECIDE_EXTRA=()                       # further driver flags (shim_decide)
   SIM_INSTALL_ROOT=$(cd "$SIM_SHIM_DIR/../.." && pwd -P)

@@ -3,7 +3,7 @@
 // repository from rev-parse, refspec/force/tag facts from the real argv, the ancestor
 // script list from /proc — and hand it here as argv. This driver loads the SAME policy and
 // runs the SAME pure evaluator (policy.ts) the P2 hook uses, appends the audit line
-// (layer=shim, the hook's exact seven-field shape), and prints the verdict:
+// (layer=shim, the hook's seven fields plus the layer key — eight total), and prints the verdict:
 //
 //   ALLOW                      → the shim execs the real binary with argv untouched
 //   BLOCK<TAB>LINE             → the shim prints LINE verbatim to stderr and exits 126
@@ -13,7 +13,7 @@
 // CLOSED (deny policy:shim-error) on that. Dependency rule: node builtins + the pure
 // modules only — no @earendil-works/* imports, so plain `node policydriver.ts` runs it
 // (Node 24 type stripping; no build step).
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { loadConfig, resolvePaths } from "./config.ts";
 import {
@@ -103,11 +103,19 @@ function main(): void {
 
 	// Load semantics mirror the P2 hook: no .devloop.json ⇒ the loop itself is non-functional
 	// here ⇒ INACTIVE (pass through); a missing permissions.json ⇒ not armed ⇒ INACTIVE.
-	// A PRESENT-BUT-BROKEN permissions.json is NOT inactive: the evaluator denies everything.
+	// A PRESENT-BUT-BROKEN policy file is NOT inactive: it falls through to the unusable-deny
+	// (a corrupted config is agent-writable self-disarm of Layer-2 and must not pass everything
+	// through — P3 review round 2; loadConfig returns null for missing AND unparseable, so the
+	// distinction is an existsSync on the version-controlled config at the acting root).
 	const policy = loadPolicy(a.root);
 	if (!policy.ok && policy.error?.startsWith(".devloop.json")) {
-		console.log(`INACTIVE\n${policy.error}`);
-		return;
+		let present = false;
+		try { present = existsSync(path.join(a.root, ".devloop.json")); } catch { present = false; }
+		if (!present) {
+			console.log(`INACTIVE\n${policy.error}`);
+			return;
+		}
+		// present-but-unparseable: fall through to the unusable deny below.
 	}
 	if (policy.ok && !policy.hasPermissionsFile) {
 		console.log("INACTIVE\nno permissions.json next to .devloop.json — policy not armed");

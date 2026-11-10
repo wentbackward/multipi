@@ -237,3 +237,20 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
   residual of the enumerated-set design (flipping to a read-only allowlist would change
   every git call's cost profile; the tripwire layer and P5's zero-deny acceptance are the
   compensations, and the residual is named here so it is a decision, not a surprise).
+- 2026-11-10 — P3 review round-3 fixes + named residual. (1) Restored the
+  checkout/switch standalone+attached arm (`flag=-$ch`; the round-2 refactor left `flag=0`,
+  which turned the arm into a positional-argument matcher — an over-deny on branches
+  spelled with a leading 0, demonstrated by the reviewer). (2) The long-flag exclusion now
+  matches the RAW argument (`--*)` before any hyphen stripping, replacing a dead arm.
+  (3) shim_init drops its unused first parameter. (4) Named residual, §5 trusted identity:
+  the exemption is a MECHANICAL realpath rule ("a .sh regular file under a checkout of this
+  repo's scripts/"), so an agent-written, UNTRACKED scripts/foo.sh earns the §5 exemption the
+  moment it exists on disk — no review of foo.sh has happened. The spec's letter says exactly
+  this ("matched by realpath"), and the structural denies (foreign-repo, unresolvable,
+  repo-delete) remain non-exempt regardless; the residual is the loop's own working
+  directory trusting its own scripts/ tree, and it is pinned here rather than silently
+  widened. The compensation is the audit log: a trusted exemption is a logged
+  allow-by-rule line (`trusted:exemption`), so unreviewed-script abuse is visible
+  after the fact. Alternatives considered and rejected for this round: requiring the
+  candidate to be tracked at HEAD (changes the spec's mechanical rule mid-flight; defer to
+  a governance ticket if the residual proves hot).

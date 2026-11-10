@@ -3,7 +3,7 @@
 // repository from rev-parse, refspec/force/tag facts from the real argv, the ancestor
 // script list from /proc — and hand it here as argv. This driver loads the SAME policy and
 // runs the SAME pure evaluator (policy.ts) the P2 hook uses, appends the audit line
-// (layer=shim, the hook's exact seven-field shape), and prints the verdict:
+// (layer=shim, the hook's seven fields plus the layer key — eight total), and prints the verdict:
 //
 //   ALLOW                      → the shim execs the real binary with argv untouched
 //   BLOCK<TAB>LINE             → the shim prints LINE verbatim to stderr and exits 126

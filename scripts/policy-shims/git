@@ -21,7 +21,7 @@ set -u
 shim_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=policy-shims/lib/policyshim.sh
 . "$shim_dir/lib/policyshim.sh"
-shim_init git
+shim_init
 
 REAL_GIT=$(shim_find_real git) || {
   echo "multipi policy: cannot locate the real git outside the shim dir ($shim_dir) — broken install, refusing" >&2
@@ -66,15 +66,16 @@ case "$sub" in
     flag=0
     ch="B"
     [ "$sub" = "checkout" ] || ch="C"
+    flag=-"$ch"
     j=$((i + 1))
     while [ "$j" -lt "${#args[@]}" ]; do
       a="${args[$j]}"
       case "$a" in
         "$flag" | "$flag"*) exec_policy_check=1; break ;;
-        -?*)
-          rest="${a#-}"
-          case "$rest" in
-            --*) : ;;                     # long flag: never a short cluster
+        --*) : ;;                        # long flag: never a short cluster (checked RAW — after
+                                         # stripping one hyphen, '--x' looks like '-x')
+        -?**)
+          case "${a#-}" in
             *"$ch"*) exec_policy_check=1; break ;;
           esac
           ;;

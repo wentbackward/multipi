@@ -19,7 +19,7 @@ set -u
 shim_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=policy-shims/lib/policyshim.sh
 . "$shim_dir/lib/policyshim.sh"
-shim_init gh
+shim_init
 
 REAL_GH=$(shim_find_real gh) || {
   echo "multipi policy: cannot locate the real gh outside the shim dir ($shim_dir) — broken install, refusing" >&2
