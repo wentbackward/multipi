@@ -36,6 +36,8 @@ export interface PolicyRule {
 	tool: string;
 	/** Which array the rule came from — its verdict class. */
 	cls: "deny" | "ask" | "allow";
+	/** The compiled matcher's pattern — the RAW rule pattern for bash, the `./`-normalized
+	 *  form for Read/Edit (compileRule); `id` holds the raw string either way. */
 	pattern: string;
 	id: string;
 	re: RegExp;
@@ -145,7 +147,11 @@ function compileRule(raw: string, cls: "deny" | "ask" | "allow"): PolicyRule {
 	const [, tool, pattern] = m;
 	if (!pattern) throw new Error(`rule ${JSON.stringify(raw)} has an empty pattern`);
 	const t = tool.toLowerCase(); // bash/read/edit bind to tools; any other family is inert bookkeeping
-	const pat = stripDotSlash(pattern); // normalized once, for BOTH the stored field and the matcher
+	// `./` normalization is a PATH concept (pinned contract: Read/Edit only). Bash patterns
+	// are command prefixes where `./` is a LITERAL the shell executes: normalizing it would
+	// make a `Bash(./evil.sh *)` deny miss the runnable spelling and hit a dead one (fail-open),
+	// and silently disable every seeded `Bash(./scripts/…)` allow rule.
+	const pat = t === "bash" ? pattern : stripDotSlash(pattern);
 	return { tool: t, cls, pattern: pat, id: raw, re: t === "bash" ? bashRe(pat) : globRe(pat) };
 }
 
@@ -154,7 +160,9 @@ function compileRule(raw: string, cls: "deny" | "ask" | "allow"): PolicyRule {
  * `.git` entry: a directory ⇒ already the common root; a file ⇒ the worktree's `gitdir:`
  * pointer, whose third ancestor is the main root. Unresolvable input is returned as-is
  * (the caller's semantics, documented — never a silent re-scope to the wrong repo).
- */
+ * Cross-reference: config.ts's `mainRoot` resolves the same notion via `git rev-parse`
+ * (shells out); this one is fs-only. If the two ever disagree, that is a bug to fix in one
+ * place — the evaluator's scopeRoot and the config's main root must not drift. */
 function mainRootOf(p: string): string {
 	try {
 		const ge = path.join(p, ".git");

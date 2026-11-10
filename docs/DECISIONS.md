@@ -170,3 +170,8 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
   `classifyTarget` compares by realpath where the paths exist, so a symlinked view of self
   is never misclassified as foreign (a false deny would break the loop's own operations).
   gitTargets entries remain the caller's (P3 shim's) obligation to pass as main-repo roots.
+  (8) `compileRule` applies `./` normalization to Read/Edit patterns ONLY: bash patterns are
+  command prefixes in which `./` is a literal the shell executes — normalizing it inverted
+  `Bash(./evil.sh *)` denies (missed the runnable spelling, tripped a dead one: fail-open on
+  a deny rule) and silently disabled the seeded `Bash(./scripts/…)` allow rules. Contract and
+  pins updated accordingly.

@@ -191,6 +191,24 @@ test("Read/Edit rules: `*` is ONE path component, `**` is any depth, `~` is a li
 	});
 });
 
+test("Bash rules keep `./` LITERAL (path normalization is a Read/Edit concept): a `./`-spelled deny trips the runnable spelling only", () => {
+	policyFx((root, cfg, file) => {
+		cfg("{}");
+		file("permissions.json", perms(
+			["Bash(./evil-script.sh *)"],
+			["Bash(./scripts/ok.sh *)"],
+		));
+		const p = loadPolicy(root);
+		const ev = (cmd: string) => evaluate(p, { ...ORCH, command: cmd });
+		assert.equal(ev("./evil-script.sh --now").verdict, "deny", "the runnable spelling is the one the deny rule exists to trip");
+		assert.equal(ev("./evil-script.sh --now").ruleId, "Bash(./evil-script.sh *)");
+		assert.equal(ev("evil-script.sh --now").verdict, "allow", "the non-`./` spelling is a different command prefix — not this rule");
+		const ok = ev("./scripts/ok.sh --x");
+		assert.equal(ok.verdict, "allow");
+		assert.equal(ok.ruleId, "Bash(./scripts/ok.sh *)", "seeded ./scripts allow rules must match real invocations (carry a ruleId)");
+	});
+});
+
 test("Read/Edit rules: leading `./` is normalized away (`.env` matches `Read(./.env)`; `.env.local` matches `./.env.*`; `.envrc` does not)", () => {
 	policyFx((root, cfg, file) => {
 		cfg("{}");
