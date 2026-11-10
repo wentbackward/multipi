@@ -16,7 +16,7 @@ specified in `docs/superpowers/specs/2026-11-01-multipi-dark-factory.md`. Implem
 - **TypeScript**: erasable-only syntax (no enums/namespaces/parameter properties), strict,
   `tsc --noEmit` (Node 24 type stripping runs the tests; there is no build step).
 - **Dependency rule**: `config.ts` / `state.ts` / `brief.ts` / `stopgate.ts` / `formatter.ts` /
-  `gate.ts` / `merge.ts` / `issues.ts` are pure-node (testable without pi). Only `tools.ts` and
+  `gate.ts` / `merge.ts` / `issues.ts` / `policy.ts` are pure-node (testable without pi). Only `tools.ts` and
   `index.ts` import pi types.
 - **Contracts**: script exit codes are pinned in the design spec §2 and in each script's header;
   parsers in the extension key off them. Change a contract only in both places, with a DECISIONS.md
