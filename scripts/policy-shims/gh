@@ -4,8 +4,9 @@
 # A WRAPPER, not a reimplementation: `repo delete` (dangerous class — flat deny, never
 # trust-exempt) and `pr merge` (ask outside a trusted program) are consulted against the
 # shared evaluator from the REAL argv; every other gh call passes straight through to the
-# real binary with argv untouched (the string rules still see the UNWRAPPED command here,
-# which is what a Layer-1 tripwire could not see through a `sh -c` wrap — spec §9).
+# real binary with argv untouched and zero evaluator cost. Consulting the evaluator here
+# matters for the two dangerous verbs precisely because a `sh -c` wrap defeats any Layer-1
+# string pattern, while the shim sees the unwrapped argv (spec §9).
 #
 # Exit: 126 deny or ask (nothing executed), 127 real gh unlocatable, else the real
 # gh's own code.

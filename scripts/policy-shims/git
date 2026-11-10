@@ -109,22 +109,32 @@ case "$sub" in
       esac
     fi
     # Destination facts (destination-based: a refspec whose SOURCE is the base name is not
-    # a write TO the base — DECISIONS 2026-11-10).
+    # a write TO the base — DECISIONS 2026-11-10). The sole slash-less positional is the
+    # REMOTE: with no refspec the destination is the checked-out branch (bare-push semantics).
     cur=$("$REAL_GIT" -C "$acting" symbolic-ref -q --short HEAD 2>/dev/null) || cur=""
+    if [ "${#positionals[@]}" -eq 1 ] && [[ "${positionals[0]}" != */* ]] && [[ "${positionals[0]}" != .* ]]; then
+      positionals=()                                   # the lone positional is the remote, not a refspec
+    fi
     if [ "${#positionals[@]}" -eq 0 ]; then
-      if [ -z "$cur" ]; then
-        dest_unknown=1                      # bare push from detached HEAD: unknown destination
-      elif [ "$cur" = "$SIM_BASE_BRANCH" ]; then
-        base=1                              # bare push from base resolves to the base ref
+      if [ "$tags" = 0 ]; then                         # --tags/-t restrict destinations to tag refs
+        if [ -z "$cur" ]; then
+          dest_unknown=1                      # bare push from detached HEAD: unknown destination
+        elif [ "$cur" = "$SIM_BASE_BRANCH" ]; then
+          base=1                                # bare push from base resolves to the base ref
+        fi
       fi
     else
       for r in "${positionals[@]}"; do
         r2=${r#+}
+        [ "$r" != "$r2" ] && force=1          # a +refspec is a force push (git semantics)
         if [[ "$r2" == *:* ]]; then
           dst=${r2##*:}
+          src=${r2%%:*}
         else
           dst=$r2
+          src=$r2
         fi
+        if [ -z "$dst" ]; then dst=$src; fi            # `main:` deletes refs/heads/main — the write target is the source name
         case "$dst" in
           refs/tags/* | refs/tags) tags=1 ;;
         esac
@@ -132,8 +142,8 @@ case "$sub" in
           base=1
         elif [ "$dst" = "HEAD" ] && [ "$cur" = "$SIM_BASE_BRANCH" ]; then
           base=1                            # HEAD resolves to the checked-out base branch
-        elif [[ "$dst" == *heads/* ]]; then
-          base=1                            # a wildcard destination that could reach the base ref
+        elif [[ "$dst" == *heads/* ]] && [[ "$dst" == *"*"* || "$dst" == *"?"* ]]; then
+          base=1                            # a WILDCARD destination that could reach the base ref (a literal refs/heads/topic does not)
         fi
       done
     fi
