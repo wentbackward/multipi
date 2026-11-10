@@ -45,6 +45,15 @@ if [ "$i" -ge "${#args[@]}" ] || [ "$((i + 1))" -ge "${#args[@]}" ]; then
 fi
 noun=${args[$i]}
 verb=${args[$i + 1]}
+# A `--help`/`--version` ANYWHERE in the remainder is documentation, not an action:
+# `gh repo delete --help` must not classify as the delete (harmless over-deny closed).
+h=0
+k=$((i + 2))
+while [ "$k" -lt "${#args[@]}" ]; do
+  case "${args[$k]}" in -h | --help | --version) h=1; break ;; esac
+  k=$((k + 1))
+done
+[ "$h" = 1 ] && exec "$REAL_GH" "$@"
 
 case "$noun" in
   repo)

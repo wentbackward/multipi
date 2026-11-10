@@ -102,7 +102,7 @@ case "$sub" in
     j=$((i + 1)); listish=0; has_pos=0
     while [ "$j" -lt "${#args[@]}" ]; do
       case "${args[$j]}" in
-        -l | --list | -n | -n[0-9]* | --points-at | --points-at=* | -v | --verify-tags) listish=1 ;;
+        -l | --list | -n | -n[0-9]* | --points-at | --points-at=* | -v | --verify-tags | --contains | --no-contains | --merged | --no-merged | --sort=* | --format | --format=*) listish=1 ;;
         -*) : ;;
         *) has_pos=1 ;;
       esac

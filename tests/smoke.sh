@@ -16,6 +16,16 @@ passed=0
 failed=0
 pass() { echo "PASS $*"; passed=$((passed + 1)); }
 fail() { echo "FAIL $*"; failed=$((failed + 1)); }
+
+# Hygiene: the dogfood extension mirror must track extension/ byte-for-byte (the unit
+# installsync test asserts the same invariant; this line catches drift the instant the
+# smoke runs instead of at review — the mirror IS what this repo's own sessions load).
+for m in extension/src/*.ts extension/index.ts; do
+  if ! cmp -s "$plugin/$m" "$plugin/${m/extension/.pi\/extensions\/multipi-devloop}"; then
+    fail "dogfood mirror drift: .pi/extensions/multipi-devloop/${m#extension/} != $m"
+  fi
+done
+pass "the dogfood extension mirror tracks extension/ byte-for-byte"
 expect() { # expect DESCRIPTION EXPECTED ACTUAL
   if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected '$2', got '$3')"; fi
 }
