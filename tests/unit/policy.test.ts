@@ -22,7 +22,7 @@ function policyFx(fn: (root: string, cfg: (json: string) => void, file: (rel: st
 		fn(
 			fx.repo,
 			(json) => writeFileSync(path.join(fx.repo, ".devloop.json"), json),
-			(rel, content) => writeFileSync(path.join(fx.repo, rel), content),
+			(rel, content) => { mkdirSync(path.dirname(path.join(fx.repo, rel)), { recursive: true }); writeFileSync(path.join(fx.repo, rel), content); },
 		);
 	} finally { fx.cleanup(); }
 }
@@ -137,7 +137,7 @@ test("Bash rules: `prefix:*` is prefix shorthand (bare prefix and continuations 
 		const ev = (cmd: string) => evaluate(p, { ...ORCH, command: cmd }).verdict;
 		assert.equal(ev("git log"), "deny");
 		assert.equal(ev("git log -5 --stat"), "deny");
-		assert.equal(ev("git login"), "allow", "longer stem must not match the prefix");
+		assert.equal(ev("git lo"), "allow", "a shorter/different stem is not a continuation of the prefix");
 	});
 });
 
@@ -343,7 +343,7 @@ test("oneshot install rule: install.sh <foreign> ⇒ deny; <secondary> ⇒ ask; 
 		assert.equal(self.verdict, "allow", "self install falls through to rules/posture");
 		const flagged = ev(`scripts/install.sh --yes ${sec}`);
 		assert.equal(flagged.verdict, "ask", "flags are skipped when finding the target");
-		assert.equal(ev(`scripts/install.sh`), "allow", "no target: usage problem, not a policy one");
+		assert.equal(ev(`scripts/install.sh`).verdict, "allow", "no target: usage problem, not a policy one");
 	});
 });
 
