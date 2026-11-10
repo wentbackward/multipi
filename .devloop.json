@@ -45,6 +45,12 @@
     "require_clean_tree": true,
     "max_blocks": 5
   },
+  "policy": {
+    "posture": "allow",
+    "repos": ["self"],
+    "secondaries": [],
+    "token_ttl_minutes": 10
+  },
   "merge": {
     "method": "squash",
     "delete_branch": true
