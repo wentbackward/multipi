@@ -407,8 +407,9 @@ function evaluateInstall(policy: Policy, command: string): PolicyDecision | null
 	if (["bash", "sh", "dash", "zsh"].includes(toks[0])) {
 		if (toks.length < 2 || !isInstalledInstallScript(toks[1], policy.root)) return null;
 		toks = toks.slice(2);
-	} else if (!isInstalledInstallScript(toks[0], policy.root)) {
-		return null;
+	} else {
+		if (!isInstalledInstallScript(toks[0], policy.root)) return null;
+		toks = toks.slice(1);
 	}
 	const target = toks.find((t) => !t.startsWith("-"));
 	if (target === undefined) {
