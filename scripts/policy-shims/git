@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# git policy shim (ticket #41; permission-policy spec §4-L2, §5, §7).
+#
+# A WRAPPER, not a reimplementation: on MUTATION subcommands (commit, am, reset, tag in
+# mutation form, push, checkout -B / switch -C — the ticket's list; read-only git, incl.
+# fetch/pull/merge, passes straight through) it resolves the ACTING repository from
+# `rev-parse` ground truth, derives the refspec facts (force / base-branch destination /
+# tag refs) from the real argv, walks its own /proc ancestry for the §5 identity proof,
+# consults the shared evaluator (extension/src/policydriver.ts) and — only on ALLOW —
+# execs the real git with argv UNTOUCHED.
+#
+# Unresolvable acting repo or unknown push destination ⇒ deny (the oneshot rule, spec
+# §7.2: the fail direction is the 2026-11-09 failure mode itself). Exit: 126 deny or ask
+# (nothing executed), 127 real git unlocatable, else the real git's own code.
+set -u
+
+shim_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=lib/policyshim.sh
+. "$shim_dir/lib/policyshim.sh"
+shim_init git
+
+REAL_GIT=$(shim_find_real git) || {
+  echo "multipi policy: cannot locate the real git outside the shim dir ($shim_dir) — broken install, refusing" >&2
+  exit 127
+}
+
+# --- peel leading global options; `-C <dir>` selects the acting directory ---------------
+args=("$@")
+acting="$PWD"
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  a=${args[$i]}
+  case "$a" in
+    -C)
+      [ "$((i + 1))" -lt "${#args[@]}" ] || break
+      acting=${args[$((i + 1))]}
+      i=$((i + 2))
+      ;;
+    -c | --git-dir | --work-tree | --namespace | --upload-pack) i=$((i + 2)) ;;
+    --git-dir=* | --work-tree=* | --namespace=* | --upload-pack=*) i=$((i + 1)) ;;
+    -v | -q | -p | --quiet | --paginate | --bare | --no-pager | --no-replace-refs | --literal-pathspecs | --no-optional-locks) i=$((i + 1)) ;;
+    --) i=$((i + 1)) ;;
+    *) break ;; # subcommand (or an unknown leading form: not classified as a mutation)
+  esac
+done
+if [ "$i" -ge "${#args[@]}" ]; then
+  exec "$REAL_GIT" "$@"                    # no subcommand (e.g. bare `git`, `git --version`)
+fi
+sub=${args[$i]}
+
+force=0; base=0; tags=0; dest_unknown=0
+case "$sub" in
+  commit | am | reset)
+    exec_policy_check=1
+    ;;
+  checkout | switch)
+    # -B/-C re-WRITE a branch ref (the ticket's "checkout -B-style ref writes"); a plain
+    # checkout and `-b` (create-only) are not ref writes (spec §4) and pass through.
+    flag=0
+    [ "$sub" = "checkout" ] && flag="-B" || flag="-C"
+    j=$((i + 1))
+    while [ "$j" -lt "${#args[@]}" ]; do
+      [ "${args[$j]}" = "$flag" ] && { exec_policy_check=1; break; }
+      j=$((j + 1))
+    done
+    [ "${exec_policy_check:-0}" = 1 ] || exec "$REAL_GIT" "$@"
+    ;;
+  tag)
+    # `git tag` alone or `git tag -l|-n|-v|…` LIST (read-only); creating or deleting a tag
+    # mutates. A flag-carrying form without a position (e.g. `git tag -d` asking for a name
+    # it lacks) is not a mutation either.
+    j=$((i + 1)); listish=0; has_pos=0
+    while [ "$j" -lt "${#args[@]}" ]; do
+      case "${args[$j]}" in
+        -l | --list | -n | --points-at | -v | --verify-tags) listish=1 ;;
+        -*) : ;;
+        *) has_pos=1 ;;
+      esac
+      j=$((j + 1))
+    done
+    [ "$listish" = 0 ] && [ "$has_pos" = 1 ] && exec_policy_check=1
+    [ "${exec_policy_check:-0}" = 1 ] || exec "$REAL_GIT" "$@"
+    ;;
+  push)
+    j=$((i + 1))
+    positionals=()
+    while [ "$j" -lt "${#args[@]}" ]; do
+      case "${args[$j]}" in
+        -f | --force | --force-with-lease | --force-with-lease=*) force=1 ;;
+        -t | --tags) tags=1 ;;
+        --mirror) force=1; tags=1 ;;
+        --dry-run) exec "$REAL_GIT" "$@" ;;   # a dry-run executes nothing: not a mutation
+        --repo=* | --receive-pack=*) dest_unknown=1 ;;
+        -*) : ;;
+        *) positionals+=("${args[$j]}") ;;
+      esac
+      j=$((j + 1))
+    done
+    if [ "${#positionals[@]}" -ge 1 ]; then
+      case "${positionals[0]}" in
+        */* | .* | ..*)
+          dest_unknown=1                    # direct URL/path transport: not the acting repo
+          positionals=("${positionals[@]:1}")
+          ;;
+      esac
+    fi
+    # Destination facts (destination-based: a refspec whose SOURCE is the base name is not
+    # a write TO the base — DECISIONS 2026-11-10).
+    cur=$("$REAL_GIT" -C "$acting" symbolic-ref -q --short HEAD 2>/dev/null) || cur=""
+    if [ "${#positionals[@]}" -eq 0 ]; then
+      if [ -z "$cur" ]; then
+        dest_unknown=1                      # bare push from detached HEAD: unknown destination
+      elif [ "$cur" = "$SIM_BASE_BRANCH" ]; then
+        base=1                              # bare push from base resolves to the base ref
+      fi
+    else
+      for r in "${positionals[@]}"; do
+        r2=${r#+}
+        if [[ "$r2" == *:* ]]; then
+          dst=${r2##*:}
+        else
+          dst=$r2
+        fi
+        case "$dst" in
+          refs/tags/* | refs/tags) tags=1 ;;
+        esac
+        if [ "$dst" = "$SIM_BASE_BRANCH" ] || [ "$dst" = "refs/heads/$SIM_BASE_BRANCH" ]; then
+          base=1
+        elif [ "$dst" = "HEAD" ] && [ "$cur" = "$SIM_BASE_BRANCH" ]; then
+          base=1                            # HEAD resolves to the checked-out base branch
+        elif [[ "$dst" == *heads/* ]]; then
+          base=1                            # a wildcard destination that could reach the base ref
+        fi
+      done
+    fi
+    exec_policy_check=1
+    ;;
+  *)
+    exec "$REAL_GIT" "$@"                   # read-only / out-of-ticket-scope: straight through
+    ;;
+esac
+[ "${exec_policy_check:-0}" = 1 ] || exec "$REAL_GIT" "$@"
+
+# --- the mutation path: ground truth + shared evaluator ---------------------------------
+SIM_TARGET=$(shim_resolve_repo "$REAL_GIT" "$acting")
+SIM_CMD=$*
+# Quoted argv does not round-trip through `$*`: that degrades only the STRING-rule view —
+# the structural facts above were parsed from the real argv (documented limit, DECISIONS
+# 2026-11-10).
+SIM_PUSH_FORCE=$force
+SIM_PUSH_BASE=$base
+SIM_PUSH_TAGS=$tags
+SIM_TAG_MUTATION=0
+[ "$sub" = "tag" ] && SIM_TAG_MUTATION=1
+SIM_GH_ACTION=""
+
+extra=()
+[ -z "$SIM_TARGET" ] && extra+=(--unresolvable-target)   # acting repo unresolvable (spec §7.2)
+[ "$dest_unknown" = 1 ] && extra+=(--unresolvable-target)
+
+outcome=$(shim_decide "${extra[@]}")
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  shim_fail_closed "the policy evaluator could not be consulted (missing node/driver?)"
+fi
+case "$outcome" in
+  INACTIVE*)
+    exec "$REAL_GIT" "$@"                   # no effective policy here: not armed, pass through
+    ;;
+  ALLOW)
+    exec "$REAL_GIT" "$@"
+    ;;
+  BLOCK*)
+    IFS=$'\t' read -r _ blockline <<<"$outcome"
+    shim_block "$blockline"
+    ;;
+  *)
+    shim_fail_closed "the policy evaluator returned no verdict"
+    ;;
+esac
