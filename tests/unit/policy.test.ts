@@ -380,6 +380,9 @@ test("oneshot install rule: install.sh <foreign> ⇒ deny; <secondary> ⇒ ask; 
 		assert.equal(flagged.verdict, "ask", "flags are skipped when finding the target");
 		assert.equal(ev(`scripts/install.sh`).verdict, "deny", "no declared target defaults to cwd — unresolvable ⇒ deny (§7.2)");
 		assert.equal(ev(`scripts/install.sh`).ruleId, RULE_ONESHOT_UNRESOLVABLE);
+		const wrapped = ev(`bash scripts/install.sh /somewhere/foreign`);
+		assert.equal(wrapped.verdict, "deny", "interpreter-wrapped install is the same call");
+		assert.equal(wrapped.ruleId, RULE_ONESHOT_INSTALL_FOREIGN);
 	});
 });
 

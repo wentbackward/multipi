@@ -17,7 +17,9 @@
 // never guess). `gitTargets` must be RESOLVED main-repo roots (the P3 shim computes them from
 // rev-parse ground truth); the `trusted` flag must be backed by the shim's PPID/env-marker proof
 // of script ancestry — a bare claim here is not verified, and mentioning a script path in a
-// command never confers trust.
+// command never confers trust. "Self" is prefix CONTAINMENT under scopeRoot: a git repo
+// cloned INSIDE the repo tree (vendored clone, submodule) classifies as self by design —
+// the allowlist boundary is the tree, not the .git identity (documented, not a hole).
 //
 // Verdict order (fixed): unusable policy ⇒ deny (fail closed) → structural git-target rules
 // (worst target wins; unresolvable/foreign ⇒ deny, secondary ⇒ ask) → install.sh structural
@@ -396,10 +398,19 @@ function matchRules(policy: Policy, family: string, value: string): Hits {
 
 /** The install.sh structural rule, or null when the command is not an install invocation. */
 function evaluateInstall(policy: Policy, command: string): PolicyDecision | null {
-	const toks = command.trim().split(/\s+/).filter(Boolean);
-	if (!toks.length) return null;
-	if (!isInstalledInstallScript(toks[0], policy.root)) return null;
-	const target = toks.slice(1).find((t) => !t.startsWith("-"));
+	const toks0 = command.trim().split(/\s+/).filter(Boolean);
+	if (!toks0.length) return null;
+	// Recognised wrapper: a bare interpreter directly invoking the install script
+	// (`bash scripts/install.sh …`). Deeper wrappings (`sh -c '…'`, aliases, env prefixes)
+	// are NOT parsed here — they fall to string rules + posture, documented limit.
+	let toks = toks0;
+	if (["bash", "sh", "dash", "zsh"].includes(toks[0])) {
+		if (toks.length < 2 || !isInstalledInstallScript(toks[1], policy.root)) return null;
+		toks = toks.slice(2);
+	} else if (!isInstalledInstallScript(toks[0], policy.root)) {
+		return null;
+	}
+	const target = toks.find((t) => !t.startsWith("-"));
 	if (target === undefined) {
 		// The real script's documented default installs into the CURRENT DIRECTORY — a target
 		// this layer cannot resolve with certainty. Spec §7.2's fail direction is deny, not
