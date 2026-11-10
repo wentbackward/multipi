@@ -29,10 +29,15 @@ REAL_GIT=$(shim_find_real git) || {
 }
 
 # --- peel leading global options; `-C <dir>` selects the acting directory ---------------
-# Repo-REDIRECTING specifiers (--git-dir/--work-tree) are peeled out of the arg scan but
-# COLLECTED and forwarded to the shim's own resolution calls: a command's effective target
-# is whatever it REDIRECTS at, not the cwd (P3 review round 4: peeling without forwarding
-# let `git --git-dir=<foreign>/.git commit` classify against the self repo and pass).
+# git's LEADING options are a closed, documented set (git's own usage line). Every
+# flag-shaped token is peeled as an option; only the documented VALUE-CONSUMERS also eat
+# the next word. (P3 review round 6: the former whitelist ended the scan at any option it
+# had not enumerated — `git --exec-path=x commit` was misread as a non-mutation and a
+# foreign commit sailed through; a whitelist of git's option surface is unmaintainable, a
+# flag-shape + closed value-consumer set is the grammar.)
+# Repo-REDIRECTING specifiers (--git-dir/--work-tree) are collected and forwarded into the
+# shim's own resolution calls: the effective target is what the command REDIRECTS at, not
+# the cwd (round 4).
 args=("$@")
 acting="$PWD"
 _SIM_REDIR=()
@@ -51,11 +56,14 @@ while [ "$i" -lt "${#args[@]}" ]; do
       i=$((i + 2))
       ;;
     --git-dir=* | --work-tree=*) _SIM_REDIR+=("$a"); i=$((i + 1)) ;;
-    -c | --namespace | --upload-pack) i=$((i + 2)) ;;
-    --namespace=* | --upload-pack=*) i=$((i + 1)) ;;
-    -v | -q | -p | --quiet | --paginate | --bare | --no-pager | --no-replace-refs | --literal-pathspecs | --no-optional-locks) i=$((i + 1)) ;;
-    --) i=$((i + 1)) ;;
-    *) break ;; # subcommand (or an unknown leading form: not classified as a mutation)
+    -c | --exec-path | --config-env | --namespace | --super-prefix | --upload-pack | --receive-pack)
+      [ "$((i + 1))" -lt "${#args[@]}" ] || break   # value consumer at the end: no subcommand
+      i=$((i + 2))
+      ;;
+    --exec-path=* | --config-env=* | --namespace=* | --super-prefix=* | --upload-pack=* | --receive-pack=*) i=$((i + 1)) ;;
+    --) i=$((i + 1)); break ;;   # separator: the next token is the subcommand
+    -*) i=$((i + 1)) ;;          # every other flag (long or short cluster): no value in this position
+    *) break ;;                  # the subcommand
   esac
 done
 if [ "$i" -ge "${#args[@]}" ]; then
@@ -115,21 +123,33 @@ case "$sub" in
     j=$((i + 1))
     positionals=()
     while [ "$j" -lt "${#args[@]}" ]; do
-      case "${args[$j]}" in
+      a=${args[$j]}
+      case "$a" in
         -f | --force | --force-with-lease | --force-with-lease=*) force=1 ;;
         -t | --tags) tags=1 ;;
         --mirror) force=1; tags=1 ;;
         --dry-run) exec "$REAL_GIT" "$@" ;;   # a dry-run executes nothing: not a mutation
         --repo=* | --receive-pack=*) dest_unknown=1 ;;
+        -o | --push-option)
+          # VALUE-CONSUMING in the space form: the next word is push-option data, not a
+          # positional (round 6: `git push -o ci=no origin` used to shift the value into
+          # positionals and defeat the remote/destination logic — a base push sailed past).
+          [ "$((j + 1))" -lt "${#args[@]}" ] || break
+          j=$((j + 1))
+          ;;
+        -o=* | --push-option=*) : ;;   # = form: self-contained
+        --*) : ;;                      # other long flags: NEVER a short cluster (round 6:
+                                        # `--no-verify` used to feed its letters to the
+                                        # f/t scanner and over-deny as force)
         -?*[-a-zA-Z]*)
           # Short-flag CLUSTER: `-fu`, `-tf`, … parse char-by-char (git's grammar).
           # `-f -u origin` and `-fu origin` are the SAME call: one spelling must not bypass.
-          for ch2 in $(printf '%s' "${args[$j]}" | tail -c +2 | fold -w1); do
+          for ch2 in $(printf '%s' "${a}" | tail -c +2 | fold -w1); do
             case "$ch2" in f) force=1 ;; t) tags=1 ;; esac
           done
           ;;
         -*) : ;;
-        *) positionals+=("${args[$j]}") ;;
+        *) positionals+=("$a") ;;
       esac
       j=$((j + 1))
     done

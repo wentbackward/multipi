@@ -16,7 +16,7 @@ import {
 	RULE_POLICY_UNUSABLE, RULE_ONESHOT_FOREIGN, RULE_ONESHOT_SECONDARY, RULE_ONESHOT_UNRESOLVABLE,
 	RULE_ONESHOT_INSTALL_FOREIGN, RULE_ONESHOT_INSTALL_SECONDARY, RULE_TRUSTED_EXEMPT,
 	RULE_BASE_BRANCH, RULE_FORCE_PUSH, RULE_GIT_TAG, RULE_TAG_PUSH,
-	RULE_GH_REPO_DELETE, RULE_GH_PR_MERGE,
+	RULE_GH_REPO_DELETE, RULE_GH_PR_MERGE, RULE_SHIM_ERROR,
 } from "../../extension/src/policy.ts";
 
 /** Scratch git repo; `cfg`/`file` rewrite .devloop.json / add files on disk before loadPolicy. */
@@ -524,6 +524,11 @@ test("§5 identity is not forgeable with a two-line .git pointer (P3 review roun
 		assert.equal(hasTrustedAncestor([path.join(rogueB, "scripts", "push.sh")], root), false,
 			"stealing a real worktree's admin dir fails the back-pointer round-trip");
 	});
+});
+
+test("the shim-side error rule id is the string the shims hard-code (drift pin)", () => {
+	assert.equal(RULE_SHIM_ERROR, "policy:shim-error",
+		"scripts/policy-shims hard-code this exact string; if it moves, the constant moves with it");
 });
 
 // --- P3 Layer-2 ground truth: refspec scope + dangerous gh classes (spec §4-L2, §5) -------

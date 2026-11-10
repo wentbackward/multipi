@@ -2433,7 +2433,8 @@ unset POLICY_SIGNING_SECRET
 # to PATH for each probed invocation. The real `git` is the system git; `gh` is tests/fake-gh
 # (already first on PATH), so the shims' "first binary outside the shim dir" resolution lands
 # on the fake gh — and its calls.log proves the real binary was never REACHED on a deny.
-# (No command-substitution metacharacters in these comments: they would execute.
+# (These comments are kept free of `$(…)`-shaped text purely so a naive grep for
+#  command substitution does not flag this block; shell comments of course never execute.
 #  They are single-quoted in the expect() lines below where they appear literally.)
 cd "$work/project" || exit 1
 git checkout -q main 2>/dev/null || true
@@ -2538,6 +2539,32 @@ echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: -Bname 
   fail "P3 smoke: -Bname bypassed the ref-write class: $out"
 out=$(p3git tag -n5 2>&1); rc=$?
 expect "P3 smoke: the list spelling 'git tag -n5' is not classified as a tag mutation" "0" "$rc"
+
+# 4c. leading GLOBAL options cannot mask a mutation (P3 review round 6): the scan peels
+#     EVERY flag-shaped leading token (git's leading options are a closed, documented set;
+#     a whitelist of them is unmaintainable), so unknown options still reach the subcommand.
+cd "$work/p3-foreign"
+out=$(PATH="$PSH:$PATH" git --exec-path=/usr/lib/git-core commit -q --allow-empty -m ep 2>&1); rc=$?
+expect "P3 smoke: an unlisted leading option (--exec-path) cannot mask a foreign commit" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: the --exec-path-masked commit carries the foreign rule id" ||
+  fail "P3 smoke: the --exec-path-masked deny line is wrong: $out"
+out=$(PATH="$PSH:$PATH" git -P commit -q --allow-empty -m ep 2>&1); rc=$?
+expect "P3 smoke: a short unlisted leading option (-P) cannot mask a foreign commit" "126" "$rc"
+cd "$work/project"
+git -C "$work/p3-foreign" log --oneline -1 | grep -qv '^ep$' && \
+  pass "P3 smoke: neither masked foreign commit landed" || fail "P3 smoke: a masked foreign commit LANDED"
+p3git --exec-path=/usr/lib/git-core commit -q --allow-empty -m oc && \
+  pass "P3 smoke: the masked SELF commit still passes (control)" ||
+  fail "P3 smoke: the masked self commit was blocked"
+
+# 4d. value-carrying push flags (round 6): -o/--push-option eat their value; long flags are
+#     never fed to the short-cluster f/t scanner.
+out=$(p3git push -o ci=no origin 2>&1); rc=$?
+expect "P3 smoke: 'git push -o ci=no origin' on base is denied (the value is not a positional)" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:base-branch:" && pass "P3 smoke: the -o-masked base push carries the base rule id" ||
+  fail "P3 smoke: the -o-masked base push was not caught: $out"
+out=$(p3git push --no-verify origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: --no-verify is NOT force (long flags never join the f/t cluster scan)" "0" "$rc"
 
 # 6. the §5 identity exemption: a loop script under the installed scripts/ pushing base
 #    passes clean (this is merge-train's exact identity rule; the fixture script stands in

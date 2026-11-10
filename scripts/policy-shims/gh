@@ -63,7 +63,7 @@ verb=${args[$vi]}
 # A `--help`/`--version` ANYWHERE in the remainder is documentation, not an action:
 # `gh repo delete --help` must not classify as the delete (harmless over-deny closed).
 h=0
-k=$((i + 2))
+k=$((i + 1))
 while [ "$k" -lt "${#args[@]}" ]; do
   case "${args[$k]}" in -h | --help | --version) h=1; break ;; esac
   k=$((k + 1))

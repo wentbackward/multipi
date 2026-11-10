@@ -286,3 +286,25 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
   (fail-safe direction, rare in practice; special-casing `-c`/`-o` value semantics was
   rejected as parser surface for a one-word false alarm). (4) The smoke audit-hygiene
   check now uses an `if python3 … heredoc` form (no bare `$?` after a heredoc).
+- 2026-11-10 — P3 review round-6 fixes (two live bypasses, both reproduced with controls
+  against the installed shims). (1) The leading global-option scan is now GRAMMAR-BASED
+  instead of a whitelist: every flag-shaped leading token is peeled; only git's CLOSED,
+  documented value-consumers (-C -c --exec-path --config-env --git-dir --work-tree
+  --namespace --super-prefix --upload-pack --receive-pack) eat the next word; `--` is the
+  separator; the first bare token is the subcommand. A whitelist of git's option surface
+  is unmaintainable and failed exactly as predicted (`git --exec-path=x commit` was
+  misread as a non-mutation and a foreign commit landed). Named residual: an UNKNOWN
+  space-form value option that git accepts but this closed set does not list could push
+  its value into the subcommand slot — mitigated because the value then has to LOOK LIKE
+  a mutation subcommand to matter, and git's leading options are a fixed, documented set.
+  (2) The push scanner skips value-carrying flags: -o/--push-option eat their space-form
+  value (`git push -o ci=no origin` on base used to slip past as a feature push — the
+  value was mis-indexed as the remote); long flags (--*) are excluded from the short-cluster
+  f/t scan (round 5's `--no-verify → force` over-deny class), mirroring the checkout arm.
+  CORRECTION to the round-5 entry: its claim about value forms was directionally wrong —
+  the -o/--push-option forms UNDER-denied (base push allowed) rather than over-denying;
+  the -c-on-push case remains an over-deny at worst (its value becomes a fake remote,
+  destination falls back to the checked-out branch). (3) gh's --help scan now starts
+  before the verb (gh repo --help delete). (4) RULE_SHIM_ERROR drift pin; smoke
+  audit-hygiene if-heredoc form; renamed-.git residual named (a core.worktree-style
+  renamed git dir resolves nothing ⇒ deny, fail-safe direction).
