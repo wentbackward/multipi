@@ -247,6 +247,19 @@ test("no .devloop.json at all ⇒ policy INACTIVE, not bridle (a non-loop direct
 	} finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("PRESENT-BUT-CORRUPT .devloop.json ⇒ ACTIVE and denying, not INACTIVE (a corrupt config is agent-writable self-disarm)", () => {
+	const c = seed(PERMS({ deny: ["Bash(sudo:*)"] }));
+	try {
+		writeFileSync(path.join(c.fx.repo, ".devloop.json"), "{ not json");
+		const warnings: string[] = [];
+		const f = enforcer(c, warnings);
+		assert.equal(f.active, true, "corrupt config keeps the bridle on");
+		const b = f.onToolCall({ toolName: "bash", input: { command: "ls" }, sessionId: null });
+		assert.equal(b?.block, true, "every call is denied until the file is repaired");
+		assert.match(warnings[0] ?? "", /present but unparseable/);
+	} finally { c.fx.cleanup(); }
+});
+
 // --- read/edit paths: the LITERAL-`~` convention (ticket #40 addendum, spec §9)
 
 test("a LITERAL-`~` token-dir read is denied by the seeded rule, and the audit summary redacts it", () => {

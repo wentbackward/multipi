@@ -30,7 +30,7 @@
 // skip is the documented tripwire-only limit (the secret-minting design does not rely on the
 // Read denies, §9) and is test-pinned in both directions.
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { loadConfig, resolvePaths, scenariosOn, DEFAULT_POLICY } from "./config.ts";
 import { evaluate, loadPolicy, type Policy, type PolicyContext, type PolicyDecision } from "./policy.ts";
@@ -168,6 +168,23 @@ export function createPolicyEnforcer(opts: EnforcerOpts): PolicyEnforcer {
 
 	// --- load once (spec §8: no hot reload — governance rides the ordinary pipeline) ---
 	if (!cfg) {
+		// loadConfig returns null for MISSING and for PRESENT-BUT-CORRUPT .devloop.json alike.
+		// Missing ⇒ the loop is non-functional here ⇒ INACTIVE. Corrupt ⇒ the config is
+		// agent-writable self-disarm of the policy layer: ACTIVE and denying, exactly like a
+		// broken permissions.json (P3 review round 2; version-controlled ⇒ existsSync at the
+		// acting root is the distinction).
+		let corrupt = false;
+		try { corrupt = existsSync(path.join(opts.root, ".devloop.json")); } catch { corrupt = false; }
+		if (corrupt) {
+			warn("multipi policy: .devloop.json is present but unparseable — hook ACTIVE and denying every tool call until it is repaired (a corrupt config must not self-disarm the policy layer)");
+			const deadBroken: Policy = { ok: false, error: ".devloop.json present but unparseable", root: opts.root, scopeRoot: opts.root, config: DEFAULT_POLICY, rules: [], hasPermissionsFile: false };
+			const state: PolicyEnforcer = {
+				active: true, policy: deadBroken, hash: null, logPath,
+				onToolCall: (args) => denyEvery(args, ".devloop.json present but unparseable — failing closed; repair the file or the call is denied"),
+				noteSession: (sid) => append(sessionLine(sid, "broken", null)),
+			};
+			return state;
+		}
 		warn("multipi policy: no usable .devloop.json in this session's working dir — policy hook INACTIVE (every tool call passes); the devloop itself is non-functional here");
 		const dead: Policy = { ok: false, error: "no usable .devloop.json", root: opts.root, scopeRoot: opts.root, config: DEFAULT_POLICY, rules: [], hasPermissionsFile: false };
 		return {
