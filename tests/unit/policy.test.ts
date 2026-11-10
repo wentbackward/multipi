@@ -617,7 +617,10 @@ test("hasTrustedAncestor: identity = realpath under this repo's checkout scripts
 			assert.equal(hasTrustedAncestor([path.join(root, "scripts", "ghost.sh")], root), false, "a missing file is not trusted");
 			assert.equal(hasTrustedAncestor([], root), false, "no candidates, no trust");
 			assert.equal(hasTrustedAncestor(["~", "~/x.sh", "a b.sh"], root), false, "unresolvable spellings are not trusted");
-			// A LINKED WORKTREE of this repo: its scripts/ IS this repo's scripts dir.
+			// A LINKED WORKTREE of this repo: its scripts/ IS this repo's scripts dir. (Commit the
+			// fixture first: a worktree checkout only carries committed files.)
+			execFileSync("git", ["-C", root, "add", "-A"], { stdio: "pipe" });
+			execFileSync("git", ["-C", root, "commit", "-qm", "chore: fixture scripts"], { stdio: "pipe" });
 			const wt = path.join(path.dirname(root), "p3-wt");
 			execFileSync("git", ["-C", root, "worktree", "add", "-q", "--detach", wt], { stdio: "pipe" });
 			assert.equal(hasTrustedAncestor([path.join(wt, "scripts", "train.sh")], root), true, "worktree checkout of the same repo");

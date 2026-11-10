@@ -25,11 +25,14 @@
 //
 // Verdict order (fixed): unusable policy ⇒ deny (fail closed) → structural git-target rules
 // (worst target wins; unresolvable/foreign ⇒ deny, secondary ⇒ ask) → install.sh structural
-// rule (foreign target ⇒ deny, secondary ⇒ ask) → trusted exemption (string rules ONLY,
-// spec §5 — the exemption can NEVER lift a structural rule; the 2026-11-09 oneshot failure
-// class is the one no exemption reopens) → string rules (deny > ask > allow) → posture default.
-// `gitTargets` entries must be main-repo ROOTS (the parent of the rev-parse git-dir); the P3
-// shim converts --git-common-dir output to the root before calling.
+// rule (foreign target ⇒ deny, secondary ⇒ ask) → gh repo-delete (dangerous class: flat deny,
+// NEVER exempt) → Layer-2 refspec/dangerous-class rules (spec §4-L2, populated ONLY by the
+// P3 shim's ground truth: base-branch/force ⇒ deny; tag mutation / tag push / gh pr merge ⇒
+// ask — the classes the trusted identity LIFTS, spec §5) → trusted exemption (string rules
+// ONLY, spec §5 — no exemption lifts a repo-scope or repo-delete rule; the 2026-11-09 oneshot
+// failure class is the one no exemption reopens) → string rules (deny > ask > allow) →
+// posture default. `gitTargets` entries must be main-repo ROOTS (the parent of the rev-parse
+// git-dir); the P3 shim converts --git-common-dir output to the root before calling.
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { DEFAULT_POLICY, loadConfig, type PolicyConfig } from "./config.ts";
@@ -74,6 +77,18 @@ export const RULE_ONESHOT_INSTALL_FOREIGN = "oneshot:install-foreign";
 export const RULE_ONESHOT_INSTALL_SECONDARY = "oneshot:install-secondary";
 export const RULE_TRUSTED_EXEMPT = "trusted:exemption";
 
+/** Layer-2 shim rule ids (spec §4-L2) — decided from the P3 shim's ground truth, never from
+ * strings. The deny/ask classes here are the ones the §5 trusted identity lifts, EXCEPT
+ * gh:repo-delete (dangerous class: flat deny, never exempt — pinned in tests). */
+export const RULE_BASE_BRANCH = "policy:base-branch";
+export const RULE_FORCE_PUSH = "policy:force-push";
+export const RULE_GIT_TAG = "policy:git-tag";
+export const RULE_TAG_PUSH = "policy:tag-push";
+export const RULE_GH_REPO_DELETE = "gh:repo-delete";
+export const RULE_GH_PR_MERGE = "gh:pr-merge";
+/** The shim's own fail-closed id: the evaluator could not be consulted at all. */
+export const RULE_SHIM_ERROR = "policy:shim-error";
+
 /** What one call declares to be doing (hook/shim extract this from the tool arguments). */
 export interface PolicyContext {
 	/** Who is acting (e.g. "orchestrator"); carried for the audit log, rules do not scope on it (v1). */
@@ -87,8 +102,16 @@ export interface PolicyContext {
 	/** RESOLVED main-repo roots of every git target the call acts on; `null` = an expected
 	 * target could not be resolved with certainty ⇒ fail closed (spec §7.2). Absent = no git target. */
 	gitTargets?: (string | null)[];
+	/** `git push` ground truth the P3 shim reads from the REAL argv (spec §4-L2). The hook
+	 * layer NEVER fills this — a command string alone is not proof of what would be pushed. */
+	gitPush?: { force?: boolean; baseRef?: boolean; tags?: boolean };
+	/** `git tag` mutation ground truth (create/delete/force; the shim excludes listings). */
+	gitTagMutation?: boolean;
+	/** gh subcommand classification the P3 shim reads from the REAL argv (spec §4-L2). */
+	ghAction?: "repo-delete" | "pr-merge";
 	/** Set ONLY on the shim's PPID/env-marker proof that the call comes from an installed
-	 * script's own process tree (spec §5). Lifts string rules; NEVER the structural rules. */
+	 * script's own process tree (spec §5). Lifts string rules and the §5-exemptible Layer-2
+	 * classes; NEVER the repo-scope or repo-delete rules. */
 	trusted?: boolean;
 }
 
@@ -299,6 +322,37 @@ const RANK: Record<PolicyVerdict, number> = { deny: 2, ask: 1, allow: 0 };
 /** A structural (non-rule) finding, before it is turned into the final decision. */
 interface Flag { verdict: PolicyVerdict; ruleId: string; reason: string }
 
+/**
+ * The §5 identity proof over the shim's ancestor walk: TRUE when ANY candidate script
+ * resolves (realpath) to a `.sh` file under the `scripts/` dir of a checkout of THIS repo
+ * (main root or linked worktree — any checkout whose main root equals this policy's
+ * scopeRoot). Identity, not name: relative or unresolvable spellings, non-`.sh` files,
+ * missing files, symlink escapes and foreign repos' scripts dirs all stay untrusted
+ * (fail closed; the bash side supplies absolute paths from /proc, never from argv text).
+ */
+export function hasTrustedAncestor(candidates: readonly string[], root: string): boolean {
+	const scope = mainRootOf(root);
+	for (const c of candidates) {
+		if (!path.isAbsolute(c) || c.includes("\u0000")) continue; // the walk only yields absolutes; a NUL is never a path
+		const real = realOrNull(c);
+		if (!real || !real.endsWith(".sh")) continue;
+		try {
+			if (!statSync(real).isFile()) continue;
+		} catch {
+			continue;
+		}
+		// `real` is fully resolved, so every prefix of it is real too: each `scripts` segment
+		// names a candidate checkout root whose scripts dir we test for THIS repo's identity.
+		const segs = real.split(path.sep);
+		for (let i = segs.length - 2; i >= 1; i--) {
+			if (segs[i] !== "scripts") continue;
+			const checkoutRoot = segs.slice(0, i).join(path.sep);
+			if (mainRootOf(checkoutRoot) === scope) return true;
+		}
+	}
+	return false;
+}
+
 /** The decision a matched string rule produces (its class IS the verdict). */
 function ruleDecision(rule: PolicyRule): PolicyDecision {
 	switch (rule.cls) {
@@ -353,7 +407,28 @@ export function evaluate(policy: Policy, ctx: PolicyContext): PolicyDecision {
 		if (d) return d;
 	}
 
-	// 3. Trusted-program exemption (spec §5): the REVIEWED SCRIPT CODE is the authorized
+	// 3. Layer-2 ground truth (spec §4-L2) — facts ONLY the P3 shim can supply from real argv
+	//    and live git state. gh repo delete is a dangerous class: flat deny, even for a
+	//    proven trusted program (no exemption reopens it).
+	if (ctx.ghAction === "repo-delete") {
+		return { verdict: "deny", ruleId: RULE_GH_REPO_DELETE, reason: "gh repo delete is a dangerous class — the loop never deletes repositories (spec §4-L2)" };
+	}
+	// The remaining Layer-2 classes are exactly the ones the §5 trusted identity lifts
+	// (base-branch/force denies; tag, tag-push and pr-merge asks):
+	if (!ctx.trusted) {
+		const gp = ctx.gitPush;
+		const flags: Flag[] = [];
+		if (gp?.force) flags.push({ verdict: "deny", ruleId: RULE_FORCE_PUSH, reason: "force push — the ref-history-rewrite class; merges travel through merge-train.sh only (spec §4-L2)" });
+		if (gp?.baseRef) flags.push({ verdict: "deny", ruleId: RULE_BASE_BRANCH, reason: "push to the base branch — merges travel through merge-train.sh only (spec §4-L2)" });
+		if (ctx.gitTagMutation) flags.push({ verdict: "ask", ruleId: RULE_GIT_TAG, reason: "git tag mutation — tags are release metadata; operator consent required (spec §6 ask list)" });
+		if (gp?.tags) flags.push({ verdict: "ask", ruleId: RULE_TAG_PUSH, reason: "push of tag refs — operator consent required (spec §6 ask list)" });
+		if (ctx.ghAction === "pr-merge") flags.push({ verdict: "ask", ruleId: RULE_GH_PR_MERGE, reason: "gh pr merge outside a trusted program — merges travel through the train; operator consent required (spec §6 ask list)" });
+		let worst: Flag | null = null;
+		for (const f of flags) if (!worst || RANK[f.verdict] > RANK[worst.verdict]) worst = f;
+		if (worst) return { verdict: worst.verdict, ruleId: worst.ruleId, reason: worst.reason };
+	}
+
+	// 4. Trusted-program exemption (spec §5): the REVIEWED SCRIPT CODE is the authorized
 	//    actor, so string rules do not apply — all structural rules above already ran and
 	//    ALWAYS do (the exemption lifts nothing structural).
 	if (ctx.trusted) {
@@ -361,13 +436,13 @@ export function evaluate(policy: Policy, ctx: PolicyContext): PolicyDecision {
 	}
 
 	if (tool === "bash" && typeof ctx.command === "string") {
-		// 4. String rules (the tripwire layer); deny > ask > allow, first rule per class wins.
+		// 5. String rules (the tripwire layer); deny > ask > allow, first rule per class wins.
 		const hits = matchRules(policy, "bash", ctx.command);
 		const winner = hits.deny ?? hits.ask ?? hits.allow;
 		if (winner) return ruleDecision(winner);
 	}
 
-	// 5. Path rules bind read→Read, edit/write→Edit; the worst verdict across paths wins.
+	// 6. Path rules bind read→Read, edit/write→Edit; the worst verdict across paths wins.
 	const family = TOOL_FAMILY[tool];
 	if ((family === "read" || family === "edit") && ctx.paths) {
 		let best: PolicyDecision | null = null;
@@ -381,9 +456,36 @@ export function evaluate(policy: Policy, ctx: PolicyContext): PolicyDecision {
 		if (best) return best;
 	}
 
-	// 6. Posture default (spec §3): unmatched ⇒ the configured default.
+	// 7. Posture default (spec §3): unmatched ⇒ the configured default.
 	if (policy.config.posture === "ask") return { verdict: "ask", reason: "no rule matched — default posture ask" };
 	return { verdict: "allow", reason: "no rule matched — default posture allow" };
+}
+
+// --- shared policy line + audit hygiene (hook and P3 shims emit the SAME shapes) ----------
+
+/** Bounded action summaries (spec §8): long enough to diagnose, short enough to stay noise-free. */
+export const ACTION_SUMMARY_MAX = 160;
+/** The rule id an ask with no matched rule escalates under (structural-id family). */
+export const RULE_POSTURE_ASK = "posture:ask";
+/** `~` is LITERAL in the token-dir convention — every spelling of home is scrubbed (spec §8). */
+const TOKEN_DIR_RE = /(~|\$HOME|\$\{HOME\}|\/)[^\s"'`|;&<>]*dev-loop-tokens[^\s"'`|;&<>]*/g;
+
+/** The deny line — the exact tripwire shape the P2 hook pins: `DENIED <rule-id>: <reason>`. */
+export function formatPolicyDeny(d: PolicyDecision): string {
+	return `DENIED ${d.ruleId ?? RULE_POLICY_UNUSABLE}: ${d.reason ?? ""}`;
+}
+
+/** The ask line — the exact §6 escalation directive the P2 hook pins, verbatim. */
+export function formatPolicyAsk(d: PolicyDecision, actionSummary: string): string {
+	const ruleId = d.ruleId ?? RULE_POSTURE_ASK;
+	return `ASK ${ruleId}: ${actionSummary}. Operator approval required: run 'multipi-approve ${ruleId}' in your own shell, then retry.`;
+}
+
+/** Log hygiene (spec §8): scrub token-dir paths (every home spelling) and bound the summary. */
+export function redactActionSummary(summary: string): string {
+	let out = summary.replace(TOKEN_DIR_RE, "<token-dir>");
+	if (out.length > ACTION_SUMMARY_MAX) out = `${out.slice(0, ACTION_SUMMARY_MAX)}…`;
+	return out;
 }
 
 interface Hits { deny: PolicyRule | null; ask: PolicyRule | null; allow: PolicyRule | null; }
