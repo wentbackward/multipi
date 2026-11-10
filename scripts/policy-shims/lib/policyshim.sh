@@ -121,10 +121,11 @@ shim_trusted_candidates() {
 # stays EMPTY — the caller denies). Prints nothing when it cannot be resolved with certainty.
 shim_resolve_repo() { # shim_resolve_repo REALGIT DIR
   local real=$1 dir=$2 common
+  local redir=${_SIM_REDIR[@]+"${_SIM_REDIR[@]}"}
   [ -d "$dir" ] || return 0
-  common=$("$real" -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
+  common=$("$real" -C "$dir" $redir rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
   [ -n "$common" ] || return 0
-  if "$real" -C "$dir" rev-parse --is-bare-repository 2>/dev/null | grep -q '^true$'; then
+  if "$real" -C "$dir" $redir rev-parse --is-bare-repository 2>/dev/null | grep -q '^true$'; then
     [ -d "$common" ] && { printf '%s\n' "$common"; return 0; }
     return 0
   fi

@@ -495,6 +495,37 @@ test("loadPolicy from a LINKED WORKTREE: self normalizes to the common repo; fil
 	});
 });
 
+test("§5 identity is not forgeable with a two-line .git pointer (P3 review round 4)", () => {
+	policyFx((root) => {
+		// Control: a REAL linked worktree earns the identity.
+		const wt = path.join(path.dirname(root), "proj-wt-id");
+		execFileSync("git", ["-C", root, "worktree", "add", "-q", "--detach", wt], { stdio: "pipe" });
+		const wtScript = path.join(wt, "scripts", "loop.sh");
+		mkdirSync(path.join(wt, "scripts"), { recursive: true });
+		writeFileSync(wtScript, "#!/bin/sh\n");
+		assert.equal(hasTrustedAncestor([wtScript], root), true, "a real linked worktree's scripts earn identity");
+
+		// Forge A: a .git pointer to a NONEXISTENT worktree admin dir.
+		const rogueA = path.join(path.dirname(root), "rogue-a");
+		mkdirSync(path.join(rogueA, "scripts"), { recursive: true });
+		writeFileSync(path.join(rogueA, ".git"), `gitdir: ${root}/.git/worktrees/nonexistent\n`);
+		writeFileSync(path.join(rogueA, "scripts", "push.sh"), "#!/bin/sh\n");
+		assert.equal(hasTrustedAncestor([path.join(rogueA, "scripts", "push.sh")], root), false,
+			"a pointer to a nonexistent admin dir does not earn identity");
+
+		// Forge B: a .git pointer stealing a REAL worktree's admin dir — the back-pointer
+		// round-trip must fail (the admin points back at the genuine worktree, not at the
+		// impostor's .git file).
+		const rogueB = path.join(path.dirname(root), "rogue-b");
+		mkdirSync(path.join(rogueB, "scripts"), { recursive: true });
+		const admin = path.join(root, ".git", "worktrees", path.basename(wt));
+		writeFileSync(path.join(rogueB, ".git"), `gitdir: ${admin}\n`);
+		writeFileSync(path.join(rogueB, "scripts", "push.sh"), "#!/bin/sh\n");
+		assert.equal(hasTrustedAncestor([path.join(rogueB, "scripts", "push.sh")], root), false,
+			"stealing a real worktree's admin dir fails the back-pointer round-trip");
+	});
+});
+
 // --- P3 Layer-2 ground truth: refspec scope + dangerous gh classes (spec §4-L2, §5) -------
 // The P3 git/gh shims collect these facts from REAL argv + live git state and pass them in;
 // the strings alone never decide (the Layer-1 honesty limit, spec §9).

@@ -2469,6 +2469,24 @@ git -C "$work/p3-foreign" status --porcelain | grep -q f.txt &&
 expect "P3 smoke: the foreign deny is audited (rule id + verdict deny, layer shim)" "1" \
   "$(p3count '\"ruleId\":\"oneshot:foreign-repo\",\"verdict\":\"deny\"')"
 
+# 2b. repo-REDIRECT specifiers cannot re-target away from classification (P3 review round 4):
+#     the shim resolves what the command REDIRECTS at, not the cwd. All three spellings must
+#     hit the SAME foreign deny; the control shows the unredirected self commit stays clean.
+out=$(PATH="$PSH:$PATH" git --git-dir="$work/p3-foreign/.git" commit -q --allow-empty -m x 2>&1); rc=$?
+expect "P3 smoke: --git-dir=<foreign> commit is denied (resolves the redirect target)" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: the --git-dir deny carries the foreign rule id" ||
+  fail "P3 smoke: the --git-dir deny line is wrong: $out"
+out=$(PATH="$PSH:$PATH" GIT_DIR="$work/p3-foreign/.git" git commit -q --allow-empty -m x 2>&1); rc=$?
+expect "P3 smoke: a GIT_DIR env redirect to the foreign repo is denied too" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: the GIT_DIR deny carries the foreign rule id" ||
+  fail "P3 smoke: the GIT_DIR deny line is wrong: $out"
+out=$(PATH="$PSH:$PATH" git -C "$work/p3-foreign" commit -q --allow-empty -m x 2>&1); rc=$?
+expect "P3 smoke: git -C <foreign> commit is denied (the -C redirect is honored)" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: the -C deny carries the foreign rule id" ||
+  fail "P3 smoke: the -C deny line is wrong: $out"
+p3git commit -q --allow-empty -m "chore: redirect control" && pass "P3 smoke: the UNredirected self commit still passes" ||
+  fail "P3 smoke: the unredirected self commit was blocked"
+
 # 3. unresolvable acting repo ⇒ deny (spec §7.2 fail direction)
 mkdir -p "$work/p3-nr"
 out=$(cd "$work/p3-nr" && PATH="$PSH:$PATH" git commit -q --allow-empty -m x 2>&1); rc=$?

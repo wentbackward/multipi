@@ -254,3 +254,22 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
   after the fact. Alternatives considered and rejected for this round: requiring the
   candidate to be tracked at HEAD (changes the spec's mechanical rule mid-flight; defer to
   a governance ticket if the residual proves hot).
+- 2026-11-10 — P3 review round-4 fixes (two live oneshot-class bypasses, both reproduced by
+  the reviewer with controls before the fix). (1) Repo REDIRECT specifiers are no longer
+  peeled-and-ignored: `--git-dir`/`--work-tree` (flag and `=` forms) are collected and
+  forwarded into the shim's own rev-parse/symbolic-ref resolution, and `GIT_DIR`/
+  `GIT_WORK_TREE` env redirects ride along by inheritance — the effective target is
+  whatever the command REDIRECTS at, so `git --git-dir=<foreign>/.git commit` from inside
+  the self repo now classifies against the foreign repo (deny). `-C` already selected the
+  acting directory; it is pinned now too. The loop's own scripts never use raw
+  `--git-dir` (verified by grep — they use `-C`), so loop traffic is unaffected. (2) §5
+  trusted identity no longer trusts a `.git` pointer's self-declaration:
+  `hasTrustedAncestor` now runs `isRealCheckoutOf` ground truth — a real `.git` directory
+  must BE the scope root (realpath); a pointer declaring the main gitdir must be
+  self-contained; a pointer declaring a worktree admin dir must find that admin dir
+  existing under the scope's own .git AND round-trip via its `gitdir` back-pointer to the
+  impostor's own .git file. Named residual: forging identity now requires OVERWRITING a
+  genuine worktree's back-pointer inside the loop's own .git admin data — that corrupts
+  that worktree (fatal gitfile), i.e. the forge is self-destructing, not a silent
+  privilege gain. Unit pins: real worktree earns, nonexistent-admin forge fails,
+  stolen-real-admin forge fails the round-trip.

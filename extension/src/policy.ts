@@ -347,10 +347,72 @@ export function hasTrustedAncestor(candidates: readonly string[], root: string):
 		for (let i = segs.length - 2; i >= 1; i--) {
 			if (segs[i] !== "scripts") continue;
 			const checkoutRoot = segs.slice(0, i).join(path.sep);
-			if (mainRootOf(checkoutRoot) === scope) return true;
+			// Lenient normalization FIRST (cheap prefilter), then ground truth: a forged
+			// `.git` pointer must not claim the scope (P3 review round 4).
+			if (mainRootOf(checkoutRoot) !== scope) continue;
+			if (isRealCheckoutOf(checkoutRoot, scope)) return true;
 		}
 	}
 	return false;
+}
+
+/**
+ * Is `checkoutRoot` REALLY a checkout (main or linked worktree) of the repo whose main
+ * root is `scope`? Ground truth, not just the checkout's own `.git` pointer (P3 review
+ * round 4: a two-line text file `gitdir: <scope>/.git/worktrees/x` used to let a foreign
+ * directory impersonate this repo and earn the §5 exemption):
+ * - a real `.git` DIRECTORY ⇒ the main checkout: it IS its own root, compare by realpath;
+ * - a `.git` POINTER declaring the MAIN gitdir ⇒ self-contained: the pointer must point
+ *   at THIS directory's own .git (otherwise it claims a root it does not own);
+ * - a `.git` POINTER declaring a worktree ADMIN dir `<main>/.git/worktrees/<n>` ⇒ the
+ *   declared dir must exist, belong to `scope`'s .git, and its `gitdir` BACK-POINTER
+ *   must round-trip to THIS checkout's `.git` file (a real worktree admin always has one).
+ * Remaining honest residual (named in DECISIONS): forging this now requires overwriting
+ * a genuine worktree's back-pointer inside the loop's OWN .git admin data — destructive
+ * to that worktree, not a silent privilege gain.
+ */
+function isRealCheckoutOf(checkoutRoot: string, scope: string): boolean {
+	const g = path.join(checkoutRoot, ".git");
+	let st;
+	try {
+		st = statSync(g);
+	} catch {
+		return false;
+	}
+	if (st.isDirectory()) return realOrNull(checkoutRoot) !== null && realOrNull(checkoutRoot) === realOrNull(scope);
+	if (!st.isFile()) return false;
+	const gdLine = (() => {
+		try {
+			return readFileSync(g, "utf8").split("\n").find((l) => l.startsWith("gitdir:"));
+		} catch {
+			return undefined;
+		}
+	})();
+	const gd = gdLine ? gdLine.slice(gdLine.indexOf(":") + 1).trim() : null;
+	if (!gd) return false;
+	const gdAbs = path.isAbsolute(gd) ? gd : path.join(checkoutRoot, gd);
+	const gdir = realOrNull(gdAbs);
+	if (gdir === null) return false; // nonexistent declaration ⇒ forge
+	// Declares the MAIN gitdir: self-contained pointers only.
+	if (path.basename(gdir) === ".git") {
+		const own = realOrNull(path.join(checkoutRoot, ".git"));
+		return own !== null && own === gdir && realOrNull(checkoutRoot) !== null && realOrNull(checkoutRoot) === realOrNull(scope);
+	}
+	// Declares a worktree admin dir: it must be scope's .git/worktrees/<n> AND round-trip.
+	const mainGitDir = realOrNull(path.join(scope, ".git"));
+	if (mainGitDir === null) return false;
+	const underScopeAdmin = gdir.startsWith(mainGitDir + path.sep + "worktrees" + path.sep);
+	const backLine = (() => {
+		if (!underScopeAdmin) return null;
+		try {
+			return readFileSync(path.join(gdir, "gitdir"), "utf8").trim();
+		} catch {
+			return null; // a real admin dir always has its back-pointer
+		}
+	})();
+	if (backLine === null) return false;
+	const backAbs = path.isAbsolute(backLine) ? backLine : path.join(scope, backLine);
+	return realOrNull(backAbs) === realOrNull(g);
 }
 
 /** The decision a matched string rule produces (its class IS the verdict). */

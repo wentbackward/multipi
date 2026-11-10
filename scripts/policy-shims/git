@@ -29,8 +29,13 @@ REAL_GIT=$(shim_find_real git) || {
 }
 
 # --- peel leading global options; `-C <dir>` selects the acting directory ---------------
+# Repo-REDIRECTING specifiers (--git-dir/--work-tree) are peeled out of the arg scan but
+# COLLECTED and forwarded to the shim's own resolution calls: a command's effective target
+# is whatever it REDIRECTS at, not the cwd (P3 review round 4: peeling without forwarding
+# let `git --git-dir=<foreign>/.git commit` classify against the self repo and pass).
 args=("$@")
 acting="$PWD"
+_SIM_REDIR=()
 i=0
 while [ "$i" -lt "${#args[@]}" ]; do
   a=${args[$i]}
@@ -40,8 +45,14 @@ while [ "$i" -lt "${#args[@]}" ]; do
       acting=${args[$((i + 1))]}
       i=$((i + 2))
       ;;
-    -c | --git-dir | --work-tree | --namespace | --upload-pack) i=$((i + 2)) ;;
-    --git-dir=* | --work-tree=* | --namespace=* | --upload-pack=*) i=$((i + 1)) ;;
+    --git-dir | --work-tree)
+      [ "$((i + 1))" -lt "${#args[@]}" ] || break
+      _SIM_REDIR+=("$a" "${args[$((i + 1))]}")
+      i=$((i + 2))
+      ;;
+    --git-dir=* | --work-tree=*) _SIM_REDIR+=("$a"); i=$((i + 1)) ;;
+    -c | --namespace | --upload-pack) i=$((i + 2)) ;;
+    --namespace=* | --upload-pack=*) i=$((i + 1)) ;;
     -v | -q | -p | --quiet | --paginate | --bare | --no-pager | --no-replace-refs | --literal-pathspecs | --no-optional-locks) i=$((i + 1)) ;;
     --) i=$((i + 1)) ;;
     *) break ;; # subcommand (or an unknown leading form: not classified as a mutation)
@@ -133,7 +144,7 @@ case "$sub" in
     # Destination facts (destination-based: a refspec whose SOURCE is the base name is not
     # a write TO the base — DECISIONS 2026-11-10). The sole slash-less positional is the
     # REMOTE: with no refspec the destination is the checked-out branch (bare-push semantics).
-    cur=$("$REAL_GIT" -C "$acting" symbolic-ref -q --short HEAD 2>/dev/null) || cur=""
+    cur=$("$REAL_GIT" -C "$acting" ${_SIM_REDIR[@]+"${_SIM_REDIR[@]}"} symbolic-ref -q --short HEAD 2>/dev/null) || cur=""
     if [ "${#positionals[@]}" -eq 1 ] && [[ "${positionals[0]}" != */* ]] && [[ "${positionals[0]}" != .* ]]; then
       positionals=()                                   # the lone positional is the remote, not a refspec
     fi
