@@ -12,18 +12,22 @@
 # be located outside the shim dir (broken install). Any other exit is the real binary's own.
 
 # Set by the caller before sourcing completes: shim_dir (the policy-shims dir, -P resolved).
+# shim_dir is the CALLER's variable (dot-sourced context): SC2154 is suppressed file-wide.
+# shellcheck disable=SC2154
 shim_init() {
-  SIM_KIND=$1                                  # "git" | "gh"
+  : "$1"                                     # "git" | "gh" — kept for symmetry with the caller
   SIM_SHIM_DIR=${shim_dir}
+  _SIM_DECIDE_EXTRA=()                       # further driver flags (shim_decide)
   SIM_INSTALL_ROOT=$(cd "$SIM_SHIM_DIR/../.." && pwd -P)
   SIM_DRIVER="$SIM_INSTALL_ROOT/.pi/extensions/multipi-devloop/src/policydriver.ts"
   # The loop's base branch is the protected ref: read it from the INSTALLED checkout's
   # config (the acting repo's own config, if it has one, is a different loop — its base is
   # not ours to protect here; DECISIONS 2026-11-10).
   SIM_BASE_BRANCH=main
-  if [ -f "$SIM_INSTALL_ROOT/scripts/lib/common.sh" ]; then
-    # shellcheck source=../../lib/common.sh
-    . "$SIM_INSTALL_ROOT/scripts/lib/common.sh"
+  SIM_SCRIPTS_DIR=$(cd "$SIM_SHIM_DIR/.." 2>/dev/null && pwd)
+  if [ -n "$SIM_SCRIPTS_DIR" ] && [ -f "$SIM_SCRIPTS_DIR/lib/common.sh" ]; then
+    # shellcheck source=lib/common.sh
+    . "$SIM_SCRIPTS_DIR/lib/common.sh"
     SIM_HAVE_COMMON=1
     if [ -f "$SIM_INSTALL_ROOT/.devloop.json" ]; then
       SIM_BASE_BRANCH=$(json_get base_branch <"$SIM_INSTALL_ROOT/.devloop.json")
@@ -132,17 +136,17 @@ shim_resolve_repo() { # shim_resolve_repo REALGIT DIR
 }
 
 # Consult the evaluator. Caller sets: SIM_CMD (the command line), SIM_TARGET (resolved
-# repo root, "" = unresolvable), and the fact flags SIM_PUSH_FORCE / SIM_PUSH_BASE /
-# SIM_PUSH_TAGS / SIM_TAG_MUTATION / SIM_GH_ACTION. Extra args are further driver flags
-# (the shims pass `--unresolvable-target` per unknown target). Result on stdout: the
-# driver's verdict line (ALLOW | BLOCK<TAB>LINE | INACTIVE…). rc 1 when it failed.
+# repo root, "" = unresolvable), the fact flags SIM_PUSH_FORCE / SIM_PUSH_BASE /
+# SIM_PUSH_TAGS / SIM_TAG_MUTATION / SIM_GH_ACTION, and _SIM_DECIDE_EXTRA (further driver
+# flags — the git shim passes `--unresolvable-target` per unknown target). Result on
+# stdout: the driver's verdict line (ALLOW | BLOCK<TAB>LINE | INACTIVE…). rc 1 when it failed.
 shim_decide() {
   local -a drv=(node "$SIM_DRIVER" --root "$SIM_INSTALL_ROOT" --command "$SIM_CMD")
   if [ -n "${SIM_TARGET:-}" ]; then
     drv+=(--target "$SIM_TARGET")
   fi
   local x
-  for x in "$@"; do
+  for x in "${_SIM_DECIDE_EXTRA[@]}"; do
     drv+=("$x")
   done
   [ "$SIM_PUSH_FORCE" = 1 ] && drv+=(--push-force)

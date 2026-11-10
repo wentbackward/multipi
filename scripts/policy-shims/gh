@@ -9,10 +9,14 @@
 #
 # Exit: 126 deny or ask (nothing executed), 127 real gh unlocatable, else the real
 # gh's own code.
+#
+# The SIM_* facts set below are read by shim_decide (policyshim.sh) — the consumer crosses
+# a file, so shellcheck cannot see the use (SC2034 is suppressed file-wide on purpose).
+# shellcheck disable=SC2034
 set -u
 
 shim_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-# shellcheck source=lib/policyshim.sh
+# shellcheck source=policy-shims/lib/policyshim.sh
 . "$shim_dir/lib/policyshim.sh"
 shim_init gh
 

@@ -12,10 +12,14 @@
 # Unresolvable acting repo or unknown push destination ⇒ deny (the oneshot rule, spec
 # §7.2: the fail direction is the 2026-11-09 failure mode itself). Exit: 126 deny or ask
 # (nothing executed), 127 real git unlocatable, else the real git's own code.
+#
+# The SIM_* facts set below are read by shim_decide (policyshim.sh) — the consumer crosses
+# a file, so shellcheck cannot see the use (SC2034 is suppressed file-wide on purpose).
+# shellcheck disable=SC2034
 set -u
 
 shim_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-# shellcheck source=lib/policyshim.sh
+# shellcheck source=policy-shims/lib/policyshim.sh
 . "$shim_dir/lib/policyshim.sh"
 shim_init git
 
@@ -98,7 +102,7 @@ case "$sub" in
     done
     if [ "${#positionals[@]}" -ge 1 ]; then
       case "${positionals[0]}" in
-        */* | .* | ..*)
+        */* | .*)
           dest_unknown=1                    # direct URL/path transport: not the acting repo
           positionals=("${positionals[@]:1}")
           ;;
@@ -154,11 +158,11 @@ SIM_TAG_MUTATION=0
 [ "$sub" = "tag" ] && SIM_TAG_MUTATION=1
 SIM_GH_ACTION=""
 
-extra=()
-[ -z "$SIM_TARGET" ] && extra+=(--unresolvable-target)   # acting repo unresolvable (spec §7.2)
-[ "$dest_unknown" = 1 ] && extra+=(--unresolvable-target)
+_SIM_DECIDE_EXTRA=()
+[ -z "$SIM_TARGET" ] && _SIM_DECIDE_EXTRA+=(--unresolvable-target)   # acting repo unresolvable (spec §7.2)
+[ "$dest_unknown" = 1 ] && _SIM_DECIDE_EXTRA+=(--unresolvable-target)
 
-outcome=$(shim_decide "${extra[@]}")
+outcome=$(shim_decide)
 rc=$?
 if [ "$rc" -ne 0 ]; then
   shim_fail_closed "the policy evaluator could not be consulted (missing node/driver?)"
