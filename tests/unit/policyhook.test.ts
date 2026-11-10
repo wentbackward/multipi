@@ -103,6 +103,17 @@ test("allow and default verdicts pass through (no block)", () => {
 	} finally { c.fx.cleanup(); }
 });
 
+test("posture:ask makes every unmatched call ASK with the exact directive (ruleId posture:ask)", () => {
+	const c = seed(PERMS({}), JSON.stringify({ policy: { posture: "ask" } }));
+	try {
+		const f = enforcer(c, []);
+		const b = f.onToolCall({ toolName: "bash", input: { command: "curl example.com" }, sessionId: null });
+		assert.ok(b?.block, "posture-ask blocks an unmatched call");
+		assert.equal(b!.reason, "ASK posture:ask: bash: curl example.com. Operator approval required: run 'multipi-approve posture:ask' in your own shell, then retry.",
+			"exact §6 directive with the posture rule id");
+	} finally { c.fx.cleanup(); }
+});
+
 // --- the audit log (spec §8) --------------------------------------------------
 
 test("each non-default verdict appends exactly one audit line with the seven fields; default passes log nothing", () => {

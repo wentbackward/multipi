@@ -260,7 +260,9 @@ export function createPolicyEnforcer(opts: EnforcerOpts): PolicyEnforcer {
 			}
 			// Non-default verdict: drift check FIRST (§8 warns at every non-default verdict).
 			const dh = diskHash();
-			const drifted = dh !== hash;
+			// "unreadable" = a transient disk failure on the RE-READ, not a policy change: it must
+			// not masquerade as drift (spurious warnings are noise the operator stops trusting).
+			const drifted = dh !== "unreadable" && dh !== hash;
 			const reason = d.verdict === "deny"
 				? formatDeny(d)
 				: formatAsk(d, summary);

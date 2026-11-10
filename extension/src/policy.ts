@@ -7,8 +7,10 @@
 //   Bash — `prefix:*` is prefix shorthand; any other `*` spans ANY run of characters (spaces,
 //          slashes); the match is anchored and case-sensitive.
 //   Read/Edit — `*` is one path component, `**` is any depth; a leading `./` is normalized away
-//          from both pattern and path; `~` is a LITERAL first segment (callers expand the home
-//          dir before calling — the evaluator is env-free).
+//          from both pattern and path; `~` is a LITERAL first segment — callers pass the
+//          path AS WRITTEN and must NOT pre-expand home: the seeded token-dir denials
+//          (Read(~/.multipi/…)) only fire on the literal form (P2-pinned convention; spec §9
+//          tripwire limit). The evaluator itself stays env-free.
 //
 // Honesty limits (spec §9, the tripwire contract): this is string-layer matching. Quoting,
 // wrapping (`sh -c`, heredocs), substitution and scripts the caller writes around it bypass it;
