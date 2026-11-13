@@ -2505,6 +2505,18 @@ expect "P3 smoke: a commit in a non-repo is denied (unresolvable) with 126" "126
 echo "$out" | grep -qF "DENIED oneshot:unresolvable-target:" && pass "P3 smoke: the unresolvable deny carries the rule id" ||
   fail "P3 smoke: the unresolvable deny line is wrong: $out"
 
+# 3b. gate-hang regression (post-approval review): the node-availability probe must never
+#     READ STDIN. A bare `node` inherits the caller's stdin (REPL/script read); under the
+#     gate that stdin is the open orchestrator execFile pipe, so the probe blocked forever
+#     and devloop.gate never resolved. Pin offline: the SAME foreign deny must land, well
+#     before the feeder closes, when the mutation runs against an OPEN stdin pipe.
+t0=$(date +%s)
+out=$( (cd "$work/p3-foreign" && PATH="$PSH:$PATH" git commit -q --allow-empty -m x) < <(sleep 15) 2>&1); rc=$?
+t1=$(date +%s)
+expect "P3 smoke: an open stdin pipe does not change the foreign deny (still 126)" "126" "$rc"
+[ $((t1-t0)) -lt 5 ] && pass "P3 smoke: the shimmed deny completes with an open stdin pipe (well under 5s; the feeder holds 15s)" ||
+  fail "P3 smoke: the shimmed commit BLOCKED on the open stdin pipe ($((t1-t0))s - the probe must be non-interactive)"
+
 # 4. base-branch push ⇒ deny; 5. force push ⇒ deny (flag and +refspec forms)
 out=$(p3git push origin main 2>&1); rc=$?
 expect "P3 smoke: a base-branch push is denied with 126" "126" "$rc"
