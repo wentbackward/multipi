@@ -2281,6 +2281,143 @@ grep -q '^firstdrift=clean$' "$work/.drift-out" && pass "P2 smoke: no drift warn
 grep -q '^drift=yes$' "$work/.drift-out" && pass "P2 smoke: a mid-session permissions.json edit is announced as POLICY DRIFT on the next non-default verdict" || fail "P2 smoke: mid-session policy edit was silent (no POLICY DRIFT warning)"
 rm -f permissions.json "$work/.policy-probe" "$work/.drift-out" "$AUDIT_LOG"
 unset AUDIT_LOG
+# --- ask machinery (permission-policy spec §6): operator mint + singleshot consume ----
+# The fixture "operator" (this script's shell, with a fixture POLICY_SIGNING_SECRET) mints
+# through the REAL scripts/multipi-approve CLI; consumption goes through the SAME module
+# the P2 hook / P3 shims will call (attemptConsume). The clock is driven by
+# MULTIPI_APPROVE_NOW_MS (mint) and the driver's `now` (consume) — TTL is tested without
+# sleeping. Tokens land under MULTIPI_HOME (already $work/home), never in the repo.
+APPR_CLI="$plugin/scripts/multipi-approve"
+APPR_MOD="$plugin/extension/src/approvals.ts"
+APPR_POLICY_MOD="$plugin/extension/src/policy.ts"
+TOKDIR="$work/home/project/dev-loop-tokens"
+AUDIT_LOG="$work/home/project/logs/policy-audit.jsonl"
+ASK_SECRET="smoke-operator-secret-not-a-real-credential"
+export POLICY_SIGNING_SECRET="$ASK_SECRET"
+ask_now_ms() { date +%s%3N; }
+ask_consume() { # ask_consume RULE [SCOPE] [NOW_MS] [SECRETFILE] -> "verdict" or "verdict:reason"
+  APPR_MOD="$APPR_MOD" TOKENV="$TOKDIR" ASK_RULE="$1" ASK_SCOPE="${2:-}" ASK_NOW="${3:-}" \
+    ASK_AUDIT="$AUDIT_LOG" POLICY_SIGNING_SECRET="$ASK_SECRET" ASK_SECRETFILE="${4:-}" \
+    node --input-type=module -e '
+import { readFileSync } from "node:fs";
+const mod = await import(process.env.APPR_MOD);
+const secret = process.env.ASK_SECRETFILE ? readFileSync(process.env.ASK_SECRETFILE, "utf8").trim() : process.env.POLICY_SIGNING_SECRET;
+const o = { tokenDir: process.env.TOKENV, ruleId: process.env.ASK_RULE, secret, layer: "smoke" };
+if (process.env.ASK_SCOPE) o.actionScope = process.env.ASK_SCOPE;
+if (process.env.ASK_NOW) o.now = Number(process.env.ASK_NOW);
+const out = mod.attemptConsume(o);
+mod.appendAudit(process.env.ASK_AUDIT, out.audit);
+console.log(out.verdict + (out.reason ? ":" + out.reason : ""));
+'
+}
+# The fixture project's policy: the confirmed token protections (spec §6).
+BASE_PORC=$(git status --porcelain) # the repo-clean pin's baseline, BEFORE this section touches the fixture
+mkcfg '"policy": {"posture": "allow", "repos": ["self"], "token_ttl_minutes": 10}'
+cat >permissions.json <<'EOF'
+{ "permissions": { "deny": [ "Read(~/.multipi/*/dev-loop-tokens/**)", "Bash(*multipi-approve*)", "Read(~/.multipi/*/policy-secret)" ], "allow": [], "ask": [] } }
+EOF
+
+TOK_MERGE="$TOKDIR/Bash__gh_pr_merge__.tok"
+TOK_TAG="$TOKDIR/Bash_git_tag___.tok"
+out=$(bash "$APPR_CLI" 'Bash(*gh pr merge*)' 2>&1); rc=$?
+expect "multipi-approve mints a token in the fixture operator's shell" "0" "$rc"
+[ -f "$TOK_MERGE" ] && pass "the token file lands in <state>/dev-loop-tokens" || fail "no token file at $TOK_MERGE ($out)"
+expect "the token dir is 0700" "700" "$(stat -c %a "$TOKDIR")"
+expect "the token file is 0600" "600" "$(stat -c %a "$TOK_MERGE")"
+grep -qF "$ASK_SECRET" "$TOK_MERGE" &&
+  fail "the signing secret leaked into the token file" || pass "the token file carries no secret bytes"
+READVERDICT=$(PROJDIR="$work/project" APPR_POLICY_MOD="$APPR_POLICY_MOD" READP="~/.multipi/project/dev-loop-tokens/Bash__gh_pr_merge__.tok" \
+  node --input-type=module -e '
+const mod = await import(process.env.APPR_POLICY_MOD);
+const p = mod.loadPolicy(process.env.PROJDIR);
+const d = mod.evaluate(p, { actor: "orchestrator", tool: "read", paths: [process.env.READP] });
+console.log(d.verdict);
+')
+expect "the agent's Read of the token dir is denied by the seeded policy (pre-consumption)" "deny" "$READVERDICT"
+expect "the live token passes consumption (mint -> consume happy path)" "pass" \
+  "$(ask_consume 'Bash(*gh pr merge*)' "" "$(ask_now_ms)")"
+[ -f "$TOK_MERGE" ] &&
+  fail "consumption left the token file behind" || pass "consumption removed the token file (singleshot)"
+expect "a second use of a consumed token denies no-token" "deny:no-token" \
+  "$(ask_consume 'Bash(*gh pr merge*)' "" "$(ask_now_ms)")"
+# TTL at the boundary, driven by the clock seam (no sleeps): ttl 1 minute.
+N0=$(ask_now_ms)
+MULTIPI_APPROVE_NOW_MS="$N0" bash "$APPR_CLI" 'Bash(git tag *)' --ttl 1 >/dev/null 2>&1
+expect "the TTL is honoured: 59 s of a 1-minute token is still live (clock seam)" "pass" \
+  "$(ask_consume 'Bash(git tag *)' "" $((N0 + 59 * 1000)))"
+MULTIPI_APPROVE_NOW_MS="$N0" bash "$APPR_CLI" 'Bash(git tag *)' --ttl 1 >/dev/null 2>&1
+expect "the TTL is enforced: 61 s of a 1-minute token is expired (clock seam, no sleep)" "deny:expired" \
+  "$(ask_consume 'Bash(git tag *)' "" $((N0 + 61 * 1000)))"
+[ -f "$TOK_TAG" ] &&
+  pass "an expired token is left in place for the operator's inspection" || fail "an expired token was consumed/deleted"
+NE=$(ask_now_ms)
+MULTIPI_APPROVE_NOW_MS=$((NE - 11 * 60 * 1000)) bash "$APPR_CLI" 'Bash(git tag *)' >/dev/null 2>&1
+expect "a token minted 11 minutes ago (default 10-minute TTL) is expired now" "deny:expired" \
+  "$(ask_consume 'Bash(git tag *)' "" "$NE")"
+# Forge: re-sign a LIVE token under a WRONG secret — verification must reject it.
+N1=$(ask_now_ms)
+MULTIPI_APPROVE_NOW_MS="$N1" bash "$APPR_CLI" 'Bash(git tag *)' --ttl 5 >/dev/null 2>&1
+H_ORIG=$(grep -o '"hmac": "[0-9a-f]*"' "$TOK_TAG" | cut -d'"' -f4)
+APPR_MOD="$APPR_MOD" FORGE_FILE="$TOK_TAG" node --input-type=module -e '
+import { readFileSync, writeFileSync } from "node:fs";
+const mod = await import(process.env.APPR_MOD);
+const t = JSON.parse(readFileSync(process.env.FORGE_FILE, "utf8"));
+t.hmac = mod.hmacOf(mod.canonicalPayload(t), "attacker-wrong-secret");
+writeFileSync(process.env.FORGE_FILE, JSON.stringify(t));
+'
+expect "a forged token (wrong-secret HMAC) is still blocked" "deny:bad-hmac" \
+  "$(ask_consume 'Bash(git tag *)' "" $((N1 + 60 * 1000)))"
+[ -f "$TOK_TAG" ] &&
+  pass "the forged token was denied, not consumed (audited event, evidence kept)" || fail "the forged token was consumed"
+# Scope binding: a scoped token never covers a foreign scope; the matching scope passes.
+bash "$APPR_CLI" 'Bash(*gh pr merge*)' --target main >/dev/null 2>&1
+expect "a scoped token denies a foreign scope (scope-mismatch)" "deny:scope-mismatch" \
+  "$(ask_consume 'Bash(*gh pr merge*)' staging "$(ask_now_ms)")"
+[ -f "$TOK_MERGE" ] &&
+  pass "a scope mismatch does not spend the token" || fail "a scope mismatch consumed the token"
+expect "the matching scope passes" "pass" \
+  "$(ask_consume 'Bash(*gh pr merge*)' main "$(ask_now_ms)")"
+# Garbage in the token slot: denied malformed, left in place.
+echo "not a token" >"$TOKDIR/Bash_git_tag_delete___.tok"
+expect "a garbage token file is denied malformed" "deny:malformed" \
+  "$(ask_consume 'Bash(git tag delete *)' "" "$(ask_now_ms)")"
+# Keyring fallback: no env secret, a fresh state dir — the CLI creates a 0600 keyring and
+# the SAME secret round-trips mint (bash) -> verify (TS).
+KEYRING="$work/home3/project/policy-secret"
+MULTIPI_HOME="$work/home3" env -u POLICY_SIGNING_SECRET bash "$APPR_CLI" 'Bash(git tag *)' >/dev/null 2>&1; rc=$?
+expect "without POLICY_SIGNING_SECRET the CLI mints via the created keyring" "0" "$rc"
+expect "the keyring is 0600 under the state dir" "600" "$(stat -c %a "$KEYRING" 2>/dev/null)"
+KEYTOKDIR="$work/home3/project/dev-loop-tokens"
+ASK_KEYCONSUME=$(APPR_MOD="$APPR_MOD" TOKENV="$KEYTOKDIR" ASK_RULE='Bash(git tag *)' ASK_NOW="$(ask_now_ms)" \
+  ASK_SECRETFILE="$KEYRING" ASK_AUDIT="$AUDIT_LOG" \
+  node --input-type=module -e '
+import { readFileSync } from "node:fs";
+const mod = await import(process.env.APPR_MOD);
+const out = mod.attemptConsume({ tokenDir: process.env.TOKENV, ruleId: process.env.ASK_RULE, secret: readFileSync(process.env.ASK_SECRETFILE, "utf8").trim(), now: Number(process.env.ASK_NOW) });
+mod.appendAudit(process.env.ASK_AUDIT, out.audit);
+console.log(out.verdict + (out.reason ? ":" + out.reason : ""));
+')
+expect "the keyring secret verifies the minted token (bash mint -> TS consume)" "pass" "$ASK_KEYCONSUME"
+# Hygiene: the token machinery never lands in the repo, and the audit log carries
+# neither the secret nor any token hmac (log hygiene: forge attempts stay reviewable).
+mkcfg '' # restore the base fixture config
+rm -f permissions.json
+expect "the token dir, keyring and tokens never land in the repo" "yes" \
+  "$([ "$BASE_PORC" = "$(git status --porcelain)" ] && echo yes)"
+find "$work/project" -name '*.tok' -print -quit | grep -q . &&
+  fail "a .tok file exists inside the repo" || pass "no .tok files inside the repo"
+n_audit=$(wc -l <"$AUDIT_LOG" 2>/dev/null || echo 0)
+[ "$n_audit" -ge 10 ] &&
+  pass "every consumption and denial was recorded (audit JSONL, $n_audit lines)" || fail "audit log has only $n_audit lines (want >= 10)"
+grep -q '"kind":"consumed"' "$AUDIT_LOG" &&
+  pass "the audit log carries consumed entries" || fail "no consumed audit entry"
+grep -q 'bad-hmac' "$AUDIT_LOG" &&
+  pass "the forge attempt is an AUDITED event (reason bad-hmac)" || fail "the forge attempt left no audit trail"
+grep -qF "$ASK_SECRET" "$AUDIT_LOG" &&
+  fail "the signing secret leaked into the audit log" || pass "the audit log carries no secret bytes"
+grep -qF "$H_ORIG" "$AUDIT_LOG" &&
+  fail "a token's hmac leaked into the audit log" || pass "the audit log carries no token hmac"
+unset POLICY_SIGNING_SECRET
 
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
 MULTIPI_PLUGIN_DIR="$plugin" env -u MULTIPI_CHILD node --input-type=module -e '
