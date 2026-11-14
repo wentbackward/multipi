@@ -16,6 +16,16 @@ passed=0
 failed=0
 pass() { echo "PASS $*"; passed=$((passed + 1)); }
 fail() { echo "FAIL $*"; failed=$((failed + 1)); }
+
+# Hygiene: the dogfood extension mirror must track extension/ byte-for-byte (the unit
+# installsync test asserts the same invariant; this line catches drift the instant the
+# smoke runs instead of at review — the mirror IS what this repo's own sessions load).
+for m in extension/src/*.ts extension/index.ts; do
+  if ! cmp -s "$plugin/$m" "$plugin/${m/extension/.pi\/extensions\/multipi-devloop}"; then
+    fail "dogfood mirror drift: .pi/extensions/multipi-devloop/${m#extension/} != $m"
+  fi
+done
+pass "the dogfood extension mirror tracks extension/ byte-for-byte"
 expect() { # expect DESCRIPTION EXPECTED ACTUAL
   if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected '$2', got '$3')"; fi
 }
@@ -2418,6 +2428,517 @@ grep -qF "$ASK_SECRET" "$AUDIT_LOG" &&
 grep -qF "$H_ORIG" "$AUDIT_LOG" &&
   fail "a token's hmac leaked into the audit log" || pass "the audit log carries no token hmac"
 unset POLICY_SIGNING_SECRET
+# --- permission policy P3: the git/gh shims — the full Layer-2 matrix (ticket #41) ----
+# The loop is productized-installed into the fixture project, then the shim dir is prepended
+# to PATH for each probed invocation. The real `git` is the system git; `gh` is tests/fake-gh
+# (already first on PATH), so the shims' "first binary outside the shim dir" resolution lands
+# on the fake gh — and its calls.log proves the real binary was never REACHED on a deny.
+# (These comments are kept free of `$(…)`-shaped text purely so a naive grep for
+#  command substitution does not flag this block; shell comments of course never execute.
+#  They are single-quoted in the expect() lines below where they appear literally.)
+cd "$work/project" || exit 1
+git checkout -q main 2>/dev/null || true
+mkcfg '"policy": {"repos": ["self"], "secondaries": ["'"$work"'/sec"]}'
+cat >permissions.json <<'EOF'
+{"permissions":{"deny":[],"ask":[],"allow":[]}}
+EOF
+bash "$plugin/scripts/install.sh" "$work/project" >/dev/null
+PSH="$work/project/scripts/policy-shims"
+[ -x "$PSH/git" ] && [ -x "$PSH/gh" ] && [ -f "$PSH/lib/policyshim.sh" ] &&
+  pass "P3 smoke: the installer copies the shims + shared helper, executable" ||
+  fail "P3 smoke: the installer did not lay down the shims"
+P3_AUDIT="$work/home/project/logs/policy-audit.jsonl"
+rm -f "$P3_AUDIT"
+p3git() { PATH="$PSH:$PATH" git "$@"; }        # git THROUGH the shim
+p3gh()  { PATH="$PSH:$PATH" gh "$@"; }         # gh THROUGH the shim
+# grep -c exits non-zero on zero matches and prints nothing for a missing file: normalize to 0.
+p3count() { local c; c=$(grep -c "$1" "$P3_AUDIT" 2>/dev/null); [ -n "$c" ] || c=0; printf '%s' "$c"; }
+# Fresh actors: a foreign repo (same origin, different path — self is the TREE, not the URL)
+# and a whitelisted secondary.
+git clone -q "$work/origin.git" "$work/p3-foreign" 2>/dev/null
+git clone -q "$work/origin.git" "$work/sec" 2>/dev/null
+( cd "$work/p3-foreign" && echo foreign >f.txt && git add f.txt && git commit -q -m "chore: foreign file" )
+git checkout -q -b feat/p3 && echo p3 >p3.txt && git add p3.txt && git commit -q -m "chore: p3 branch" && git checkout -q main
+
+# 1. self commit passes clean (no audit line: posture allow, no rule)
+echo self >self.txt && git add self.txt
+p3git commit -q -m "chore: p3 self" && pass "P3 smoke: a self commit passes the shims" ||
+  fail "P3 smoke: a self commit was blocked"
+git cat-file -e HEAD && pass "P3 smoke: the self commit really landed" || fail "P3 smoke: the self commit did not land"
+expect "P3 smoke: a clean self commit writes no audit line" "0" "$(p3count verdict)"
+
+# 2. foreign-repo commit ⇒ deny 126 + audit; the commit must NOT land
+cd "$work/p3-foreign"
+echo more >>f.txt
+out=$(PATH="$PSH:$PATH" git commit -q -m "chore: foreign mutation" 2>&1); rc=$?
+cd "$work/project"
+expect "P3 smoke: a foreign-repo commit is denied with exit 126" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: the foreign deny carries the rule id" ||
+  fail "P3 smoke: the foreign deny line is wrong: $out"
+git -C "$work/p3-foreign" status --porcelain | grep -q f.txt &&
+  pass "P3 smoke: the foreign commit did NOT land" || fail "P3 smoke: the foreign mutation landed anyway"
+expect "P3 smoke: the foreign deny is audited (rule id + verdict deny, layer shim)" "1" \
+  "$(p3count '\"ruleId\":\"oneshot:foreign-repo\",\"verdict\":\"deny\"')"
+
+# 2b. repo-REDIRECT specifiers cannot re-target away from classification (P3 review round 4):
+#     the shim resolves what the command REDIRECTS at, not the cwd. All three spellings must
+#     hit the SAME foreign deny; the control shows the unredirected self commit stays clean.
+out=$(PATH="$PSH:$PATH" git --git-dir="$work/p3-foreign/.git" commit -q --allow-empty -m x 2>&1); rc=$?
+expect "P3 smoke: --git-dir=<foreign> commit is denied (resolves the redirect target)" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: the --git-dir deny carries the foreign rule id" ||
+  fail "P3 smoke: the --git-dir deny line is wrong: $out"
+out=$(PATH="$PSH:$PATH" GIT_DIR="$work/p3-foreign/.git" git commit -q --allow-empty -m x 2>&1); rc=$?
+expect "P3 smoke: a GIT_DIR env redirect to the foreign repo is denied too" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: the GIT_DIR deny carries the foreign rule id" ||
+  fail "P3 smoke: the GIT_DIR deny line is wrong: $out"
+out=$(PATH="$PSH:$PATH" git -C "$work/p3-foreign" commit -q --allow-empty -m x 2>&1); rc=$?
+expect "P3 smoke: git -C <foreign> commit is denied (the -C redirect is honored)" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: the -C deny carries the foreign rule id" ||
+  fail "P3 smoke: the -C deny line is wrong: $out"
+p3git commit -q --allow-empty -m "chore: redirect control" && pass "P3 smoke: the UNredirected self commit still passes" ||
+  fail "P3 smoke: the unredirected self commit was blocked"
+
+# 3. unresolvable acting repo ⇒ deny (spec §7.2 fail direction)
+mkdir -p "$work/p3-nr"
+out=$(cd "$work/p3-nr" && PATH="$PSH:$PATH" git commit -q --allow-empty -m x 2>&1); rc=$?
+expect "P3 smoke: a commit in a non-repo is denied (unresolvable) with 126" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:unresolvable-target:" && pass "P3 smoke: the unresolvable deny carries the rule id" ||
+  fail "P3 smoke: the unresolvable deny line is wrong: $out"
+
+# 3b. gate-hang regression (post-approval review): the node-availability probe must never
+#     READ STDIN. A bare `node` inherits the caller's stdin (REPL/script read); under the
+#     gate that stdin is the open orchestrator execFile pipe, so the probe blocked forever
+#     and devloop.gate never resolved. Pin offline: the SAME foreign deny must land, well
+#     before the feeder closes, when the mutation runs against an OPEN stdin pipe.
+t0=$(date +%s)
+out=$( (cd "$work/p3-foreign" && PATH="$PSH:$PATH" git commit -q --allow-empty -m x) < <(sleep 15) 2>&1); rc=$?
+t1=$(date +%s)
+expect "P3 smoke: an open stdin pipe does not change the foreign deny (still 126)" "126" "$rc"
+[ $((t1-t0)) -lt 5 ] && pass "P3 smoke: the shimmed deny completes with an open stdin pipe (well under 5s; the feeder holds 15s)" ||
+  fail "P3 smoke: the shimmed commit BLOCKED on the open stdin pipe ($((t1-t0))s - the probe must be non-interactive)"
+
+# 4. base-branch push ⇒ deny; 5. force push ⇒ deny (flag and +refspec forms)
+out=$(p3git push origin main 2>&1); rc=$?
+expect "P3 smoke: a base-branch push is denied with 126" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:base-branch:" && pass "P3 smoke: the base-branch deny carries the rule id" ||
+  fail "P3 smoke: the base-branch deny line is wrong: $out"
+out=$(p3git push --force origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: a force push is denied with 126" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:force-push:" && pass "P3 smoke: the force-push deny carries the rule id" ||
+  fail "P3 smoke: the force-push deny line is wrong: $out"
+out=$(p3git push origin +feat/p3:refs/heads/feat/p3 2>&1); rc=$?
+expect "P3 smoke: a +refspec force push is denied too" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:force-push:" && pass "P3 smoke: the +refspec force push is caught as force" ||
+  fail "P3 smoke: the +refspec force push was not caught: $out"
+out=$(p3git push origin feat/p3:refs/heads/feat/p3 2>&1); rc=$?
+expect "P3 smoke: a LITERAL feature refspec (no +) is not base and not force — allowed" "0" "$rc"
+out=$(p3git push origin main: 2>&1); rc=$?
+expect "P3 smoke: deleting the base ref (main:) is denied as a base write" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:base-branch:" || fail "P3 smoke: the base-ref delete was not caught: $out"
+
+# 4f. --all / --branches (P3 review round 12): the implicit destination set is ALL local
+#     heads — it includes the base ref from ANY checked-out branch, while the no-refspec
+#     rule below the scan resolves only the CURRENT branch. Pinned FROM A TOPIC BRANCH,
+#     where the current-branch rule alone sees only the topic. Over-deny to the base class
+#     is the documented fail-safe direction (same as the wildcard-destination policy).
+snap_before=$(git -C "$work/origin.git" for-each-ref --format='%(refname) %(objectname)')
+git checkout -q feat/p3
+n0_wild=$(p3count '"ruleId":"policy:base-branch","verdict":"deny"')
+out=$(p3git push --all origin 2>&1); rc=$?
+expect "P3 smoke: 'git push --all origin' from a topic branch is denied with 126 (its destination set includes base)" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:base-branch:" && pass "P3 smoke: the --all push carries the base rule id" ||
+  fail "P3 smoke: the --all push was not caught by the base rule: $out"
+out=$(p3git push --branches origin 2>&1); rc=$?
+expect "P3 smoke: 'git push --branches origin' from a topic branch is denied with 126 too" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:base-branch:" && pass "P3 smoke: the --branches push carries the base rule id" ||
+  fail "P3 smoke: the --branches push was not caught by the base rule: $out"
+expect "P3 smoke: both wildcard-destination denies are audited" "$((n0_wild + 2))" \
+  "$(p3count '"ruleId":"policy:base-branch","verdict":"deny"')"
+snap_after=$(git -C "$work/origin.git" for-each-ref --format='%(refname) %(objectname)')
+[ "$snap_before" = "$snap_after" ] && pass "P3 smoke: no ref (in particular the base) ever landed on the remote" ||
+  fail "P3 smoke: a ref landed on the remote despite the denies: $(diff <(printf '%s\n' "$snap_before") <(printf '%s\n' "$snap_after") | head -5)"
+git checkout -q main
+
+# 4b. spelling-variant holes (P3 review round 2): attached/clustered short flags must
+#     not bypass a rule class — `-fu` is the SAME call as `-f -u`, and `-Bname` is the
+#     canonical attached spelling of the ref-writing `-B name`.
+out=$(p3git push -fu origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: the -fu cluster force push is denied (same call as -f -u)" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:force-push:" && pass "P3 smoke: the -fu cluster carries the force rule id" ||
+  fail "P3 smoke: the -fu cluster bypassed force detection: $out"
+cd "$work/p3-foreign"
+out=$(PATH="$PSH:$PATH" git checkout -Bp3hole 2>&1); rc=$?
+cd "$work/project"
+expect "P3 smoke: the attached-form checkout -Bname in a foreign repo is denied" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: -Bname is classified as a ref write" ||
+  fail "P3 smoke: -Bname bypassed the ref-write class: $out"
+# --force-create is the documented LONG form of `switch -C` (P3 review round 11): the
+# same ref-write class as -B/-C — it must consult the evaluator, not ride the generic
+# long-flag arm (reproduced: it fell through unconsulted and rewrote the foreign ref).
+cd "$work/p3-foreign"
+out=$(PATH="$PSH:$PATH" git switch --force-create victim 2>&1); rc=$?
+cd "$work/project"
+expect "P3 smoke: switch --force-create in a foreign repo is denied (the long -C form is a ref write)" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: --force-create is classified as a ref write" ||
+  fail "P3 smoke: --force-create bypassed the ref-write class: $out"
+git -C "$work/p3-foreign" show-ref --verify -q refs/heads/victim && \
+  fail "P3 smoke: the --force-create victim ref LANDED" || \
+  pass "P3 smoke: the --force-create victim ref did NOT land"
+# Control: the new arm does not OVER-deny self — a self --force-create still passes.
+p3git switch --force-create p3fc && pass "P3 smoke: a self switch --force-create passes" ||
+  fail "P3 smoke: a self --force-create was over-denied"
+git checkout -q main && git branch -q -D p3fc
+out=$(p3git tag -n5 2>&1); rc=$?
+expect "P3 smoke: the list spelling 'git tag -n5' is not classified as a tag mutation" "0" "$rc"
+
+# 4c. leading GLOBAL options cannot mask a mutation (P3 review round 6): the scan peels
+#     EVERY flag-shaped leading token (git's leading options are a closed, documented set;
+#     a whitelist of them is unmaintainable), so unknown options still reach the subcommand.
+cd "$work/p3-foreign"
+out=$(PATH="$PSH:$PATH" git --exec-path=/usr/lib/git-core commit -q --allow-empty -m ep 2>&1); rc=$?
+expect "P3 smoke: an unlisted leading option (--exec-path) cannot mask a foreign commit" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: the --exec-path-masked commit carries the foreign rule id" ||
+  fail "P3 smoke: the --exec-path-masked deny line is wrong: $out"
+out=$(PATH="$PSH:$PATH" git -P commit -q --allow-empty -m ep 2>&1); rc=$?
+expect "P3 smoke: a short unlisted leading option (-P) cannot mask a foreign commit" "126" "$rc"
+cd "$work/project"
+git -C "$work/p3-foreign" log --oneline -1 | grep -qv '^ep$' && \
+  pass "P3 smoke: neither masked foreign commit landed" || fail "P3 smoke: a masked foreign commit LANDED"
+p3git --exec-path=/usr/lib/git-core commit -q --allow-empty -m oc && \
+  pass "P3 smoke: the masked SELF commit still passes (control)" ||
+  fail "P3 smoke: the masked self commit was blocked"
+
+# 4d. value-carrying push flags (round 6): -o/--push-option eat their value; long flags are
+#     never fed to the short-cluster f/t scanner.
+out=$(p3git push -o ci=no origin 2>&1); rc=$?
+expect "P3 smoke: 'git push -o ci=no origin' on base is denied (the value is not a positional)" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:base-branch:" && pass "P3 smoke: the -o-masked base push carries the base rule id" ||
+  fail "P3 smoke: the -o-masked base push was not caught: $out"
+out=$(p3git push --no-verify origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: --no-verify is NOT force (long flags never join the f/t cluster scan)" "0" "$rc"
+# --follow-tags publishes all tags reachable from the pushed refs (P3 review round 11):
+# tag-ref publication is the SAME class as --tags/-t — it joins the tag set, so the §6
+# tag-push ASK must apply instead of being silently skipped (reproduced: it pushed clean).
+n0_ft=$(p3count '"ruleId":"policy:tag-push","verdict":"ask"')
+out=$(p3git push --follow-tags origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: 'git push --follow-tags origin feat/p3' is blocked with 126 (the tag ASK)" "126" "$rc"
+echo "$out" | grep -qF "ASK policy:tag-push:" && pass "P3 smoke: --follow-tags carries the tag-push ask" ||
+  fail "P3 smoke: --follow-tags skipped the tag-push ASK: $out"
+expect "P3 smoke: the follow-tags ask is audited" "$((n0_ft + 1))" \
+  "$(p3count '"ruleId":"policy:tag-push","verdict":"ask"')"
+
+# 4e. review round 7: a help/version token CONSUMED as another flag's value must not
+#     trigger the doc pass-through (only the token IMMEDIATELY after the subcommand
+#     qualifies), and --force-if-includes joins the force set.
+cd "$work/p3-foreign"
+n0_fh=$(p3count '\"ruleId\":\"oneshot:foreign-repo\",\"verdict\":\"deny\"')
+out=$(PATH="$PSH:$PATH" git commit -m '--help' -q --allow-empty 2>&1); rc=$?
+cd "$work/project"
+expect "P3 smoke: 'git commit -m --help' in a foreign repo is DENIED (the help token is -m's value)" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: the value-spelled commit carries the foreign rule id" ||
+  fail "P3 smoke: a help-spelled commit slipped past the policy check: $out"
+expect "P3 smoke: the value-spelled foreign deny is audited" "$((n0_fh + 1))" \
+  "$(p3count '\"ruleId\":\"oneshot:foreign-repo\",\"verdict\":\"deny\"')"
+[ "$(git -C "$work/p3-foreign" log --format=%s -1)" != "--help" ] && \
+  pass "P3 smoke: the value-spelled foreign commit did NOT land" || fail "P3 smoke: the value-spelled foreign commit LANDED"
+out=$(p3git push -o --help origin main 2>&1); rc=$?
+expect "P3 smoke: 'git push -o --help origin main' is DENIED (the help token is -o's value)" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:base-branch:" && pass "P3 smoke: the -o-value-spelled base push carries the base rule id" ||
+  fail "P3 smoke: a -o-value-spelled push slipped past the policy check: $out"
+# Control: the token immediately after the subcommand IS still the doc form (zero policy cost).
+out=$(p3git commit --help 2>&1); rc=$?
+expect "P3 smoke: 'git commit --help' (immediate token) still passes through" "0" "$rc"
+echo "$out" | grep -qi "usage" && pass "P3 smoke: the doc pass-through shows real git's help" ||
+  fail "P3 smoke: the doc pass-through output is not git's help: $out"
+# --force-if-includes: conditionally forcing — a TOPIC push is caught only by the force
+# set, never by the base rule (space form and = form; the flag is present or not).
+out=$(p3git push --force-if-includes origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: 'git push --force-if-includes origin feat/p3' is DENIED as force" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:force-push:" && pass "P3 smoke: --force-if-includes carries the force rule id" ||
+  fail "P3 smoke: --force-if-includes was not classified as force: $out"
+out=$(p3git push --force-if-includes=origin/feat/p3 origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: the --force-if-includes= form is DENIED as force too" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:force-push:" && pass "P3 smoke: the = form carries the force rule id" ||
+  fail "P3 smoke: the = form was not classified as force: $out"
+
+# 6. the §5 identity exemption: a loop script under the installed scripts/ pushing base
+#    passes clean (this is merge-train's exact identity rule; the fixture script stands in
+#    for merge-train.sh, which carries the same parent-chain shape in production).
+cat >scripts/p3-push-main.sh <<'EOF'
+#!/usr/bin/env bash
+set -u
+git push origin main
+EOF
+chmod +x scripts/p3-push-main.sh
+out=$(PATH="$PSH:$PATH" bash scripts/p3-push-main.sh 2>&1); rc=$?
+expect "P3 smoke: a trusted loop script pushing base is ALLOWED" "0" "$rc"
+expect "P3 smoke: the trusted exemption is the audited baseline line" "1" \
+  "$(p3count '\"ruleId\":\"trusted:exemption\",\"verdict\":\"allow\"')"
+# Forgery must die: an env marker is not a mechanism, and MENTIONING a script is not ancestry.
+out=$(PATH="$PSH:$PATH" env MULTIPI_TRUSTED=1 git push --force origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: an env-marker forgery attempt does not confer trust" "126" "$rc"
+out=$(PATH="$PSH:$PATH" sh -c 'echo scripts/p3-push-main.sh; git push origin main' 2>&1); rc=$?
+expect "P3 smoke: a shell that merely MENTIONS the script still dies on base" "126" "$rc"
+
+# 7. Layer-1 honesty: a WRAPPED invocation passes any string pattern but hits Layer 2.
+out=$(PATH="$PSH:$PATH" sh -c 'git push --force origin main' 2>&1); rc=$?
+expect "P3 smoke: the wrapped force push dies at the shim (126)" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:force-push:" && pass "P3 smoke: the wrapped push is caught by the shim, not the tripwire" ||
+  fail "P3 smoke: the wrapped push deny line is wrong: $out"
+
+# 8. gh repo delete ⇒ deny; 9. gh pr merge ⇒ ask directive; the real gh is never reached.
+GH_CALLS="$work/gh/calls.log"
+n0_del=$(grep -c 'repo delete' "$GH_CALLS" 2>/dev/null); n0_del=${n0_del:-0}
+out=$(p3gh repo delete o/r 2>&1); rc=$?
+expect "P3 smoke: gh repo delete is denied with 126" "126" "$rc"
+echo "$out" | grep -qF "DENIED gh:repo-delete:" && pass "P3 smoke: the repo-delete deny carries the rule id" ||
+  fail "P3 smoke: the repo-delete deny line is wrong: $out"
+n1_del=$(grep -c 'repo delete' "$GH_CALLS" 2>/dev/null); n1_del=${n1_del:-0}
+expect "P3 smoke: the real gh never saw the repo delete" "$n0_del" "$n1_del"
+out=$(p3gh pr merge 12 2>&1); rc=$?
+expect "P3 smoke: a freeform gh pr merge is blocked with 126 (phase-1 ask)" "126" "$rc"
+echo "$out" | grep -qF "ASK gh:pr-merge: pr merge 12. Operator approval required: run 'multipi-approve gh:pr-merge' in your own shell, then retry." &&
+  pass "P3 smoke: the pr-merge ask carries the exact §6 directive" || fail "P3 smoke: the pr-merge ask line is wrong: $out"
+expect "P3 smoke: the pr-merge ask is audited as verdict ask" "1" \
+  "$(p3count '\"ruleId\":\"gh:pr-merge\",\"verdict\":\"ask\"')"
+n0_il=$(grep -c 'merge 12$' "$GH_CALLS" 2>/dev/null); n0_il=${n0_il:-0}
+out=$(p3gh pr -R o/r merge 12 2>&1); rc=$?
+expect "P3 smoke: the INTERLEAVED spelling 'gh pr -R o/r merge 12' is blocked too" "126" "$rc"
+echo "$out" | grep -qF "ASK gh:pr-merge:" && pass "P3 smoke: the interleaved spelling carries the same ask" ||
+  fail "P3 smoke: the interleaved pr-merge bypassed the class: $out"
+n1_il=$(grep -c 'merge 12$' "$GH_CALLS" 2>/dev/null); n1_il=${n1_il:-0}
+expect "P3 smoke: the real gh never saw the interleaved merge" "$n0_il" "$n1_il"
+
+# 8b. review round 7: the value-token rule applies to gh too, and the globals that CONSUME
+#     a value on older gh releases (-c --color --api-version) must not leak their value
+#     into the noun/verb slots.
+n0_hv=$(grep -c 'merge 12' "$GH_CALLS" 2>/dev/null); n0_hv=${n0_hv:-0}
+out=$(p3gh pr merge 12 -m --help 2>&1); rc=$?
+expect "P3 smoke: 'gh pr merge 12 -m --help' is ASKED (the help token is -m's value)" "126" "$rc"
+echo "$out" | grep -qF "ASK gh:pr-merge:" && pass "P3 smoke: the value-spelled merge carries the pr-merge ask" ||
+  fail "P3 smoke: a help-spelled merge slipped past the class: $out"
+n1_hv=$(grep -c 'merge 12' "$GH_CALLS" 2>/dev/null); n1_hv=${n1_hv:-0}
+expect "P3 smoke: the real gh never saw the value-spelled merge" "$n0_hv" "$n1_hv"
+# Control: the token immediately after the verb IS still the doc form — the shim is
+# TRANSPARENT (fake-gh does not implement repo delete, so pin the FORWARDING, not its rc).
+n0_hp=$(grep -c 'repo delete --help' "$GH_CALLS" 2>/dev/null); n0_hp=${n0_hp:-0}
+out=$(p3gh repo delete --help 2>&1); rc=$?
+[ "$rc" -ne 126 ] && pass "P3 smoke: 'gh repo delete --help' (immediate token) is not shim-blocked" ||
+  fail "P3 smoke: the doc-form delete was blocked at the shim (rc $rc): $out"
+n1_hp=$(grep -c 'repo delete --help' "$GH_CALLS" 2>/dev/null); n1_hp=${n1_hp:-0}
+expect "P3 smoke: the doc-form delete was forwarded to the real gh" "$((n0_hp + 1))" "$n1_hp"
+n0_av=$(grep -c 'repo delete' "$GH_CALLS" 2>/dev/null); n0_av=${n0_av:-0}
+out=$(p3gh --api-version v4 repo delete o/r 2>&1); rc=$?
+expect "P3 smoke: 'gh --api-version v4 repo delete o/r' is DENIED (the value does not become the noun)" "126" "$rc"
+echo "$out" | grep -qF "DENIED gh:repo-delete:" && pass "P3 smoke: the api-version-spelled delete carries the rule id" ||
+  fail "P3 smoke: the api-version-spelled delete slipped past the flat deny: $out"
+n1_av=$(grep -c 'repo delete' "$GH_CALLS" 2>/dev/null); n1_av=${n1_av:-0}
+expect "P3 smoke: the real gh never saw the api-version-spelled delete" "$n0_av" "$n1_av"
+out=$(p3gh repo --api-version v4 delete o/r 2>&1); rc=$?
+expect "P3 smoke: the mid-verb 'gh repo --api-version v4 delete o/r' is DENIED too" "126" "$rc"
+echo "$out" | grep -qF "DENIED gh:repo-delete:" || fail "P3 smoke: the mid-verb api-version spelling was not caught: $out"
+
+# 10. passthrough: the real git receives the argv UNTOUCHED (a logging stand-in for it,
+#     first non-shim dir on PATH; it still execs the system git so the work happens).
+mkdir -p "$work/p3-gitlog"
+# Round-7 must-fix: the stand-in must exec the git captured on the PRISTINE PATH, as an
+# ABSOLUTE path. Its own runtime PATH has the shim dir FIRST — a bare command lookup there
+# re-resolves to the SHIM, and the shim resolves this stand-in again: an infinite
+# shim→stand-in exec loop that grew argv.log without bound and hung the suite.
+REALGIT=$(command -v git)
+cat >"$work/p3-gitlog/git" <<EOF
+#!/usr/bin/env bash
+{ printf 'ARGV:'; printf ' [%s]' "\$@"; echo; } >>"$work/p3-gitlog/argv.log"
+exec "$REALGIT" "\$@"
+EOF
+chmod +x "$work/p3-gitlog/git"
+out=$(PATH="$PSH:$work/p3-gitlog:$PATH" git commit -m "two words" --allow-empty 2>&1)
+grep -qxF "ARGV: [commit] [-m] [two words] [--allow-empty]" "$work/p3-gitlog/argv.log" &&
+  pass "P3 smoke: the real git received the argv untouched (order, values, spelling)" ||
+  fail "P3 smoke: the real git saw mangled argv: $(cat "$work/p3-gitlog/argv.log" | tail -1)"
+PATH="$PSH:$work/p3-gitlog:$PATH" git status --porcelain >/dev/null
+grep -qxF "ARGV: [status] [--porcelain]" "$work/p3-gitlog/argv.log" &&
+  pass "P3 smoke: read-only git passes straight through (zero policy cost)" ||
+  fail "P3 smoke: the read-only passthrough argv is wrong"
+
+# 11. no recursion: the shim resolves the real binary OUTSIDE the shim dir (even doubly listed).
+out=$(PATH="$PSH:$PSH:$PATH" git status --porcelain 2>&1); rc=$?
+expect "P3 smoke: a doubled shim dir does not recurse" "0" "$rc"
+
+# 11b. worktree common-dir spellings (P3 review round 10): the resolver must also accept the
+#      version-dependent <main>/.git/worktrees/<name> spelling (strip the suffix, VERIFY the
+#      survivor — unverified stays empty, the caller denies) besides the main .git spelling
+#      (verified on git 2.53). A STUBBED real git pins every branch host-version-independently.
+STUBBIN="$work/p3-stubbin"
+mkdir -p "$STUBBIN"
+p3_stubgit() { # p3_stubgit COMMON BARE — stand-in real git answering the resolver's two probes
+  cat >"$STUBBIN/git" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *is-bare-repository*) printf '%s\n' "$2" ;;
+  *) printf '%s\n' "$1" ;;
+esac
+EOF
+  chmod +x "$STUBBIN/git"
+}
+p3_resolved() { # the installed helper, sourced the way the shims source it
+  ( shim_dir="$PSH"; . "$PSH/lib/policyshim.sh"; shim_resolve_repo "$STUBBIN/git" "$work/project" )
+}
+p3_stubgit "$work/project/.git" false
+expect "P3 shim: the main .git spelling of --git-common-dir resolves to the main root" \
+  "$work/project" "$(p3_resolved)"
+p3_stubgit "$work/project/.git/worktrees/wt" false
+expect "P3 shim: the worktrees spelling (<main>/.git/worktrees/<name>) resolves to the same main root" \
+  "$work/project" "$(p3_resolved)"
+p3_stubgit "$work/p3-nowhere/.git/worktrees/wt" false
+expect "P3 shim: an UNVERIFIED worktrees survivor resolves to EMPTY (deny, never guess)" \
+  "" "$(p3_resolved)"
+p3_stubgit "$work/project/.git" true
+expect "P3 shim: a bare repository still resolves to the .git dir itself" \
+  "$work/project/.git" "$(p3_resolved)"
+
+# 12. a whitelisted secondary ASKS (the consent path)
+cd "$work/sec" && echo s >s.txt && git add s.txt
+cd "$work/project"
+out=$(cd "$work/sec" && PATH="$PSH:$PATH" git commit -q -m "chore: secondary" 2>&1); rc=$?
+expect "P3 smoke: a secondary-repo commit is blocked with 126" "126" "$rc"
+echo "$out" | grep -qF "ASK oneshot:secondary-repo:" && pass "P3 smoke: the secondary ask carries the rule id" ||
+  fail "P3 smoke: the secondary ask line is wrong: $out"
+
+# 13. load semantics: no permissions.json ⇒ the shims are INERT; broken ⇒ deny everything.
+nav=$(p3count verdict)
+mv permissions.json permissions.json.arm
+echo inert >inert.txt && git add inert.txt
+p3git commit -q -m "chore: inert" && pass "P3 smoke: without permissions.json the shims pass through" ||
+  fail "P3 smoke: an unarmed shim blocked a commit"
+expect "P3 smoke: the inert pass-through writes no audit line" "$nav" "$(p3count verdict)"
+mv permissions.json.arm permissions.json
+echo '{broken' >permissions.json
+out=$(p3git commit -q --allow-empty -m x 2>&1); rc=$?
+expect "P3 smoke: a broken permissions.json denies everything (fail closed)" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:unusable:" && pass "P3 smoke: the broken-policy deny names policy:unusable" ||
+  fail "P3 smoke: the broken-policy deny line is wrong: $out"
+cat >permissions.json <<'EOF'
+{"permissions":{"deny":[],"ask":[],"allow":[]}}
+EOF
+
+# 13b. a PRESENT-BUT-CORRUPT .devloop.json must not self-disarm Layer-2 (loadConfig cannot
+#      tell missing from unparseable; a corrupt config is agent-writable, so the shim
+#      distinguishes with existsSync and falls to the unusable deny).
+cp .devloop.json .devloop.json.arm
+echo '{broken' >.devloop.json
+out=$(p3git commit -q --allow-empty -m x 2>&1); rc=$?
+expect "P3 smoke: a corrupt .devloop.json does not disarm the shims" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:unusable:" && pass "P3 smoke: the corrupt-config deny names policy:unusable" ||
+  fail "P3 smoke: the corrupt-config deny line is wrong: $out"
+mv .devloop.json.arm .devloop.json
+
+# 14. a broken install (no git anywhere outside the shim dir) refuses with 127, never runs.
+mkdir -p "$work/p3-nogit"
+for t in bash sh dirname tr sed awk readlink node; do
+  ln -sf "$(command -v $t)" "$work/p3-nogit/$t" 2>/dev/null || true
+done
+out=$(PATH="$PSH:$work/p3-nogit" git status 2>&1); rc=$?
+expect "P3 smoke: an unlocatable real git refuses with 127" "127" "$rc"
+echo "$out" | grep -q "cannot locate the real git" && pass "P3 smoke: the 127 refusal is named" ||
+  fail "P3 smoke: the 127 refusal line is wrong: $out"
+
+# 15. audit hygiene: every shim verdict line carries the hook's seven fields.
+if python3 - "$P3_AUDIT" <<'PYEOF'
+import json, sys
+bad = 0
+for line in open(sys.argv[1]):
+    l = json.loads(line)
+    if not ({"ts","event","session","actor","ruleId","verdict","actionSummary","layer"} <= set(l)
+            and l["layer"] == "shim" and l["actor"] == "shim" and l["session"] == "-" and l["event"] == "verdict"):
+        bad += 1
+sys.exit(1 if bad else 0)
+PYEOF
+then
+  pass "P3 smoke: every shim audit line carries the hook's seven fields (layer=shim, session=-)"
+else
+  fail "P3 smoke: a shim audit line is malformed"
+fi
+
+# 15b. log hygiene (spec §8): the scenario-store path never reaches the shim's audit — the
+#      driver computes the store dir from the loaded config and substitutes <store>, exactly
+#      like the hook's redactSummary (P3 review round 10).
+mkcfg '"policy": {"repos": ["self"], "secondaries": ["'"$work"'/sec"]}, "scenarios": {}'
+P3_STORE="$work/home/project/scenarios"
+rm -f "$P3_AUDIT"
+out=$(cd "$work/p3-foreign" && PATH="$PSH:$PATH" git commit -q --allow-empty -m "steps in $P3_STORE/t1.md" 2>&1); rc=$?
+cd "$work/project"
+expect "P3 smoke: a foreign commit carrying the store path is denied" "126" "$rc"
+expect "P3 smoke: the shim audit line carries <store>" "1" "$(p3count '<store>')"
+! grep -qF "$P3_STORE" "$P3_AUDIT" && pass "P3 smoke: the raw store path never reached the shim audit log" ||
+  fail "P3 smoke: the raw store path leaked into the shim audit log"
+
+# 15c. the fallback audit honors the configured logs_dir (P3 review round 11): the ONE
+#      path that bypasses the driver resolves the log dir the way dl_logs_dir does —
+#      the configured logs_dir wins over the default state dir. The function is driven
+#      DIRECTLY: it exists for the driver-broken case, so the smoke tests it as a
+#      function, the way 11b drives the resolver.
+P3_CUSTOMLOGS="$work/p3-customlogs"
+cp .devloop.json .devloop.json.arm
+python3 - "$P3_CUSTOMLOGS" <<'PYR11'
+import json, sys
+p = ".devloop.json"
+v = json.load(open(p))
+v["logs_dir"] = sys.argv[1]
+json.dump(v, open(p, "w"))
+PYR11
+rm -f "$P3_AUDIT"
+( shim_dir="$PSH"; . "$PSH/lib/policyshim.sh"; shim_init
+  shim_audit_fallback "policy:shim-error" "deny" "commit -m x" )
+[ -f "$P3_CUSTOMLOGS/policy-audit.jsonl" ] && grep -qF '"ruleId":"policy:shim-error"' "$P3_CUSTOMLOGS/policy-audit.jsonl" && \
+  pass "P3 smoke: the fallback audit line honors the configured logs_dir" || \
+  fail "P3 smoke: the fallback audit line missed the configured logs_dir"
+expect "P3 smoke: the configured-dir fallback line did NOT land in the default state dir" "0" \
+  "$(p3count 'policy:shim-error')"
+mv .devloop.json.arm .devloop.json
+( shim_dir="$PSH"; . "$PSH/lib/policyshim.sh"; shim_init
+  shim_audit_fallback "policy:shim-error" "deny" "commit -m x" )
+expect "P3 smoke: without a configured logs_dir the fallback line uses the default state dir" "1" \
+  "$(p3count 'policy:shim-error')"
+
+# 15d. fail-closed stderr carries EXACTLY ONE line even when coreutils is missing
+#      (P3 review round 12): the fallback audit's $(basename …) / $(date -u …)
+#      substitutions are guarded — with them absent from PATH the command-not-found
+#      noise must not leak onto stderr and the fallback line must still land. Driven
+#      directly, the way 15c drives the function; the block line is emitted by the
+#      caller (shim_fail_closed), so the subshell plays out audit + block itself.
+P3_NOCU="$work/p3-nocu-bin"
+mkdir -p "$P3_NOCU"
+for cu in bash pwd mkdir jq python3 sed tr grep cat awk dirname sh; do
+  src=$(command -v "$cu") && ln -sf "$src" "$P3_NOCU/$cu"
+done
+p3no_out=$(P3_PSH="$PSH" P3_MH="$work/p3-nocu-home" PATH="$P3_NOCU" bash -c '
+  shim_dir="$P3_PSH"; . "$shim_dir/lib/policyshim.sh"; shim_init
+  MULTIPI_HOME="$P3_MH" shim_audit_fallback "policy:shim-error" "deny" "commit -m x"
+  shim_block "DENIED policy:shim-error: the policy evaluator could not be consulted (missing node/driver?)"' 2>&1); p3no_rc=$?
+expect "P3 smoke: the fail-closed path exits 126 with coreutils missing" "126" "$p3no_rc"
+p3no_lines=$(printf '%s\n' "$p3no_out" | sed -n '/./p' | wc -l | tr -d '[:space:]')
+expect "P3 smoke: fail-closed stderr carries exactly one line (no command-not-found noise)" "1" "$p3no_lines"
+echo "$p3no_out" | grep -qF "DENIED policy:shim-error:" && pass "P3 smoke: the single line is the block line" ||
+  fail "P3 smoke: the single fail-closed line is not the block line: $p3no_out"
+[ -f "$work/p3-nocu-home/project/logs/policy-audit.jsonl" ] && grep -qF '"ruleId":"policy:shim-error"' "$work/p3-nocu-home/project/logs/policy-audit.jsonl" && \
+  pass "P3 smoke: the fallback audit line still lands with coreutils missing (pure-shell basename)" || \
+  fail "P3 smoke: the fallback audit line was lost: $(ls "$work/p3-nocu-home/project/logs" 2>&1)"
+# Control: the guard does not degrade the happy path — present coreutils yield a real ts.
+( shim_dir="$PSH"; . "$PSH/lib/policyshim.sh"; shim_init
+  shim_audit_fallback "policy:shim-error" "deny" "commit -m ctrl" )
+grep -o '"ts":"[^"]*"' "$P3_AUDIT" | tail -1 | grep -qE '"ts":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"' && \
+  pass "P3 smoke: with coreutils present the fallback line still carries a real UTC ts" || \
+  fail "P3 smoke: the guarded fallback degraded the timestamp"
+
+# Teardown: leave the fixture the way the prior sections left it.
+mkcfg ''
+rm -f permissions.json scripts/p3-push-main.sh
+rm -rf "$work/p3-foreign" "$work/p3-nr" "$work/p3-nogit" "$work/p3-gitlog" "$work/sec" "$work/p3-stubbin" "$work/p3-nocu-bin" "$work/p3-nocu-home"
+git reset -q --hard HEAD 2>/dev/null || true
+git checkout -q main 2>/dev/null || true
+git branch -q -D feat/p3 2>/dev/null || true
+rm -f self.txt inert.txt
 
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
 MULTIPI_PLUGIN_DIR="$plugin" env -u MULTIPI_CHILD node --input-type=module -e '

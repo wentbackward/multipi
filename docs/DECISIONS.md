@@ -181,6 +181,116 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
 - 2026-11-10 — P2 drift definition (spec §8 "warn on drift vs the last committed one"): at every NON-DEFAULT verdict the on-disk policy files are re-loaded and re-hashed (rules + knobs, sha256, rule CLASS part of the digest — moving a rule between deny/ask/allow is a change) and compared against the load-time hash; a difference leads the block reason with `POLICY DRIFT: … enforcing the session-loaded policy` and lands `policyDrift`/both hashes in the audit line. Reading DISK (not `git show HEAD`) is the superset of "vs last commit" (it also catches uncommitted edits, and needs no git plumbing in the hook) — alternative rejected; the check is skipped when the in-memory policy is unusable (nothing comparable). Cost is bounded: it runs only on non-default verdicts, which are exactly the interesting moments.
 - 2026-11-10 — P2 audit log (spec §8, state dir's `logs/policy-audit.jsonl`, JSONL `ts/session/actor/ruleId/verdict/actionSummary/layer`, layer=`hook`, session-start line carries `policyHash`): every non-default verdict logs one line PLUS every allow BY CURATED RULE (the §3 "allow list is bookkeeping and audit baseline", which is where dangerous-class near-misses surface); posture-default passes log NOTHING (steady state). Full enumeration instead of a sampled heartbeat — sampling was rejected: an offline test cannot pin a random subset. `actionSummary` is bounded (160 chars) and redacted: token-dir paths (any home spelling) become `<token-dir>`, the scenario-store dir becomes `<store>`; a failing append degrades the audit with a one-time warning and never breaks a verdict (pinned). The log honours the configured `logs_dir` override (same resolution as every other devloop log) — the spec's "state dir's logs" is the DEFAULT, not a second resolution rule. Ask-by-posture (no matched rule) escalates under the synthetic structural id `posture:ask`.
 - 2026-11-10 — P2 path convention (ticket #40 addendum from #39 review round 3): the hook passes read/edit/write paths to the evaluator in the LITERAL form the model wrote in the tool call — `~` is NOT pre-expanded, because the seeded token-dir denies use the literal-`~` glob convention (`Read(~/.multipi/*/dev-loop-tokens/**)`) and an expanded path would silently skip them. Both directions are pinned (unit AND smoke): the literal-`~` path is denied under the seeded rule id, and the expanded absolute path PASSES today — a pinned tripwire-only limit (spec §9: the secret-minting design does not rely on the Read denies), so a future "helpful" expansion fails a test instead of silently disarming the seed.
+- 2026-11-10 — P3 shims (ticket #41, spec §4-L2/§5/§7). Trusted-program identity mechanism: a /proc PPID-chain walk of the shim's own ancestry (each ancestor's script argument — an interpreter's .sh arg or a shebang script, resolved via the ancestor's /proc cwd when relative), handed to the driver as CANDIDATES; identity (realpath under a checkout of THIS repo's scripts/, .sh regular file, no symlink escape, worktrees of the same repo count, foreign repos never) is decided in policy.ts `hasTrustedAncestor`. Alternatives rejected: an env marker (forgeable by a plain shell invocation — the ticket bars it), realpath-of-self (says nothing about WHO called). Honest limits pinned in code: `exec git` from a script erases that script's identity (the loop scripts never exec git); no /proc ⇒ untrusted (fail closed). — P3 verdicts: the shims exit 126 for BOTH deny and ask (phase-1 ask is a block; token consumption is P6 — no separate ask code reserved); 127 = real binary unlocatable outside the shim dir (broken install, nothing ran); any other exit is the real binary's own (shim execs, argv untouched). — P3 Layer-2 rule classes in the evaluator: base-branch and force pushes DENY, git-tag mutation / tag-push / gh:pr-merge ASK (the §6 ask list). The §5 trusted identity lifts ONLY the base-branch/force denials and the pr-merge ask (the spec scopes that one to "outside a trusted program"); it NEVER lifts the tag asks — the §6 ask list carries `git tag` (create/delete) and `push --tags` WITHOUT a trusted carve-out (corrected 2026-11-14, P3 review round 10: the original wording counted the tag asks among the lifted classes and the code followed it). `gh:repo-delete` is a dangerous class that stays flat-denied even for a trusted program. Alternatives: lifting nothing (would wedge merge-train's base push — the loop's one legitimate writer) or lifting repo-delete (unsafe); the split follows the spec's own wording, which scopes only base-branch/force and "pr merge outside a trusted program". — P3 mutation set = the ticket's list (commit, am, reset, tag in mutation form, push, checkout -B / switch -C); read-only git (incl. fetch/pull/merge/branch -D) and non-mutation gh subcommands pass through with ZERO evaluator cost (no node spawn). `--dry-run` push is not a mutation. — P3 refspec detection is DESTINATION-based: a refspec whose source is the base name (main:topic) is not a write to base; `git push` with no refspec resolves the destination from the checked-out branch (on base ⇒ base; detached ⇒ unknown destination ⇒ deny); direct URL/path transports, `--repo=*`/`--receive-pack=*`, and wildcard destinations that could reach the base ref all fail closed. The protected base branch is the INSTALLED checkout's `base_branch` (the acting repo's own config, if any, is a different loop). — P3 load semantics mirror the P2 hook: no .devloop.json ⇒ shims INACTIVE (pass through silently); no permissions.json ⇒ INACTIVE; present-but-broken ⇒ deny everything (`policy:unusable`); evaluator unreachable (node/driver/config-reader missing) ⇒ `policy:shim-error` deny, audited best-effort by the shim itself. — P3 audit: the DRIVER appends every non-default verdict plus rule-backed allows, the hook's exact seven fields with layer=shim, actor=shim, session="-" (a shim has no pi session id; the env carries none — no new MULTIPI_* seam). Quoted argv degrades only the STRING-rule view (the driver sees the `$*` re-join); the structural facts are parsed from the real argv, so the honesty loss is bounded to the tripwire layer (spec §9). The policy line format (formatPolicyDeny/Ask + redactActionSummary) lives in policy.ts — P2's policyhook.ts copy (sibling branch, not in this base) keeps its duplicate until a consolidation ticket; the shapes are test-pinned in both layers. — P3 session PATH: the orchestrator's extension prepends <main root>/scripts/policy-shims at session_start (one string op, idempotent, absent dir ⇒ no-op); children never register it and inherit the shims through spawnPi's process-env spread, so their loop-script ancestry carries the §5 exemption into theirs too.
+- 2026-11-10 — P3 addendum: the shim's repo-scope decision compares the rev-parse-resolved acting repo PATH against policy.repos/secondaries (the allowlist is path-shaped, per §7.3) and does NOT consult the configured remote URL: URLs can carry credential userinfo (audit-hygiene hazard) and add no discriminating power over the path check, while the base-branch rule applies to a push to the base ref of ANY remote (stricter than "origin only" — the fail-safe direction).
+- 2026-11-10 — P3 review round-2 fixes. (1) Short-flag GRAMMAR: the checkout/switch ref-write
+  class now recognizes the standalone, ATTACHED (`checkout -Bname`) and short-cluster spellings
+  (any `-?…` cluster containing the letter); push force/tags detection parses `-[a-z]*` clusters
+  char-by-char (`-fu` is the same call as `-f -u` — one spelling must not bypass a rule class).
+  `git tag -n5` (list spelling with attached count) no longer over-triggers the tag-mutation
+  class. (2) Self-disarm closed: loadConfig returns null for a MISSING and a CORRUPT
+  .devloop.json alike; the shim (and the P2 hook, coordinated on its branch) now distinguishes
+  via existsSync on the version-controlled config — missing ⇒ INACTIVE (the loop itself is not
+  installed), present-but-corrupt ⇒ `policy:unusable` deny (a corrupt config is
+  agent-writable; it must not pass everything through). (3) Mutation-set honesty, stated
+  plainly (correcting the earlier entry's "read-only (incl. merge/branch -D)" — those WRITE
+  refs and are NOT in the mutation set): the Layer-2 structural check covers exactly
+  {commit, am, reset, tag-mutation, push, checkout -B / switch -C}; rebase, cherry-pick,
+  merge, and branch -D/-M in a foreign repo pass through UNCLASSIFIED today — a known
+  residual of the enumerated-set design (flipping to a read-only allowlist would change
+  every git call's cost profile; the tripwire layer and P5's zero-deny acceptance are the
+  compensations, and the residual is named here so it is a decision, not a surprise).
+  Added in review round 8 (reproduced; named, NOT fixed this round): a work-tree REDIRECT
+  decouples a mutation's EFFECT from the repo identity the shim classifies —
+  `git --git-dir=<self> --work-tree=<foreign-checkout> reset --hard` classifies SELF
+  (identity follows the redirected git-dir's common dir, the round-4 resolution rule, which
+  stays pinned) yet lands the overwrite on the FOREIGN tree. Same fail-safe asymmetry
+  family as the unclassified-verbs residual above (it over-ALLOWs, not under-); same
+  compensations. Alternatives considered and deferred: also resolving the effective
+  work-tree and denying when it lies outside the classified repo's own trees (changes the
+  round-4 pinned resolution semantics mid-stream; a future ticket), and treating ANY
+  --work-tree/GIT_WORK_TREE as unresolvable ⇒ deny (over-denies the legitimate detached-
+  HEAD and secondary-checkout spellings the loop may need).
+  Added in review round 12 (named, NOT fixed): plain `git push` with a CONFIG-FLAVORED
+  implicit destination — the shim resolves the no-refspec destination from the CHECKED-OUT
+  branch (bare-push semantics), but with `push.default=matching` the destination set is ALL
+  matching local heads, the same class as `--all`/`--branches` (round-12 entry below). The
+  configured `push.default` is probed nowhere; a config probe was considered and declined
+  this round (matching is a rarely set value whose legitimate users collide with the
+  loop's own bare-push ergonomics, and reading config into a scan meant to stay argv-only
+  is a wider change than this residual owes) — same fail-safe asymmetry family and
+  compensations (tripwire layer + audit) as the unclassified-verbs residual above.
+- 2026-11-10 — P3 review round-3 fixes + named residual. (1) Restored the
+  checkout/switch standalone+attached arm (`flag=-$ch`; the round-2 refactor left `flag=0`,
+  which turned the arm into a positional-argument matcher — an over-deny on branches
+  spelled with a leading 0, demonstrated by the reviewer). (2) The long-flag exclusion now
+  matches the RAW argument (`--*)` before any hyphen stripping, replacing a dead arm.
+  (3) shim_init drops its unused first parameter. (4) Named residual, §5 trusted identity:
+  the exemption is a MECHANICAL realpath rule ("a .sh regular file under a checkout of this
+  repo's scripts/"), so an agent-written, UNTRACKED scripts/foo.sh earns the §5 exemption the
+  moment it exists on disk — no review of foo.sh has happened. The spec's letter says exactly
+  this ("matched by realpath"), and the structural denies (foreign-repo, unresolvable,
+  repo-delete) remain non-exempt regardless; the residual is the loop's own working
+  directory trusting its own scripts/ tree, and it is pinned here rather than silently
+  widened. The compensation is the audit log: a trusted exemption is a logged
+  allow-by-rule line (`trusted:exemption`), so unreviewed-script abuse is visible
+  after the fact. Alternatives considered and rejected for this round: requiring the
+  candidate to be tracked at HEAD (changes the spec's mechanical rule mid-flight; defer to
+  a governance ticket if the residual proves hot).
+- 2026-11-10 — P3 review round-4 fixes (two live oneshot-class bypasses, both reproduced by
+  the reviewer with controls before the fix). (1) Repo REDIRECT specifiers are no longer
+  peeled-and-ignored: `--git-dir`/`--work-tree` (flag and `=` forms) are collected and
+  forwarded into the shim's own rev-parse/symbolic-ref resolution, and `GIT_DIR`/
+  `GIT_WORK_TREE` env redirects ride along by inheritance — the effective target is
+  whatever the command REDIRECTS at, so `git --git-dir=<foreign>/.git commit` from inside
+  the self repo now classifies against the foreign repo (deny). `-C` already selected the
+  acting directory; it is pinned now too. The loop's own scripts never use raw
+  `--git-dir` (verified by grep — they use `-C`), so loop traffic is unaffected. (2) §5
+  trusted identity no longer trusts a `.git` pointer's self-declaration:
+  `hasTrustedAncestor` now runs `isRealCheckoutOf` ground truth — a real `.git` directory
+  must BE the scope root (realpath); a pointer declaring the main gitdir must be
+  self-contained; a pointer declaring a worktree admin dir must find that admin dir
+  existing under the scope's own .git AND round-trip via its `gitdir` back-pointer to the
+  impostor's own .git file. Named residual: forging identity now requires OVERWRITING a
+  genuine worktree's back-pointer inside the loop's own .git admin data — that corrupts
+  that worktree (fatal gitfile), i.e. the forge is self-destructing, not a silent
+  privilege gain. Unit pins: real worktree earns, nonexistent-admin forge fails,
+  stolen-real-admin forge fails the round-trip.
+- 2026-11-10 — P3 review round-5 fixes. (1) gh verb derivation now skips global flags
+  INTERLEAVED between noun and verb (`gh pr -R o/r merge 12` is the same call as
+  `gh pr merge 12 -R o/r`; verified against the real gh) — an interleaved spelling must
+  not bypass the `gh:pr-merge` ask or the `gh:repo-delete` deny; pinned in the smoke
+  matrix (the real gh must never see the interleaved form). (2) shellcheck target back to
+  green (the redir string-capture was an SC2124/SC2086 regression; the array now expands
+  in the guarded-quoting form that is clean under set -u AND shellcheck). (3) Named
+  residual, added to the round-4 list: value-consuming short flags on a push
+  (`-c push.default=current origin feat`) — their VALUE is read as a positional, which the
+  destination scanner may class as `dest_unknown` ⇒ an over-DENY of a legal spelling
+  (fail-safe direction, rare in practice; special-casing `-c`/`-o` value semantics was
+  rejected as parser surface for a one-word false alarm). (4) The smoke audit-hygiene
+  check now uses an `if python3 … heredoc` form (no bare `$?` after a heredoc).
+- 2026-11-10 — P3 review round-6 fixes (two live bypasses, both reproduced with controls
+  against the installed shims). (1) The leading global-option scan is now GRAMMAR-BASED
+  instead of a whitelist: every flag-shaped leading token is peeled; only git's CLOSED,
+  documented value-consumers (-C -c --exec-path --config-env --git-dir --work-tree
+  --namespace --super-prefix --upload-pack --receive-pack) eat the next word; `--` is the
+  separator; the first bare token is the subcommand. A whitelist of git's option surface
+  is unmaintainable and failed exactly as predicted (`git --exec-path=x commit` was
+  misread as a non-mutation and a foreign commit landed). Named residual: an UNKNOWN
+  space-form value option that git accepts but this closed set does not list could push
+  its value into the subcommand slot — mitigated because the value then has to LOOK LIKE
+  a mutation subcommand to matter, and git's leading options are a fixed, documented set.
+  (2) The push scanner skips value-carrying flags: -o/--push-option eat their space-form
+  value (`git push -o ci=no origin` on base used to slip past as a feature push — the
+  value was mis-indexed as the remote); long flags (--*) are excluded from the short-cluster
+  f/t scan (round 5's `--no-verify → force` over-deny class), mirroring the checkout arm.
+  CORRECTION to the round-5 entry: its claim about value forms was directionally wrong —
+  the -o/--push-option forms UNDER-denied (base push allowed) rather than over-denying;
+  the -c-on-push case remains an over-deny at worst (its value becomes a fake remote,
+  destination falls back to the checked-out branch). (3) gh's --help scan now starts
+  before the verb (gh repo --help delete). (4) RULE_SHIM_ERROR drift pin; smoke
+  audit-hygiene if-heredoc form; renamed-.git residual named (a core.worktree-style
+  renamed git dir resolves nothing ⇒ deny, fail-safe direction).
 - 2026-11-13 — P6 ask-machinery (spec 2026-11-09 §6/§9, ticket #44). (1) Signing secret: the
   operator's `POLICY_SIGNING_SECRET` env var wins; the fallback is the keyring
   `<state>/policy-secret` (0600, created ONCE by the CLI when the env var is absent —
@@ -215,6 +325,128 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
   pins, the hook/shim wiring rides the P2/P3 branches (spec §11: each ticket
   independently gatable).
 - 2026-11-13 — #48's stated mechanism (add `stdio: ["ignore","pipe","pipe"]` to the `execFile` options in `gate.ts`/`stopgate.ts`) does not work on Node 24: `execFile`'s options type excludes `stdio` and the runtime silently drops it — verified empirically (a `bash -c 'read'` child spawned via `execFile` with the `stdio` option still blocked on its stdin pipe). The fix therefore switches both call sites to `spawn` from the same `node:child_process` module with `stdio: ["ignore","pipe","pipe"]`, replicating `execFile` semantics exactly (exit-code mapping incl. non-zero codes, per-stream maxBuffer kill, the fast check's 10-minute SIGTERM timeout, stdout-then-stderr tail). Behaviour contract (EOF for stdin-reading checks, identical results for well-behaved ones) is met and unit-tested; no pinned contract changes. Alternatives rejected: wrapping commands in `bash -c 'exec 0</dev/null; …'` (changes `$0`/subshell semantics of checked scripts — not safe for arbitrary fast checks or gate scripts); relying on a future Node `execFile` stdio passthrough (the loop runs on the pinned Node 24).
+- 2026-11-13 — P3 review round-7 fixes (two live bypasses reproduced, two should-fixes).
+  (1) The doc pass-through in BOTH shims is now scoped to the ONE token immediately after
+  the subcommand (git) / verb (gh). Round 6's ANYWHERE scan let a mutation carrying a
+  literal help-shaped token as a flag VALUE skip the entire policy check (`git commit -m
+  --help` landed un-audited in a foreign repo; `git push -o --help origin main` attempted a
+  real push; `gh pr merge 12 -m --help` forwarded to the real gh). Named residuals of the
+  narrower reading, both over-CONSULT not over-allow: `git commit -q --help` and
+  `gh repo --help delete` now evaluate as mutations (self: allow, off-self: ask-shaped) —
+  fail-safe direction. (2) `--force-if-includes` joins the push force set (space and =
+  forms): conditionally forcing, and a topic push is invisible to the base rule. The
+  space-form optional ref is deliberately NOT value-consumed: if present it lands in the
+  positionals, where it can only over-deny (it cannot un-cover the remote/refspec, and the
+  force bit is set unconditionally). Chosen over value-consumption because swallowing the
+  word could mask the remote/destination while leaking a value can only add refspecs.
+  (3) The gh globals -c/--color/--api-version are value-CONSUMING on older gh releases, so
+  they now eat the next word in both scan sites (a leaked value became the noun/verb and
+  passed the flat deny: `gh --api-version v4 repo delete o/r`); --no-color stays no-value.
+  (4) Smoke test-10 harness: the logging stand-in git must exec the absolute path captured
+  on the PRISTINE PATH before the shim dir is armed — a command lookup inside the stand-in
+  runs under the armed PATH and re-resolved to the SHIM (infinite shim→stand-in exec loop;
+  argv.log grew without bound, suite hung). Parked from this round, carried forward:
+  corrupt-config `policy:unusable` audit fallback in the shims (needs a shim default audit
+  path or a stderr marker — not trivially <20 lines) and the TOKEN_DIR_RE/ACTION_SUMMARY_MAX
+  consolidation (the parked consolidation ticket).
 - 2026-11-14 — P4 policy.sh operator surface (spec 2026-11-09-multipi-permission-policy.md §8): the script runs EVERY subcommand through the same one node one-shot import of `loadPolicy`/`evaluate` from policy.ts (doctor's two src candidates), so an operator can never see a different policy than the hook enforces; the explained command travels via `POLICY_CMD` env, never string-interpolated into the JS source (the doctor SCEN_SRC discipline). Exit codes pinned in the header: 0 = ran and RENDERED — including an UNUSABLE policy, because reporting a broken policy is the tool's job (the UNUSABLE line and the fail-closed note carry the signal; a non-zero exit here would be read as "the tool broke", not "your policy broke"); 1 = evaluator unreachable (no node / no src / node crashed); 2 = usage. `explain` is string-layer only (no `trusted`, no `gitTargets` — it has no PPID proof or rev-parse ground truth, and claiming those would be a lie), which the render says on every line. `audit` is a TAIL (newest 50, `AUDIT_TAIL`), prints lines VERBATIM (the writer bounds and sanitizes; the reader never alters evidence), `--since S` accepts a bare integer or a trailing-s "60s", understands ts as ISO-8601 or epoch seconds/ms, and KEEPS unparseable/missing ts (dropping evidence in a reader is the wrong fail direction); the ISO shape-guard keeps free-form `date -d` from parsing relative phrases like "30 seconds" as a timestamp.
 - 2026-11-14 — P4 doctor policy section: "policy ACTIVE" = an explicit `policy` block in .devloop.json OR a permissions.json beside it (even a broken one — the broken-present state is precisely what the section exists to name); neither ⇒ one note ("inactive by design"), never a problem, so a pre-policy project stays doctor-ready (the P2 loud-warning choice: absent = inactive). Shims are detected by PATH-resolution + realpath INSIDE `<main root>/scripts/policy-shims` (the P3 install location) for git AND gh; active-but-shim-missing ⇒ MISSING with the install repair line, fail closed per §8 (an uninstall that removes shims but leaves the policy is a broken state, not a quiet bypass). The doctor's loaded/error verdict comes from importing the SAME `loadPolicy` the hook uses (one notion of valid), passed the MAIN root as policy root so a linked-worktree checkout never re-scopes the config/permissions lookup; the node-import failure path mirrors the factory report (first stderr line named, MISSING, no crash). Token dir: phase-1 observation only — absent ⇒ note; 0700+owner ⇒ ok; anything else ⇒ note naming the mode/owner (the 0700/0600 pin is P6's, and phase 1 must not pretend to enforce what it only watches).
 - 2026-11-14 — #48 review round: gate's spawn "close" codes are normalized by exported `normalizeCloseCode` (null/signal and negative errno → 1) so the pinned classification (red=1 vs error) can never flip on a signal kill or failed spawn; `runFastCheck` needed no numeric mapping — its boolean `code === 0` is fail-safe (everything non-zero, including null and -errno, is RED). Alternatives considered: reusing gate's helper in stopgate (would force a numeric conversion whose result is discarded — noise, not safety).
+- 2026-11-14 — P3 review round-10 fixes (one must-fix, three should-fixes). (1) MUST-FIX: the
+  §5 trusted exemption no longer lifts the tag ASK classes. Spec §5 scopes the exemption to
+  "Layer-1 string patterns and the Layer-2 base-branch/force denials" and the confirmed §6 ask
+  list carries `git tag` (create/delete) and `push --tags` WITHOUT a trusted carve-out — a
+  deliberate contrast with `gh pr merge`, which is explicitly scoped to "outside a trusted
+  program". The evaluator had lifted all four Layer-2 classes; reproduced: an installed
+  `scripts/*.sh` running `git tag vtrust` exited 0 and CREATED the tag with no operator consent
+  (compounding the named residual — an agent-written UNTRACKED script earns the exemption
+  instantly). Fix: `gitTagMutation` / `gitPush.tags` moved OUT of the `!ctx.trusted` guard in
+  `evaluate()` (force/base denies and the pr-merge ask stay lifted); the unit pin that blessed
+  "a reviewed script tagging is §5-exempt" is now the ASK pin, plus a pin that a trusted
+  force+tag push still asks (the force deny lifts, the tag ask survives). No loop script tags or
+  pushes tags today (grepped: none), so no legitimate train path is affected. (2) SF1: the repo
+  resolver (`shim_resolve_repo`) now also accepts the version-dependent
+  `<main>/.git/worktrees/<name>` spelling of
+  `--git-common-dir` (strips the suffix, VERIFIES the surviving `<main>/.git` exists as a dir,
+  prints the main root; unverified stays empty = deny), beside the main-`.git` spelling verified
+  on git 2.53 (linked worktrees report the main there). The shim header pins the git >= 2.36
+  floor (`rev-parse --path-format=absolute`); older git errors the probe, resolution stays
+  empty and the mutation is denied — fail closed, never misresolved. Smoke pins all four
+  resolver branches through a STUBBED real git (host-version independent; the live-worktree
+  E2E additionally checked on git 2.53). (3) SF2: the shim audit line and the ask line scrubbed
+  the scenario-store path (the hook's redactSummary substitutes `<store>`, the shims' did not —
+  spec §8 bars store paths in action summaries). The driver now computes the store dir from the
+  LOADED config (`scenariosOn` + `resolvePaths`, the hook's exact resolution) and threads it into
+  `redactActionSummary`, which gains an optional `storeDir` parameter (token-dir scrub first,
+  store substitution, then the 160 bound — the hook's order). This deliberately does NOT merge
+  the hook's parallel copy: that is the parked consolidation below. (4) SF3: the "parked
+  consolidation ticket" named in the round-7 entry does not exist in the tracker — the park is
+  hereby TRACKED in this file instead (per the review: do not open it from this branch). The
+  consolidation was opened in the tracker as ISSUE #55 (review round 11), including the
+  auditPath and config-note folds. Proposed
+  ticket title when it is opened: "Consolidate the policy redaction + policy-line format —
+  TOKEN_DIR_RE / ACTION_SUMMARY_MAX / DENIED|ASK line duplicated in extension/src/policy.ts
+  (redactActionSummary + formatPolicyDeny/Ask), extension/src/policyhook.ts (redactSummary, its
+  own TOKEN_DIR_RE/ACTION_SUMMARY_MAX constants) and scripts/policy-shims/lib/policyshim.sh
+  (_shim_redact_summary: the shell copy of the token-dir shape + 160 bound) — TS×2 + shell copy".
+  Until then the three copies are kept in lockstep by the unit pins in both layers plus the
+  smoke's line-format greps; SF2 above moved one shape (store substitution) into the canonical
+  policy.ts home rather than adding a fourth copy.
+- 2026-11-14 — P3 review round-11 fixes (one must-fix, two should-fixes). (1) MUST-FIX:
+  `--force-create` — git's documented long form of `switch -C`, i.e. a ticket-listed
+  "-B-style ref write" — rode the checkout|switch scan's generic `--*)` ignore arm and
+  bypassed the shim entirely (reproduced: `git switch --force-create victim` in the
+  secondary repo exited 0, ref rewritten, no policy line, no audit). Fixed by matching the
+  exact flag in the scan BEFORE the generic long-flag arm; `--force-create*`/`=` forms do
+  not exist in git's grammar, so the exact match is complete; over-matching it in the
+  checkout scan as well is harmless (over-consult evaluates to ALLOW on self). (2) SF:
+  `push --follow-tags` publishes all tags reachable from the pushed refs but never set
+  tags=1, so the §6 tag-push ASK was silently skipped (reproduced: it pushed clean). It
+  joins the tag set exactly like `--tags`/`-t`; `--no-follow-tags` is not a match. (3) SF:
+  `shim_audit_fallback` hard-coded `${MULTIPI_HOME:-$HOME/.multipi}/<repo>/logs`, ignoring
+  the configured `logs_dir`/state-dir overrides. It now reads the configured `logs_dir`
+  from the installed checkout's `.devloop.json` and resolves it with common.sh's own
+  resolvers (`dl_resolve` against the main root, `dl_canonical`) — the same rule as
+  `dl_logs_dir`. The shim deliberately does not call `dl_load_config`: that helper runs
+  bare `git rev-parse`, which would re-enter the shimmed binary — so `DL_ROOT` is set
+  locally for the resolver call only. Default stands when common.sh or the key is absent
+  (that path fails closed as a deny anyway). Alternatives considered: stating the
+  limitation in the header (weaker — the audit then lies about where it logged), and
+  duplicating the logs_dir rule by hand (adds a fourth resolution copy — the anti-pattern
+  #55 exists to remove). (4) Housekeeping per the review: the park entry above now names
+  the opened consolidation ticket, issue #55.
+- 2026-11-14 — P3 review round-12 fixes (one must-fix, three should-fixes). (1) MUST-FIX:
+  `git push --all` / `--branches` — whose implicit destination set is ALL local heads,
+  i.e. it includes the base ref from ANY checked-out branch while the scan's no-refspec
+  rule resolved only the CURRENT branch — wrote the base ref unclassified (reproduced
+  from a topic branch against a real bare remote: rc=0, `* [new branch] main -> main`,
+  zero policy lines, zero audit; same for `--branches`). Fixed with an exact
+  `--all | --branches)` arm in the push scan (beside `--mirror`) setting base=1: over-deny
+  is the fail-safe direction, consistent with the documented wildcard-destination policy
+  (a literal-topic-named ref under a glob costs an ask line, never data); the `=`/prefix
+  forms do not exist in git's grammar, so exact match is complete, and `--no-all`/
+  `--no-branches` do NOT match — they ride the generic long-flag arm and restore the
+  default current-branch behaviour. No loop script pushes `--all`/`--branches` (grepped:
+  none). Smoke pins both FROM A TOPIC BRANCH (where the current-branch rule alone sees
+  only the topic): 126 + base rule id + audit, and the remote's full ref set
+  bit-for-bit unchanged before/after (round-11 pinning idiom, generalized from a single
+  victim ref to the whole set). (2) SF1: `git push <remote> --delete <unprefixed-name>`
+  has a GENUINELY AMBIGUOUS destination — git resolves the name against the remote,
+  preferring a same-named branch, so a bare tag name deletes refs/tags/<name> while a
+  bare branch name deletes refs/heads/<name>; the shim classifies the LITERAL name. No
+  lookup was attempted (remote refs are not ground truth at scan time); the class is
+  NAMED in the shim header beside the unclassified-verbs list here, not silently widened
+  — same fail-safe asymmetry family (it over-ALLows a tag delete, never a base write
+  with the base's own name) and compensations as that list. (3) SF2: named DECISIONS
+  residual appended to the round-8 work-tree entry above: plain `git push` with
+  `push.default=matching` (config-flavored implicit destination, same class as `--all`);
+  config probe deliberately not added. (4) SF3: `shim_audit_fallback`'s
+  `$(basename …)` / `$(date -u …)` substitutions were unguarded — with coreutils missing
+  from PATH the command-not-found noise leaked onto fail-closed stderr and threatened
+  to swallow the block line. Both are now guarded (`basename` falls back to a pure-shell
+  `${main##*/}`, `date` to `ts=unknown`), so the fail-closed stderr carries EXACTLY ONE
+  line (the block line) and the fallback audit line still lands. Alternatives considered
+  and rejected: emitting the fallback ts as an empty string (the line would no longer be
+  parseable-as-seven-fields) and requiring coreutils (turns a missing-utility incident
+  into a silent no-audit incident — worse).
+- 2026-11-14 — P3 re-stack after the P2 squash merge (ticket comment on #41): `git rebase --onto origin/main f2ae8fc` replays the P3 range alone onto post-merge main. Shared-file collisions resolved by PRESERVING BOTH SIDES: the Makefile shellcheck line is the UNION (multipi-approve + the policy-shims globs, one line); install.sh keeps the ask-mint CLI block then the shims block; smoke.sh keeps main's P6 block then the P3 matrix (proven: post = pre + exactly main's 420 inserted lines, zero replace/delete); DECISIONS.md interleaves the P3 entries chronologically among main's newer ones (the rebase also left a stale copy of the round-1 entry next to its round-10 amendment — the amended text, byte-identical to the pre-rebase tree, is kept). Alternatives: squashing the P3 range into one commit (loses the per-round review history) and a date-sort of the WHOLE file (churns pre-existing legacy ordering predating this branch — rejected).

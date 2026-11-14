@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import devloopExtension from "../../extension/index.ts";
 import { GUARD_REFUSAL } from "../../extension/src/guard.ts";
@@ -83,8 +82,9 @@ test("extension registers 6 tools, the full orchestrator hook set and the /devlo
 		assert.ok(tools.includes("devloop.pause"));
 		assert.ok(tools.includes("devloop.dispatch"));
 		// P2: the orchestrator gains the policy tool_call hook and a policy session_start seat
-		// on top of the pre-existing four (the UI session_start remains).
-		assert.deepEqual(hookNames(hooks).sort(), ["agent_before_settle", "session_start", "session_start", "session_tree", "tool_call", "tool_result"]);
+		// on top of the pre-existing four (the UI session_start remains); P3's shim-PATH arm
+		// is a third session_start seat (the hook set otherwise stays put).
+		assert.deepEqual(hookNames(hooks).sort(), ["agent_before_settle", "session_start", "session_start", "session_start", "session_tree", "tool_call", "tool_result"]);
 		assert.deepEqual(commands, ["devloop-agents"]);
 	} finally {
 		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
@@ -268,4 +268,66 @@ test("ACTIVE GUARD: store known — in-store calls blocked, everything else allo
 			assert.ok(res == null || res.block !== true, `allowed: ${name}`);
 		}
 	} finally { fx.cleanup(); rmSync(store, { recursive: true }); }
+});
+
+// --- Layer-2 policy shims: the session_start PATH prepend (ticket #41, spec §4-L2) ----------
+
+test("orchestrator session_start prepends the installed policy shims to PATH (idempotent; absent dir ⇒ no-op)", () => {
+	const fx = makeFixture("{}");
+	const saved = process.env.PATH;
+	const savedChild = process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD;
+	const shims = path.join(fx.repo, "scripts", "policy-shims");
+	mkdirSync(shims, { recursive: true });
+	try {
+		const { pi, hooks } = fakePi();
+		withCwd(fx.repo, () => devloopExtension(pi));
+		const starts = hooks.filter((h) => h.name === "session_start");
+		const ctx = { cwd: fx.repo, hasUI: false, mode: "rpc" };
+		for (const h of starts) h.fn({}, ctx as never);
+		assert.ok((process.env.PATH ?? "").startsWith(shims + path.delimiter), `PATH must lead with the shims dir, got: ${process.env.PATH}`);
+		const count = () => (process.env.PATH ?? "").split(path.delimiter).filter((e) => e === shims).length;
+		const n = count();
+		assert.equal(n, 1, "prepended exactly once");
+		for (const h of starts) h.fn({}, ctx as never);
+		assert.equal(count(), 1, "a restarted session never prepends twice");
+	} finally {
+		process.env.PATH = saved;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		fx.cleanup();
+	}
+});
+
+test("session_start with no installed shims leaves PATH untouched (the loop is not armed there)", () => {
+	const fx = makeFixture("{}");
+	const saved = process.env.PATH;
+	const savedChild = process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD;
+	try {
+		const { pi, hooks } = fakePi();
+		withCwd(fx.repo, () => devloopExtension(pi));
+		for (const h of hooks.filter((x) => x.name === "session_start")) h.fn({}, { cwd: fx.repo, hasUI: false, mode: "rpc" } as never);
+		assert.equal(process.env.PATH, saved, "no shims dir ⇒ PATH unchanged");
+	} finally {
+		process.env.PATH = saved;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		fx.cleanup();
+	}
+});
+
+test("a child session never registers the shim PATH (inheritance comes from spawnPi's env spread)", () => {
+	const fx = makeFixture("{}");
+	const saved = process.env.PATH;
+	const shims = path.join(fx.repo, "scripts", "policy-shims");
+	mkdirSync(shims, { recursive: true });
+	try {
+		const { hooks } = loadChild("implementer", fx.repo);
+		assert.equal(hooks.filter((h) => h.name === "session_start").length, 0, "a child registers no session_start at all");
+		assert.equal(process.env.PATH, saved);
+	} finally {
+		process.env.PATH = saved;
+		fx.cleanup();
+	}
 });

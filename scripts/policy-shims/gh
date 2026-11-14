@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# gh policy shim (ticket #41; permission-policy spec §4-L2, §6, §8).
+#
+# A WRAPPER, not a reimplementation: `repo delete` (dangerous class — flat deny, never
+# trust-exempt) and `pr merge` (ask outside a trusted program) are consulted against the
+# shared evaluator from the REAL argv; every other gh call passes straight through to the
+# real binary with argv untouched and zero evaluator cost. Consulting the evaluator here
+# matters for the two dangerous verbs precisely because a `sh -c` wrap defeats any Layer-1
+# string pattern, while the shim sees the unwrapped argv (spec §9).
+#
+# Exit: 126 deny or ask (nothing executed), 127 real gh unlocatable, else the real
+# gh's own code.
+#
+# The SIM_* facts set below are read by shim_decide (policyshim.sh) — the consumer crosses
+# a file, so shellcheck cannot see the use (SC2034 is suppressed file-wide on purpose).
+# shellcheck disable=SC2034
+set -u
+
+shim_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=policy-shims/lib/policyshim.sh
+. "$shim_dir/lib/policyshim.sh"
+shim_init
+
+REAL_GH=$(shim_find_real gh) || {
+  echo "multipi policy: cannot locate the real gh outside the shim dir ($shim_dir) — broken install, refusing" >&2
+  exit 127
+}
+
+# --- peel global flags (`gh [-R repo] [--hostname h] … <noun> <verb>`) ------------------
+args=("$@")
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  case "${args[$i]}" in
+    -R | --repo | --hostname | -c | --color | --api-version)
+      # -c/--color/--api-version consume a VALUE on older gh releases (round-7
+      # should-fix): swallowing the value keeps it out of the noun/verb slots.
+      [ "$((i + 1))" -lt "${#args[@]}" ] || break
+      i=$((i + 2))
+      ;;
+    -q | -v | -h | --help | --version | --no-color) i=$((i + 1)) ;;
+    --*=*) i=$((i + 1)) ;;
+    *) break ;;
+  esac
+done
+if [ "$i" -ge "${#args[@]}" ] || [ "$((i + 1))" -ge "${#args[@]}" ]; then
+  exec "$REAL_GH" "$@"                       # no noun+verb (bare `gh`, `gh --version`, …)
+fi
+noun=${args[$i]}
+# Verb derivation must SKIP global flags interleaved between noun and verb (P3 review
+# round 5): `gh pr -R o/r merge 12` is the SAME call as `gh pr merge 12 -R o/r` — one
+# spelling must not bypass the classification (verified against the real gh).
+vi=$((i + 1))
+while [ "$vi" -lt "${#args[@]}" ]; do
+  va=${args[$vi]}
+  case "$va" in
+    -R | --repo | --hostname | -c | --color | --api-version)
+      [ "$((vi + 1))" -lt "${#args[@]}" ] || break
+      vi=$((vi + 2))
+      ;;
+    -q | -v | -h | --help | --version | --no-color) vi=$((vi + 1)) ;;
+    --*=*) vi=$((vi + 1)) ;;
+    -*) break ;;  # unknown flag: stop skipping, it IS the verb position (classified or not)
+    *) break ;;   # the verb
+  esac
+done
+[ "$vi" -ge "${#args[@]}" ] && exec "$REAL_GH" "$@"   # noun with no verb: not a classified action
+verb=${args[$vi]}
+# A `--help`/`--version` immediately following the VERB is documentation, not an action:
+# `gh repo delete --help` must not classify as the delete. Scoped to that ONE token
+# (round-7 must-fix, parity with the git shim): a help-shaped token consumed as another
+# flag's value (`gh pr merge 12 -m --help`) is data, not a help request, and must never
+# skip the classification.
+if [ "$((vi + 1))" -lt "${#args[@]}" ]; then
+  case "${args[$((vi + 1))]}" in -h | --help | --version) exec "$REAL_GH" "$@" ;; esac
+fi
+
+case "$noun" in
+  repo)
+    [ "$verb" = "delete" ] || exec "$REAL_GH" "$@"
+    SIM_GH_ACTION=repo-delete
+    ;;
+  pr)
+    [ "$verb" = "merge" ] || exec "$REAL_GH" "$@"
+    SIM_GH_ACTION=pr-merge
+    ;;
+  *)
+    exec "$REAL_GH" "$@"                     # everything else: straight through
+    ;;
+esac
+
+# --- the dangerous-class path: ground-truth argv + shared evaluator ----------------------
+SIM_CMD=$*
+SIM_PUSH_FORCE=0
+SIM_PUSH_BASE=0
+SIM_PUSH_TAGS=0
+SIM_TAG_MUTATION=0
+
+outcome=$(shim_decide)
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  shim_fail_closed "the policy evaluator could not be consulted (missing node/driver?)"
+fi
+case "$outcome" in
+  INACTIVE*)
+    exec "$REAL_GH" "$@"                     # no effective policy here: not armed, pass through
+    ;;
+  ALLOW)
+    exec "$REAL_GH" "$@"
+    ;;
+  BLOCK*)
+    IFS=$'\t' read -r _ blockline <<<"$outcome"
+    shim_block "$blockline"
+    ;;
+  *)
+    shim_fail_closed "the policy evaluator returned no verdict"
+    ;;
+esac

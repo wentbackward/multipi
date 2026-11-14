@@ -1,10 +1,13 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { matchesKey } from "@earendil-works/pi-tui";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import * as childreg from "./src/childreg.ts";
 import { registerChildProcessGuards } from "./src/child.ts";
 import { GUARDED_ROLES, GUARD_REFUSAL, initGuard, callTouchesStore } from "./src/guard.ts";
 import { createPolicyEnforcer } from "./src/policyhook.ts";
+import { mainRoot } from "./src/config.ts";
 import { makeTools, evaluateSettle, formatEditedFile } from "./src/tools.ts";
 
 const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issue labels: open -> dl/in-progress (a child is working) -> dl/in-review (PR open) -> dl/approved (review VERDICT: APPROVE) -> dl/gated (batch gate green) -> dl/merged (squash-merged; then close the issue). dl/blocked marks tickets needing a human decision. Workflow: dispatch role agents with devloop.dispatch (one ticket per implementer; independent tickets in parallel, up to the slot cap); when reports land, review, then gate ALL dl/approved branches together with devloop.gate (in a deliberate merge order), and merge the green train with devloop.merge (same order). Check progress any time with devloop.status. When the operator asks to pause or stop the loop, call devloop.pause (it interrupts all children, writes HANDOFF.md, and comments the tickets), then settle. On a fresh session, step 0 of the devloop skill reads a HANDOFF.md if present and re-dispatches the interrupted children. Stop only when no open ticket is startable (unblocked with closed or in-flight dependencies) — the stop-gate enforces this for you.`;
@@ -19,7 +22,11 @@ const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issu
  *    §4-L1): the pure evaluator, loaded ONCE at extension load (no hot reload), blocks denies
  *    with the tripwire text, asks with the §6 escalation directive, and audits to the state dir
  *    (session-start policy hash, one line per non-default verdict; see src/policyhook.ts).
- *  - session_start: records the session's effective policy hash into the audit log.
+ *  - session_start: records the session's effective policy hash into the audit log, and
+ *    prepends the installed scripts/policy-shims dir to the session PATH (Layer-2, §4-L2):
+ *    the model's git/gh calls then run through the policy wrapper. Children never register
+ *    either — spawnPi spreads the process env, so a child's bash tools inherit the shims
+ *    (and the loop scripts' /proc ancestry carries the §5 identity exemption into theirs).
  * Child sessions (MULTIPI_CHILD) register NOTHING — except a child of a guarded role with the
  * scenario store on, which registers the guard-only mode: exactly ONE block-capable tool_call
  * hook refusing calls that touch the store (spec §3). No tools, no stop-gate, no policy hook
@@ -41,6 +48,7 @@ export default function devloopExtension(pi: ExtensionAPI): void {
 	}
 	// When this orchestrator exits, no spawned child tree survives (best-effort; see child.ts).
 	registerChildProcessGuards();
+	registerPolicyShimPath(pi);
 	for (const tool of makeTools(DEVLOOP_INSTRUCTIONS)) {
 		try {
 			pi.registerTool(tool);
@@ -184,6 +192,28 @@ function ensureTicker(): void {
 		if (childreg.runningChildren().length > 0) barTui?.requestRender();
 	}, 1000);
 	ticker.unref?.();
+}
+
+/**
+ * The Layer-2 shim PATH (permission-policy spec §4-L2, ticket #41): ONE string operation at
+ * session_start — prepend <main root>/scripts/policy-shims to this process's PATH so every
+ * bash tool of the session resolves git/gh through the policy wrapper. Absent dir ⇒ the loop
+ * is not installed here ⇒ nothing to arm (and the shims are inert without permissions.json
+ * anyway — the installer, not this hook, decides where they live). Idempotent: a restarted
+ * session never prepends twice.
+ */
+function registerPolicyShimPath(pi: ExtensionAPI): void {
+	pi.on("session_start", (_event, ctx: ExtensionContext) => {
+		try {
+			const shims = path.join(mainRoot(ctx.cwd) ?? ctx.cwd, "scripts", "policy-shims");
+			if (!existsSync(shims)) return;
+			const cur = process.env.PATH ?? "";
+			if (cur.split(path.delimiter).includes(shims)) return;
+			process.env.PATH = `${shims}${path.delimiter}${cur}`;
+		} catch {
+			// PATH bookkeeping must never block the session.
+		}
+	});
 }
 
 /**

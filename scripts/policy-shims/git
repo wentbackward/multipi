@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+# git policy shim (ticket #41; permission-policy spec §4-L2, §5, §7).
+#
+# A WRAPPER, not a reimplementation: on MUTATION subcommands (commit, am, reset, tag in
+# mutation form, push, checkout -B / switch -C — the ticket's list; read-only git, incl.
+# fetch/pull/merge, passes straight through) it resolves the ACTING repository from
+# `rev-parse` ground truth, derives the refspec facts (force / base-branch destination /
+# tag refs) from the real argv, walks its own /proc ancestry for the §5 identity proof,
+# consults the shared evaluator (extension/src/policydriver.ts) and — only on ALLOW —
+# execs the real git with argv UNTOUCHED.
+#
+# Unresolvable acting repo or unknown push destination ⇒ deny (the oneshot rule, spec
+# §7.2: the fail direction is the 2026-11-09 failure mode itself). Exit: 126 deny or ask
+# (nothing executed), 127 real git unlocatable, else the real git's own code.
+#
+# Named residual (P3 review round 12, beside the unclassified-verbs list in DECISIONS):
+# `git push <remote> --delete <unprefixed-name>` has a GENUINELY AMBIGUOUS destination —
+# git resolves the name against the remote, preferring a same-named branch, so a bare
+# tag name deletes refs/tags/<name> while a bare branch name deletes refs/heads/<name>.
+# The shim classifies the LITERAL name (a tag-name delete thus escapes the base/wildcard
+# checks the same way a same-named branch would); the remote's refs are not ground truth
+# at scan time, so NO lookup is attempted — the class is named, not silently widened.
+#
+# The SIM_* facts set below are read by shim_decide (policyshim.sh) — the consumer crosses
+# a file, so shellcheck cannot see the use (SC2034 is suppressed file-wide on purpose).
+# shellcheck disable=SC2034
+set -u
+
+shim_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=policy-shims/lib/policyshim.sh
+. "$shim_dir/lib/policyshim.sh"
+shim_init
+
+REAL_GIT=$(shim_find_real git) || {
+  echo "multipi policy: cannot locate the real git outside the shim dir ($shim_dir) — broken install, refusing" >&2
+  exit 127
+}
+
+# --- peel leading global options; `-C <dir>` selects the acting directory ---------------
+# git's LEADING options are a closed, documented set (git's own usage line). Every
+# flag-shaped token is peeled as an option; only the documented VALUE-CONSUMERS also eat
+# the next word. (P3 review round 6: the former whitelist ended the scan at any option it
+# had not enumerated — `git --exec-path=x commit` was misread as a non-mutation and a
+# foreign commit sailed through; a whitelist of git's option surface is unmaintainable, a
+# flag-shape + closed value-consumer set is the grammar.)
+# Repo-REDIRECTING specifiers (--git-dir/--work-tree) are collected and forwarded into the
+# shim's own resolution calls: the effective target is what the command REDIRECTS at, not
+# the cwd (round 4).
+args=("$@")
+acting="$PWD"
+_SIM_REDIR=()
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  a=${args[$i]}
+  case "$a" in
+    -C)
+      [ "$((i + 1))" -lt "${#args[@]}" ] || break
+      acting=${args[$((i + 1))]}
+      i=$((i + 2))
+      ;;
+    --git-dir | --work-tree)
+      [ "$((i + 1))" -lt "${#args[@]}" ] || break
+      _SIM_REDIR+=("$a" "${args[$((i + 1))]}")
+      i=$((i + 2))
+      ;;
+    --git-dir=* | --work-tree=*) _SIM_REDIR+=("$a"); i=$((i + 1)) ;;
+    -c | --exec-path | --config-env | --namespace | --super-prefix | --upload-pack | --receive-pack)
+      [ "$((i + 1))" -lt "${#args[@]}" ] || break   # value consumer at the end: no subcommand
+      i=$((i + 2))
+      ;;
+    --exec-path=* | --config-env=* | --namespace=* | --super-prefix=* | --upload-pack=* | --receive-pack=*) i=$((i + 1)) ;;
+    --) i=$((i + 1)); break ;;   # separator: the next token is the subcommand
+    -*) i=$((i + 1)) ;;          # every other flag (long or short cluster): no value in this position
+    *) break ;;                  # the subcommand
+  esac
+done
+if [ "$i" -ge "${#args[@]}" ]; then
+  exec "$REAL_GIT" "$@"                    # no subcommand (e.g. bare `git`, `git --version`)
+fi
+sub=${args[$i]}
+
+# git's own documentation/invocation-meta flags pass through without consulting the
+# evaluator — parity with the gh shim's --help/--version treatment (round-6 should-fix).
+# Scoped to the token IMMEDIATELY following the subcommand (round-7 must-fix): a token
+# consumed as another flag's value (`git commit -m --help`, `git push -o --help origin`
+# …) is data, not a help request, and must never skip the policy check. The cost of the
+# narrower reading is an over-CONSULT (e.g. `git commit -q --help`), which evaluates like
+# any other mutation — harmless on self, ask-shaped off-self: the fail-safe direction.
+if [ "$((i + 1))" -lt "${#args[@]}" ]; then
+  case "${args[$((i + 1))]}" in -h | --help | --version) exec "$REAL_GIT" "$@" ;; esac
+fi
+
+force=0; base=0; tags=0; dest_unknown=0
+case "$sub" in
+  commit | am | reset)
+    exec_policy_check=1
+    ;;
+  checkout | switch)
+    # -B/-C re-WRITE a branch ref (the ticket's "checkout -B-style ref writes"); a plain
+    # checkout and `-b` (create-only) are not ref writes (spec §4) and pass through.
+    # All THREE spellings count: standalone (`-B name`), attached short form (`-Bname`),
+    # and any short cluster containing the letter — over-consulting is harmless (a benign
+    # self op evaluates to ALLOW), under-consulting is the inverted fail direction.
+    flag=0
+    ch="B"
+    [ "$sub" = "checkout" ] || ch="C"
+    flag=-"$ch"
+    j=$((i + 1))
+    while [ "$j" -lt "${#args[@]}" ]; do
+      a="${args[$j]}"
+      case "$a" in
+        "$flag" | "$flag"*) exec_policy_check=1; break ;;
+        --force-create)
+          # The documented LONG form of switch -C (P3 review round 11): the same
+          # ref-write class — it must consult, not ride the generic long-flag arm.
+          exec_policy_check=1; break ;;
+        --*) : ;;                        # long flag: never a short cluster (checked RAW — after
+                                         # stripping one hyphen, '--x' looks like '-x')
+        -?**)
+          case "${a#-}" in
+            *"$ch"*) exec_policy_check=1; break ;;
+          esac
+          ;;
+      esac
+      j=$((j + 1))
+    done
+    [ "${exec_policy_check:-0}" = 1 ] || exec "$REAL_GIT" "$@"
+    ;;
+  tag)
+    # `git tag` alone or `git tag -l|-n|-v|…` LIST (read-only); creating or deleting a tag
+    # mutates. A flag-carrying form without a position (e.g. `git tag -d` asking for a name
+    # it lacks) is not a mutation either.
+    j=$((i + 1)); listish=0; has_pos=0
+    while [ "$j" -lt "${#args[@]}" ]; do
+      case "${args[$j]}" in
+        -l | --list | -n | -n[0-9]* | --points-at | --points-at=* | -v | --verify-tags | --contains | --no-contains | --merged | --no-merged | --sort=* | --format | --format=*) listish=1 ;;
+        -*) : ;;
+        *) has_pos=1 ;;
+      esac
+      j=$((j + 1))
+    done
+    [ "$listish" = 0 ] && [ "$has_pos" = 1 ] && exec_policy_check=1
+    [ "${exec_policy_check:-0}" = 1 ] || exec "$REAL_GIT" "$@"
+    ;;
+  push)
+    j=$((i + 1))
+    positionals=()
+    while [ "$j" -lt "${#args[@]}" ]; do
+      a=${args[$j]}
+      case "$a" in
+        -f | --force | --force-with-lease | --force-with-lease=*) force=1 ;;
+        --force-if-includes | --force-if-includes=*)
+          # Conditionally forcing (round-7 should-fix): when the incoming tip is already
+          # contained the update is a fast-forward, but a topic push that ISN'T contained
+          # still moves the ref backwards — the base rule cannot see that, only the force
+          # set can. A space-form ref, if present, simply falls into the positionals and
+          # over-denies at worst (it can never UN-cover the remote/refspec: the force bit
+          # is set unconditionally).
+          force=1
+          ;;
+        -t | --tags) tags=1 ;;
+        --follow-tags)
+          # Publishes all tags reachable from the pushed refs (P3 review round 11):
+          # tag-ref publication is the same class as --tags — it joins the tag set,
+          # so the §6 tag-push ASK applies. --no-follow-tags is NOT a match.
+          tags=1 ;;
+        --mirror) force=1; tags=1 ;;
+        --all | --branches)
+          # The implicit destination set is ALL local heads (P3 review round 12): it
+          # includes the base ref from ANY checked-out branch, while the no-refspec
+          # rule below resolves only the CURRENT branch (reproduced: from a topic
+          # branch, `git push --all origin` wrote main with zero policy lines).
+          # Over-deny to the base class — the documented fail-safe direction for
+          # wildcard destinations; `--no-all`/`--no-branches` are NOT a match and
+          # restore the default behaviour via the existing current-branch rule.
+          base=1 ;;
+        --dry-run) exec "$REAL_GIT" "$@" ;;   # a dry-run executes nothing: not a mutation
+        --repo=* | --receive-pack=*) dest_unknown=1 ;;
+        -o | --push-option)
+          # VALUE-CONSUMING in the space form: the next word is push-option data, not a
+          # positional (round 6: `git push -o ci=no origin` used to shift the value into
+          # positionals and defeat the remote/destination logic — a base push sailed past).
+          [ "$((j + 1))" -lt "${#args[@]}" ] || break
+          j=$((j + 1))
+          ;;
+        -o=* | --push-option=*) : ;;   # = form: self-contained
+        --*) : ;;                      # other long flags: NEVER a short cluster (round 6:
+                                        # `--no-verify` used to feed its letters to the
+                                        # f/t scanner and over-deny as force)
+        -?*[-a-zA-Z]*)
+          # Short-flag CLUSTER: `-fu`, `-tf`, … parse char-by-char (git's grammar).
+          # `-f -u origin` and `-fu origin` are the SAME call: one spelling must not bypass.
+          for ch2 in $(printf '%s' "${a}" | tail -c +2 | fold -w1); do
+            case "$ch2" in f) force=1 ;; t) tags=1 ;; esac
+          done
+          ;;
+        -*) : ;;
+        *) positionals+=("$a") ;;
+      esac
+      j=$((j + 1))
+    done
+    if [ "${#positionals[@]}" -ge 1 ]; then
+      case "${positionals[0]}" in
+        */* | .*)
+          dest_unknown=1                    # direct URL/path transport: not the acting repo
+          positionals=("${positionals[@]:1}")
+          ;;
+      esac
+    fi
+    # Destination facts (destination-based: a refspec whose SOURCE is the base name is not
+    # a write TO the base — DECISIONS 2026-11-10). The sole slash-less positional is the
+    # REMOTE: with no refspec the destination is the checked-out branch (bare-push semantics).
+    cur=$("$REAL_GIT" -C "$acting" ${_SIM_REDIR[@]+"${_SIM_REDIR[@]}"} symbolic-ref -q --short HEAD 2>/dev/null) || cur=""
+    if [ "${#positionals[@]}" -eq 1 ] && [[ "${positionals[0]}" != */* ]] && [[ "${positionals[0]}" != .* ]]; then
+      positionals=()                                   # the lone positional is the remote, not a refspec
+    fi
+    if [ "${#positionals[@]}" -eq 0 ]; then
+      if [ "$tags" = 0 ]; then                         # --tags/-t restrict destinations to tag refs
+        if [ -z "$cur" ]; then
+          dest_unknown=1                      # bare push from detached HEAD: unknown destination
+        elif [ "$cur" = "$SIM_BASE_BRANCH" ]; then
+          base=1                                # bare push from base resolves to the base ref
+        fi
+      fi
+    else
+      for r in "${positionals[@]}"; do
+        r2=${r#+}
+        [ "$r" != "$r2" ] && force=1          # a +refspec is a force push (git semantics)
+        if [[ "$r2" == *:* ]]; then
+          dst=${r2##*:}
+          src=${r2%%:*}
+        else
+          dst=$r2
+          src=$r2
+        fi
+        if [ -z "$dst" ]; then dst=$src; fi            # `main:` deletes refs/heads/main — the write target is the source name
+        case "$dst" in
+          refs/tags/* | refs/tags) tags=1 ;;
+        esac
+        if [ "$dst" = "$SIM_BASE_BRANCH" ] || [ "$dst" = "refs/heads/$SIM_BASE_BRANCH" ]; then
+          base=1
+        elif [ "$dst" = "HEAD" ] && [ "$cur" = "$SIM_BASE_BRANCH" ]; then
+          base=1                            # HEAD resolves to the checked-out base branch
+        elif [[ "$dst" == *heads/* ]] && [[ "$dst" == *"*"* || "$dst" == *"?"* ]]; then
+          # A WILDCARD destination that could reach the base ref (a literal refs/heads/topic
+          # does not). Known over-deny (intentional, fail-safe direction): a literal topic
+          # whose name merely CONTAINS "heads/" (e.g. xheads/foo) is also treated as a
+          # wildcard destination — rarer than a base-reaching glob, and the cost is an ask
+          # line, not data.
+          base=1
+        fi
+      done
+    fi
+    exec_policy_check=1
+    ;;
+  *)
+    exec "$REAL_GIT" "$@"                   # read-only / out-of-ticket-scope: straight through
+    ;;
+esac
+[ "${exec_policy_check:-0}" = 1 ] || exec "$REAL_GIT" "$@"
+
+# --- the mutation path: ground truth + shared evaluator ---------------------------------
+SIM_TARGET=$(shim_resolve_repo "$REAL_GIT" "$acting")
+SIM_CMD=$*
+# Quoted argv does not round-trip through `$*`: that degrades only the STRING-rule view —
+# the structural facts above were parsed from the real argv (documented limit, DECISIONS
+# 2026-11-10).
+SIM_PUSH_FORCE=$force
+SIM_PUSH_BASE=$base
+SIM_PUSH_TAGS=$tags
+SIM_TAG_MUTATION=0
+[ "$sub" = "tag" ] && SIM_TAG_MUTATION=1
+SIM_GH_ACTION=""
+
+_SIM_DECIDE_EXTRA=()
+[ -z "$SIM_TARGET" ] && _SIM_DECIDE_EXTRA+=(--unresolvable-target)   # acting repo unresolvable (spec §7.2)
+[ "$dest_unknown" = 1 ] && _SIM_DECIDE_EXTRA+=(--unresolvable-target)
+
+outcome=$(shim_decide)
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  shim_fail_closed "the policy evaluator could not be consulted (missing node/driver?)"
+fi
+case "$outcome" in
+  INACTIVE*)
+    exec "$REAL_GIT" "$@"                   # no effective policy here: not armed, pass through
+    ;;
+  ALLOW)
+    exec "$REAL_GIT" "$@"
+    ;;
+  BLOCK*)
+    IFS=$'\t' read -r _ blockline <<<"$outcome"
+    shim_block "$blockline"
+    ;;
+  *)
+    shim_fail_closed "the policy evaluator returned no verdict"
+    ;;
+esac

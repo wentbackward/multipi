@@ -30,6 +30,13 @@ if [ "$(realpath "$plugin_root/scripts")" != "$(realpath "$target/scripts" 2>/de
 	# deny keeps the policy'd session from minting its own approvals.
 	cp -f "$plugin_root"/scripts/multipi-approve "$target/scripts/"
 	chmod +x "$target/scripts/multipi-approve"
+	# policy shims (ticket #41): the Layer-2 git/gh wrappers + shared helper. Kept OUT of the
+	# scripts/*.sh trusted set on purpose: they are not loop programs, and the §5 identity
+	# check keys on both the checkout's scripts dir and the .sh suffix.
+	mkdir -p "$target/scripts/policy-shims/lib"
+	cp -f "$plugin_root/scripts/policy-shims/git" "$plugin_root/scripts/policy-shims/gh" "$target/scripts/policy-shims/"
+	cp -f "$plugin_root/scripts/policy-shims/lib/"*.sh "$target/scripts/policy-shims/lib/"
+	chmod +x "$target/scripts/policy-shims/git" "$target/scripts/policy-shims/gh"
 fi
 
 # 2. extension (self-contained copy, incl. agents for the bundled-dir fallback)
