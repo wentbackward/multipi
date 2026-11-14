@@ -1,0 +1,69 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { runScript } from "../../extension/src/gate.ts";
+import { runFastCheck } from "../../extension/src/stopgate.ts";
+
+/**
+ * Settle `p` within `ms`, or reject. If a child's stdin were still an open pipe the parent
+ * holds, the child would block on `read` (runFastCheck: until its 10-minute timeout;
+ * runScript: forever) and the suite would hang — the race converts that into a fast failure.
+ */
+async function within<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+	return await new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(
+			() => reject(new Error(`${label}: did not settle within ${ms} ms — child's stdin is an open pipe?`)),
+			ms,
+		);
+		timer.unref?.();
+		p.then(
+			(v) => {
+				clearTimeout(timer);
+				resolve(v);
+			},
+			(e) => {
+				clearTimeout(timer);
+				reject(e);
+			},
+		);
+	});
+}
+
+const SETTLE_MS = 10_000;
+
+test("runFastCheck: a check that reads stdin sees immediate EOF (bounded settle, not the 10-min timeout)", async () => {
+	// `read` returns 1 on EOF; rc=1 in the tail proves EOF (not data) — the race proves no block.
+	const out = await within(runFastCheck(`read -r line; echo "rc=$?"`, "/"), SETTLE_MS, "runFastCheck stdin probe");
+	assert.equal(out.passed, true); // the check command itself succeeds (echo)
+	assert.match(out.tail, /rc=1/);
+});
+
+test("runFastCheck: a well-behaved check is unaffected by the closed stdin", async () => {
+	const out = await within(runFastCheck("echo ok", "/"), SETTLE_MS, "runFastCheck echo probe");
+	assert.equal(out.passed, true);
+	assert.match(out.tail, /^ok$/);
+});
+
+test("runScript: a script that reads stdin sees immediate EOF (bounded settle)", async () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "multipi-stdin-"));
+	const scriptsDir = path.join(dir, "scripts");
+	mkdirSync(scriptsDir);
+	writeFileSync(path.join(scriptsDir, "probe.sh"), "#!/usr/bin/env bash\nread -r line\necho \"stdin:$?\"\n", {
+		mode: 0o755,
+	});
+	const out = await within(runScript("probe.sh", { scriptsDir, repoRoot: dir, branches: [] }), SETTLE_MS, "runScript stdin probe");
+	assert.equal(out.code, 0);
+	assert.match(out.stdout, /stdin:1/);
+});
+
+test("runScript: a well-behaved script is unaffected by the closed stdin", async () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "multipi-stdin-"));
+	const scriptsDir = path.join(dir, "scripts");
+	mkdirSync(scriptsDir);
+	writeFileSync(path.join(scriptsDir, "fine.sh"), "#!/usr/bin/env bash\necho fine\n", { mode: 0o755 });
+	const out = await within(runScript("fine.sh", { scriptsDir, repoRoot: dir, branches: ["a"] }), SETTLE_MS, "runScript fine probe");
+	assert.equal(out.code, 0);
+	assert.match(out.stdout, /fine/);
+});
