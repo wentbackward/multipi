@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { loadPolicy } from "../../extension/src/policy.ts";
 import * as sharedPolicy from "../../extension/src/policy.ts";
@@ -299,6 +300,26 @@ test("write paths are matched against the Edit rules (write binds to the Edit fa
 });
 
 // --- the redaction contract has ONE source (ticket #55) ----------------------
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+test("no live code or test references the removed hook-local redactSummary (#55 review: the stale name stays dead)", () => {
+	// The hook's pre-#55 name `redactSummary` died when the contract moved to policy.ts
+	// (`redactActionSummary`). A surviving reference in live code or a test comment keeps
+	// a dead symbol teachable and drift-inducing — scan the layers that emit the contract.
+	// docs/DECISIONS.md is deliberately out of scope: its entries are historical record.
+	const files = ["tests/smoke.sh"];
+	for (const rel of readdirSync(path.join(ROOT, "scripts", "policy-shims"), { recursive: true })) {
+		files.push(path.join("scripts", "policy-shims", rel as string));
+	}
+	for (const rel of readdirSync(path.join(ROOT, "extension", "src"))) {
+		files.push(path.join("extension", "src", rel as string));
+	}
+	for (const f of files) {
+		assert.ok(!/\bredactSummary\b/.test(readFileSync(path.join(ROOT, f), "utf8")),
+			`${f}: references the removed symbol redactSummary (the shared name is redactActionSummary)`);
+	}
+});
 
 test("the hook's redaction contract IS the shared policy.ts contract (identity, not a copy, #55)", () => {
 	// Referential identity: the hook must RE-EXPORT the shared bindings. A copy (even an

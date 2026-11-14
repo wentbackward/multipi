@@ -22,14 +22,17 @@ import { redactActionSummary, ACTION_SUMMARY_MAX } from "../../extension/src/pol
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /** Run `_shim_redact_summary` over `s` via the repo's own shell lib (input via env — no
- * quoting layer between the corpus and the function). */
-function shimRedact(s: string): string {
+ * quoting layer between the corpus and the function). `extraEnv` overrides the environment
+ * (the C-locale pin drives LC_ALL/LANG). Output is decoded FATAL: a mid-UTF-8-sequence cut
+ * (a lone 0xB6 tail — the reviewed repro) throws instead of masking itself as U+FFFD.
+ * Valid UTF-8 is thus asserted on EVERY call. */
+function shimRedact(s: string, extraEnv: NodeJS.ProcessEnv = {}): string {
 	const out = execFileSync(
 		"bash",
 		["-c", ". ./scripts/policy-shims/lib/policyshim.sh; printf '%s' \"$(_shim_redact_summary \"$RS_EQUIV_IN\")\""],
-		{ cwd: ROOT, encoding: "utf8", env: { ...process.env, RS_EQUIV_IN: s } },
+		{ cwd: ROOT, encoding: "buffer", env: { ...process.env, RS_EQUIV_IN: s, ...extraEnv } },
 	);
-	return out;
+	return new TextDecoder("utf-8", { fatal: true }).decode(out);
 }
 
 /** The adversarial corpus: every home spelling, boundaries, negatives, duplicates,
@@ -61,6 +64,16 @@ const CORPUS: { name: string; input: string }[] = [
 	},
 	{ name: "multi-byte, short of the bound", input: "caf\u00e9 \u00d7 \u2192 \u65e5\u672c\u8a9b ~/.m/dev-loop-tokens/t ok" },
 	{ name: "quotes inside", input: "echo 'a\"b' | tr '&' '<token-dir>'" },
+	// #55 review SF1 — the bound must count CHARACTERS under a pinned UTF-8 locale, never
+	// bytes: under a C-locale caller the pre-fix ${#s}/${s:0:160} cut mid-sequence.
+	{
+		name: "over the bound in BYTES only (83 chars / 219 bytes) — a byte cut would split a sequence",
+		input: "\u2192".repeat(53) + "\u00e9".repeat(30),
+	},
+	{
+		name: "over the bound in CHARS (175) — cut at the bound by characters, never bytes",
+		input: "\u00e9".repeat(ACTION_SUMMARY_MAX + 10) + " tail",
+	},
 ];
 
 test("the shell redactor outputs byte-identical text to the TS redactor (one contract, #55)", () => {
@@ -93,4 +106,20 @@ test("representative outputs are the LITERAL contract (the engines cannot drift 
 	assert.equal(reordered, "p".repeat(150) + " <token-di\u2026", "token replaced, then cut at the bound");
 	assert.ok(!reordered.includes("dev-loop-tokens"), "no raw token path survives");
 	assert.equal(reordered.length, ACTION_SUMMARY_MAX + 1, "bounded");
+	// Multi-byte over the bound: the cut counts CHARACTERS, never bytes.
+	assert.equal(shimRedact(CORPUS[19].input), CORPUS[19].input, "byte-long but char-short: untouched");
+	assert.equal(shimRedact(CORPUS[20].input), "\u00e9".repeat(ACTION_SUMMARY_MAX) + "\u2026", "175 chars cut to 160 + ellipsis");
+});
+
+test("a C-locale caller gets the same output, always valid UTF-8 (locale-pinned bound, #55 review SF1)", () => {
+	// The caller's locale must not decide the bound: under LC_ALL=C, bash's ${#s}/
+	// ${s:0:160} count BYTES and cut mid-sequence (a lone 0xB6 tail — undecodable audit
+	// line). The function pins its OWN UTF-8 locale for the length/substring decision,
+	// so a C-locale caller sees the same decision the TS engine makes for the whole
+	// corpus (valid UTF-8 is asserted on every call by shimRedact's fatal decode).
+	for (const { name, input } of CORPUS) {
+		const ts = redactActionSummary(input, null);
+		const sh = shimRedact(input, { LC_ALL: "C", LANG: "C" });
+		assert.equal(sh, ts, `${name}: C-locale shell ${JSON.stringify(sh)} !== TS ${JSON.stringify(ts)}`);
+	}
 });
