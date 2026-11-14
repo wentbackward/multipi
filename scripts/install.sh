@@ -25,6 +25,11 @@ if [ "$(realpath "$plugin_root/scripts")" != "$(realpath "$target/scripts" 2>/de
 	mkdir -p "$target/scripts/lib"
 	cp -f "$plugin_root/scripts/lib/"*.sh "$target/scripts/lib/"
 	chmod +x "$target"/scripts/*.sh "$target/scripts/lib/"*.sh
+	# The operator's ask-mint CLI (spec §6). Deliberately NOT a .sh name: it is the
+	# operator's tool, never a loop script, and the seeded Bash(*multipi-approve*)
+	# deny keeps the policy'd session from minting its own approvals.
+	cp -f "$plugin_root"/scripts/multipi-approve "$target/scripts/"
+	chmod +x "$target/scripts/multipi-approve"
 fi
 
 # 2. extension (self-contained copy, incl. agents for the bundled-dir fallback)
