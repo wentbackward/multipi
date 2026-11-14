@@ -26,9 +26,13 @@ export type PolicyPosture = "allow" | "ask";
 export interface PolicyConfig {
 	/** Default-allow with curated deny/ask classes (operator-confirmed); "ask" is the strict flip (future). */
 	posture: PolicyPosture;
-	/** Repo allowlist: "self" or absolute main-repo paths. Self-only is the default. */
+	/** Repo allowlist: "self" or absolute MAIN-repo ROOTS (spec §7.1) — the parent of the
+	 * .git common dir, i.e. what rev-parse resolves every acting checkout TO. A linked
+	 * WORKTREE path is an inert entry: it parses (it is absolute) but never matches, because
+	 * the evaluator compares resolved main roots against these (schema note, ticket #55). */
 	repos: string[];
-	/** Foreign absolute paths where a mutation ASKS instead of denying (spec §7.1). */
+	/** Foreign absolute MAIN-repo ROOTS where a mutation ASKS instead of denying (spec §7.1)
+	 * — the same main-root, not worktree-path, convention as `repos`. */
 	secondaries: string[];
 	/** Ask-token TTL in minutes (spec §6; consumed by the phase-2 mint). */
 	tokenTtlMinutes: number;
