@@ -4,6 +4,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { loadPolicy } from "../../extension/src/policy.ts";
+import * as sharedPolicy from "../../extension/src/policy.ts";
+import * as hookModule from "../../extension/src/policyhook.ts";
 import {
 	ACTION_SUMMARY_MAX,
 	createPolicyEnforcer,
@@ -294,6 +296,24 @@ test("write paths are matched against the Edit rules (write binds to the Edit fa
 		const res = f.onToolCall({ toolName: "write", input: { path: ".env", content: "x" }, sessionId: null });
 		assert.equal(res?.block, true, "writing .env trips the Edit rule via ./ normalization");
 	} finally { c.fx.cleanup(); }
+});
+
+// --- the redaction contract has ONE source (ticket #55) ----------------------
+
+test("the hook's redaction contract IS the shared policy.ts contract (identity, not a copy, #55)", () => {
+	// Referential identity: the hook must RE-EXPORT the shared bindings. A copy (even an
+	// identical-looking one) would defeat the point — a one-line drift in one place would
+	// silently desynchronise redaction between the hook and the driver/shim layers.
+	assert.equal(hookModule.ACTION_SUMMARY_MAX, sharedPolicy.ACTION_SUMMARY_MAX, "the bound is the shared constant");
+	assert.equal(hookModule.RULE_POSTURE_ASK, sharedPolicy.RULE_POSTURE_ASK, "the posture-ask id is the shared constant");
+	assert.equal(hookModule.TOKEN_DIR_RE, sharedPolicy.TOKEN_DIR_RE, "the token-dir regex is the shared object");
+	assert.equal(hookModule.formatPolicyDeny, sharedPolicy.formatPolicyDeny, "the deny line formatter is the shared function");
+	assert.equal(hookModule.formatPolicyAsk, sharedPolicy.formatPolicyAsk, "the ask line formatter is the shared function");
+	assert.equal(hookModule.redactActionSummary, sharedPolicy.redactActionSummary, "the redactor is the shared function");
+	// The pre-#55 hook-local names are gone: nothing may re-mint the contract under a second name.
+	for (const stale of ["redactSummary", "formatDeny", "formatAsk"] as const) {
+		assert.ok(!(stale in hookModule), `the triplicated name ${stale} must not survive in policyhook`);
+	}
 });
 
 // --- summary hygiene + failure containment ------------------------------------
