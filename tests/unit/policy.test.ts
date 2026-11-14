@@ -568,7 +568,7 @@ test("layer-2: a force push ⇒ deny policy:force-push; force beats base when bo
 	});
 });
 
-test("layer-2: tag mutations ask (policy:git-tag, policy:tag-push) — the §6 ask list, trust-lifted", () => {
+test("layer-2: tag mutations ask (policy:git-tag, policy:tag-push) — the §6 ask list the §5 exemption does NOT lift", () => {
 	policyFx((root, cfg, file) => {
 		cfg("{}");
 		file("permissions.json", perms());
@@ -579,8 +579,15 @@ test("layer-2: tag mutations ask (policy:git-tag, policy:tag-push) — the §6 a
 		const tpush = evaluate(p, { ...ORCH, command: "git push origin --tags", gitTargets: [root], gitPush: { tags: true } });
 		assert.equal(tpush.verdict, "ask");
 		assert.equal(tpush.ruleId, RULE_TAG_PUSH);
-		assert.equal(evaluate(p, { ...ORCH, command: "git tag v1", gitTargets: [root], gitTagMutation: true, trusted: true }).verdict, "allow",
-			"a reviewed script tagging is §5-exempt");
+		const tTag = evaluate(p, { ...ORCH, command: "git tag v1", gitTargets: [root], gitTagMutation: true, trusted: true });
+		assert.equal(tTag.verdict, "ask", "a reviewed script tagging STILL asks — §5 scopes to base/force denials, not the §6 ask list");
+		assert.equal(tTag.ruleId, RULE_GIT_TAG);
+		const tPush = evaluate(p, { ...ORCH, command: "git push origin --tags", gitTargets: [root], gitPush: { tags: true }, trusted: true });
+		assert.equal(tPush.verdict, "ask", "a reviewed script pushing tags STILL asks (no trusted carve-out in the ask list)");
+		assert.equal(tPush.ruleId, RULE_TAG_PUSH);
+		const tBoth = evaluate(p, { ...ORCH, command: "git push --force origin --tags", gitTargets: [root], gitPush: { force: true, tags: true }, trusted: true });
+		assert.equal(tBoth.verdict, "ask", "trusted lifts the force DENY but the tag ask survives it");
+		assert.equal(tBoth.ruleId, RULE_TAG_PUSH);
 		assert.equal(evaluate(p, { ...ORCH, command: "git tag -l", gitTargets: [root] }).verdict, "allow",
 			"tag LISTING is not a mutation (the shim never passes gitTagMutation for it)");
 	});
@@ -692,6 +699,14 @@ test("formatPolicyDeny/Ask: the pinned hook shapes the shim must reuse verbatim"
 		formatPolicyAsk({ verdict: "ask" }, "bash: x"),
 		/^ASK posture:ask: bash: x\. Operator approval required: run 'multipi-approve posture:ask'/,
 	);
+});
+
+test("redactActionSummary: the scenario-store dir is substituted with <store> when supplied (spec §8)", () => {
+	assert.equal(redactActionSummary("bash: cat /st/scen/t1.md", "/st/scen"), "bash: cat <store>/t1.md");
+	assert.equal(redactActionSummary("bash: echo /st/scen", "/st/scen"), "bash: echo <store>", "a bare store path is substituted too");
+	assert.equal(redactActionSummary("bash: cat /st/scen", null), "bash: cat /st/scen", "store dir not supplied ⇒ the path travels verbatim");
+	assert.equal(redactActionSummary('bash: git status "/st/scen"', "/st/scen"), 'bash: git status "<store>"', "substitution is not token-bound");
+	assert.equal(redactActionSummary("bash: cat /other", "/st/scen"), "bash: cat /other", "an unrelated path travels verbatim");
 });
 
 test("redactActionSummary: token-dir paths scrubbed in every spelling, summary bounded", () => {
