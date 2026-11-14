@@ -1,4 +1,4 @@
-import { execFileSync, execFile } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -102,6 +102,9 @@ export function evaluateStopGate(i: StopGateInputs): StopGateDecision {
 
 // --- IO helpers (thin, tested indirectly via the tools) ---
 
+const FAST_CHECK_TIMEOUT_MS = 10 * 60_000;
+const FAST_CHECK_MAX_BUFFER = 2 * 1024 * 1024;
+
 /** Per-repo counter file, stored next to the repo's git dir (never committed). */
 export function counterPath(repoRoot: string): string {
 	const common = execFileSync("git", ["rev-parse", "--git-common-dir"], { cwd: repoRoot, stdio: "pipe" })
@@ -136,15 +139,37 @@ export function resetCounter(p: string): void {
 export function runFastCheck(command: string | null, cwd: string): Promise<{ passed: boolean; tail: string }> {
 	if (!command) return Promise.resolve({ passed: true, tail: "(fast check not configured)" });
 	return new Promise((resolve) => {
-		execFile(
-			"bash",
-			["-c", command],
-			{ cwd, timeout: 10 * 60_000, env: process.env, maxBuffer: 2 * 1024 * 1024 },
-			(err, stdout, stderr) => {
-				const combined = `${stdout ?? ""}${stderr ?? ""}`;
-				resolve({ passed: !err, tail: combined.split("\n").filter((l) => l.trim()).slice(-30).join("\n") });
-			},
-		);
+		// Spawning (rather than execFile, whose options ignore `stdio` in Node 24) with stdin
+		// "ignore": a check that reads stdin (REPL, `read`) must see immediate EOF, never a pipe
+		// the parent holds open for the entire run — that hung devloop.gate (see #48/#41).
+		const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+		// As in execFile: maxBuffer is enforced per stream; the tail combines stdout then stderr.
+		const out: Buffer[] = [];
+		const err: Buffer[] = [];
+		let outBytes = 0;
+		let errBytes = 0;
+		child.stdout!.on("data", (chunk: Buffer) => {
+			outBytes += chunk.length;
+			if (outBytes <= FAST_CHECK_MAX_BUFFER) out.push(chunk);
+			else child.kill("SIGTERM");
+		});
+		child.stderr!.on("data", (chunk: Buffer) => {
+			errBytes += chunk.length;
+			if (errBytes <= FAST_CHECK_MAX_BUFFER) err.push(chunk);
+			else child.kill("SIGTERM");
+		});
+		const timer = setTimeout(() => child.kill("SIGTERM"), FAST_CHECK_TIMEOUT_MS);
+		child.on("error", () => {
+			// spawn failure: "close" still follows and maps to RED.
+		});
+		child.on("close", (code) => {
+			clearTimeout(timer);
+			const combined = Buffer.concat(out).toString() + Buffer.concat(err).toString();
+			resolve({
+				passed: code === 0,
+				tail: combined.split("\n").filter((l) => l.trim()).slice(-30).join("\n"),
+			});
+		});
 	});
 }
 

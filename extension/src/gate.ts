@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import path from "node:path";
 
 export interface GateOutcome {
@@ -23,20 +23,43 @@ function tailLines(out: string, n = 30): string[] {
 	return out.split("\n").filter((l) => l.trim()).slice(-n);
 }
 
+const SCRIPT_MAX_BUFFER = 20 * 1024 * 1024;
+
 export function runScript(script: string, opts: TrainRunOptions): Promise<{ code: number; stdout: string; stderr: string }> {
 	return new Promise((resolve) => {
-		execFile(
-			"bash",
-			[path.join(opts.scriptsDir, script), ...opts.branches],
-			{ cwd: opts.repoRoot, env: { ...process.env, ...opts.env }, maxBuffer: 20 * 1024 * 1024 },
-			(error, stdout, stderr) => {
-				const code = error ? (typeof (error as NodeJS.ErrnoException & { code?: unknown }).code === "number"
-					? (error as { code: number }).code
-					: 1)
-					: 0;
-				resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
-			},
-		);
+		// Spawning (rather than execFile, whose options ignore `stdio` in Node 24) with stdin
+		// "ignore": a check that reads stdin (REPL, `read`) must see immediate EOF, never a pipe
+		// the parent holds open for the entire run — that hung devloop.gate (see #48/#41).
+		const child = spawn("bash", [path.join(opts.scriptsDir, script), ...opts.branches], {
+			cwd: opts.repoRoot,
+			env: { ...process.env, ...opts.env },
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		const out: Buffer[] = [];
+		const err: Buffer[] = [];
+		let outBytes = 0;
+		let errBytes = 0;
+		child.stdout!.on("data", (chunk: Buffer) => {
+			outBytes += chunk.length;
+			if (outBytes <= SCRIPT_MAX_BUFFER) out.push(chunk);
+			else child.kill("SIGTERM"); // same as execFile's maxBuffer: kill and fail
+		});
+		child.stderr!.on("data", (chunk: Buffer) => {
+			errBytes += chunk.length;
+			if (errBytes <= SCRIPT_MAX_BUFFER) err.push(chunk);
+			else child.kill("SIGTERM");
+		});
+		child.on("error", () => {
+			// spawn failure (e.g. missing interpreter): "close" still follows and maps to code 1,
+			// like execFile's error path.
+		});
+		child.on("close", (code) => {
+			resolve({
+				code: typeof code === "number" ? code : 1,
+				stdout: Buffer.concat(out).toString(),
+				stderr: Buffer.concat(err).toString(),
+			});
+		});
 	});
 }
 
