@@ -72,8 +72,12 @@ function parseArgs(argv: string[]): {
 	return { root, command, targets, pushForce, pushBase, pushTags, tagMutation, ghAction, candidates, session };
 }
 
-/** The audit log path (the devloop logs dir; the hook writes to the same file). */
-function auditPath(root: string): string | null {
+/** The audit log path (the devloop logs dir; the hook writes to the same file). Resolved
+ * ONCE per invocation (ticket #55): the config cannot change under a running process, so
+ * re-reading it on every append was wasted IO on the audit's hot path. Null = the logs dir
+ * is unresolvable (missing/unparseable .devloop.json) — the caller routes that through the
+ * audit-degraded warning instead of dropping lines silently. */
+function auditLogPath(root: string): string | null {
 	try {
 		const cfg = loadConfig(root);
 		if (cfg) return path.join(resolvePaths(cfg).logsDir, "policy-audit.jsonl");
@@ -85,16 +89,24 @@ function auditPath(root: string): string | null {
 
 function main(): void {
 	const a = parseArgs(process.argv.slice(2));
-	let warnedAudit = false;
+	const logPath = auditLogPath(a.root);
+	const warnedAudit = { once: false };
 	const append = (line: object): void => {
-		const p = auditPath(a.root);
-		if (!p) return;
+		if (!logPath) {
+			// No resolvable logs dir: the verdict is unaffected, but the operator must hear
+			// that the audit is blind (ticket #55: the null case used to vanish silently).
+			if (!warnedAudit.once) {
+				warnedAudit.once = true;
+				process.stderr.write("policydriver: audit path unresolvable (no usable .devloop.json) — verdicts unaffected, audit DEGRADED\n");
+			}
+			return;
+		}
 		try {
-			mkdirSync(path.dirname(p), { recursive: true });
-			appendFileSync(p, `${JSON.stringify(line)}\n`);
+			mkdirSync(path.dirname(logPath), { recursive: true });
+			appendFileSync(logPath, `${JSON.stringify(line)}\n`);
 		} catch (e) {
-			if (!warnedAudit) {
-				warnedAudit = true;
+			if (!warnedAudit.once) {
+				warnedAudit.once = true;
 				process.stderr.write(`policydriver: audit log write failed (${(e as Error).message}) — verdicts unaffected, audit DEGRADED\n`);
 			}
 		}
