@@ -165,6 +165,8 @@ export function runFastCheck(command: string | null, cwd: string): Promise<{ pas
 		child.on("close", (code) => {
 			clearTimeout(timer);
 			const combined = Buffer.concat(out).toString() + Buffer.concat(err).toString();
+			// code===0 alone is the fail-safe: signal kills (code=null) and spawn failures
+			// (negative errno) are not 0, so they land RED just like non-zero exits.
 			resolve({
 				passed: code === 0,
 				tail: combined.split("\n").filter((l) => l.trim()).slice(-30).join("\n"),

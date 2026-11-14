@@ -25,6 +25,16 @@ function tailLines(out: string, n = 30): string[] {
 
 const SCRIPT_MAX_BUFFER = 20 * 1024 * 1024;
 
+/**
+ * Normalize a spawn "close" code to execFile-era semantics: a signal-killed child arrives as
+ * code=null, and a failed spawn as code=-errno (e.g. -2) — execFile's callback delivered both
+ * as `err`, which this file's parsers read as 1. Anything but a real exit code maps to 1 so
+ * the pinned gate classification (red=1 vs error) never flips.
+ */
+export function normalizeCloseCode(code: number | null): number {
+	return code !== null && code >= 0 ? code : 1;
+}
+
 export function runScript(script: string, opts: TrainRunOptions): Promise<{ code: number; stdout: string; stderr: string }> {
 	return new Promise((resolve) => {
 		// Spawning (rather than execFile, whose options ignore `stdio` in Node 24) with stdin
@@ -55,7 +65,7 @@ export function runScript(script: string, opts: TrainRunOptions): Promise<{ code
 		});
 		child.on("close", (code) => {
 			resolve({
-				code: typeof code === "number" ? code : 1,
+				code: normalizeCloseCode(code),
 				stdout: Buffer.concat(out).toString(),
 				stderr: Buffer.concat(err).toString(),
 			});
