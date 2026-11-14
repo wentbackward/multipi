@@ -6,7 +6,7 @@ import type { Readable } from "node:stream";
  * discards everything past it, and invokes `onOverflow` EXACTLY ONCE on the first over-cap
  * chunk (callers pass the child kill — repeating it per chunk would be noise). `onOverflow`
  * is required: the kill IS the overflow path, and an omitted callback would be a silent
- * unbounded truncation (follow-up 4 of #50's review).
+ * unbounded truncation (follow-up 4 of #59).
  *
  * Returns the live chunk array; the stream's data events all precede the child's "close",
  * so callers `Buffer.concat` the array there.
