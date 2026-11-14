@@ -104,9 +104,10 @@ audit_ts_epoch() {
       ;;
   esac
   # ISO-8601: only ISO-shaped values reach date (a free-form date -d would happily
-  # parse relative phrases like "30 seconds" as a timestamp).
+  # parse relative phrases like "30 seconds" as a timestamp). The trailing - is a
+  # literal in the class (a mid-class - would form a range).
   case $ts in
-    *[!0-9T:.-]*) return 0 ;;
+    *[!0-9T:.Z-]*) return 0 ;;
   esac
   # GNU date first, then the BSD/macOS spelling.
   date -u -d "$ts" +%s 2>/dev/null && return 0
