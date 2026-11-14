@@ -36,6 +36,18 @@ function runDriver(fx: Fixture, command: string): { stdout: string; stderr: stri
 
 const auditLog = (fx: Fixture): string => path.join(fx.dir, "home", "proj", "logs", "policy-audit.jsonl");
 
+test("policydriver loads the config exactly ONCE per invocation (#55 review: audit path and store dir share one load)", () => {
+	// White-box pin for a structural requirement the behaviour tests cannot see: a second
+	// loadConfig would still pass every behavioural test (the config cannot change under a
+	// running process), so the "one load" contract is pinned where it lives — in the source.
+	// The .pi mirror is byte-identical (installsync), so this one file pins both.
+	const src = readFileSync(DRIVER, "utf8");
+	const calls = src.match(/\bloadConfig\s*\(/g) ?? [];
+	assert.equal(calls.length, 1,
+		`exactly one loadConfig call site (found ${calls.length}): main() derives the audit path and the store dir from the SAME load`);
+	assert.ok(!src.includes("auditLogPath"), "the per-append auditLogPath resolver is gone");
+});
+
 test("policydriver: a resolved audit path receives the verdict line and warns nothing", () => {
 	const fx = makeFixture(BASE_CONFIG);
 	try {
