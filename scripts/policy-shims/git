@@ -102,6 +102,10 @@ case "$sub" in
       a="${args[$j]}"
       case "$a" in
         "$flag" | "$flag"*) exec_policy_check=1; break ;;
+        --force-create)
+          # The documented LONG form of switch -C (P3 review round 11): the same
+          # ref-write class — it must consult, not ride the generic long-flag arm.
+          exec_policy_check=1; break ;;
         --*) : ;;                        # long flag: never a short cluster (checked RAW — after
                                          # stripping one hyphen, '--x' looks like '-x')
         -?**)
@@ -147,6 +151,11 @@ case "$sub" in
           force=1
           ;;
         -t | --tags) tags=1 ;;
+        --follow-tags)
+          # Publishes all tags reachable from the pushed refs (P3 review round 11):
+          # tag-ref publication is the same class as --tags — it joins the tag set,
+          # so the §6 tag-push ASK applies. --no-follow-tags is NOT a match.
+          tags=1 ;;
         --mirror) force=1; tags=1 ;;
         --dry-run) exec "$REAL_GIT" "$@" ;;   # a dry-run executes nothing: not a mutation
         --repo=* | --receive-pack=*) dest_unknown=1 ;;
