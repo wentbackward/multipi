@@ -284,12 +284,23 @@ _shim_json_escape() { # minimal JSON string escaper for the fallback audit line
 # Minimal mirror of the driver's redactActionSummary for the ONE path that bypasses it:
 # scrub the token-dir shape and bound the length (a commit message may carry a token path
 # and the fallback line must not print it raw — P3 review round-6 should-fix).
+# LOCKED to extension/src/policy.ts by the equivalence pin (tests/unit/shim-redact-equiv.
+# test.ts, #55): identical adversarial input must yield byte-identical output.
 _shim_redact_summary() {
   local s=$1
-  # Double-quoted program: the class excludes whitespace, both quotes, backtick and the
-  # shell meta set — the token-path shape the driver's TOKEN_DIR_RE scrubs.
-  s=$(printf '%s' "$s" | sed -E "s#(~|\$HOME|\$\{HOME\}|/)[^[:space:]\"'\`|;&<>]*dev-loop-tokens[^[:space:]\"'\`|;&<>]*#<token-dir>#g")
-  s=${s:0:160}
+  # ERE mirrors the TS TOKEN_DIR_RE: (~ | literal $HOME | literal ${HOME} | /), a span
+  # excluding whitespace, both quotes, backtick and the shell meta set, over the
+  # token-dir name. The program is built with $'...' so the backslashes reach sed
+  # VERBATIM: in the old double-quoted string `\$` collapsed to a bare $, which mid-ERE
+  # is the END-OF-LINE anchor — the $HOME/${HOME} alternatives silently never matched
+  # (the latent desync the equivalence pin exists to catch). Bound = 160 chars cut with
+  # the ellipsis mark, the TS truncation shape.
+  local re
+  re=$'(~|\\$HOME|\\$\\{HOME\\}|/)[^[:space:]"\'`|;&<>]*dev-loop-tokens[^[:space:]"\'`|;&<>]*'
+  s=$(printf '%s' "$s" | sed -E "s#${re}#<token-dir>#g")
+  if [ "${#s}" -gt 160 ]; then
+    s="${s:0:160}…"
+  fi
   printf '%s' "$s"
 }
 
