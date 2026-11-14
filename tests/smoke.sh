@@ -2959,7 +2959,7 @@ fi
 
 # 15b. log hygiene (spec §8): the scenario-store path never reaches the shim's audit — the
 #      driver computes the store dir from the loaded config and substitutes <store>, exactly
-#      like the hook's redactSummary (P3 review round 10).
+#      like the shared redactActionSummary (P3 review round 10).
 mkcfg '"policy": {"repos": ["self"], "secondaries": ["'"$work"'/sec"]}, "scenarios": {}'
 P3_STORE="$work/home/project/scenarios"
 rm -f "$P3_AUDIT"
