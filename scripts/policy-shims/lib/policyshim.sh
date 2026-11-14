@@ -281,11 +281,33 @@ _shim_json_escape() { # minimal JSON string escaper for the fallback audit line
   printf '%s' "$s"
 }
 
+# Probe (once, at source time) for a locale in which bash counts CHARACTERS: é must
+# measure as 1. The result is cached in SHIM_UTF8_LOCALE; empty = none found (the
+# documented byte-based fallback in _shim_redact_summary).
+_shim_pick_utf8_locale() {
+  local probe=$'\xc3\xa9' cand
+  for cand in C.UTF-8 C.utf8; do
+    if LC_ALL="$cand" bash -c '[ "${#1}" -eq 1 ]' _ "$probe" 2>/dev/null; then
+      printf '%s' "$cand"
+      return
+    fi
+  done
+  printf ''
+}
+SHIM_UTF8_LOCALE=$(_shim_pick_utf8_locale)
+
 # Minimal mirror of the driver's redactActionSummary for the ONE path that bypasses it:
 # scrub the token-dir shape and bound the length (a commit message may carry a token path
 # and the fallback line must not print it raw — P3 review round-6 should-fix).
 # LOCKED to extension/src/policy.ts by the equivalence pin (tests/unit/shim-redact-equiv.
 # test.ts, #55): identical adversarial input must yield byte-identical output.
+#
+# The bound counts CHARACTERS, decided under a PINNED UTF-8 locale — never the caller's:
+# under a C locale ${#s}/${s:0:160} count BYTES and cut mid-UTF-8-sequence (a lone 0xB6
+# tail — an undecodable audit line; #55 review SF1, reproduced). The probe picks a locale
+# in which bash counts characters (C.UTF-8 / C.utf8), once at source time; if NONE is
+# found it degrades to the historical byte-based bound — documented fallback, only on
+# systems without any UTF-8 locale (the output can then split a sequence, as before).
 _shim_redact_summary() {
   local s=$1
   # ERE mirrors the TS TOKEN_DIR_RE: (~ | literal $HOME | literal ${HOME} | /), a span
@@ -298,8 +320,20 @@ _shim_redact_summary() {
   local re
   re=$'(~|\\$HOME|\\$\\{HOME\\}|/)[^[:space:]"\'`|;&<>]*dev-loop-tokens[^[:space:]"\'`|;&<>]*'
   s=$(printf '%s' "$s" | sed -E "s#${re}#<token-dir>#g")
+  # The gate under the caller's locale never MISSES a needed cut: a byte-counting (C)
+  # locale over-counts (superset trigger), a char-counting locale counts the same
+  # characters the pinned locale does. The DECISION itself happens in a child bash
+  # under the pinned UTF-8 locale, where ${#s}/${s:0:160} count characters and a
+  # sequence can never be split. A C-locale caller therefore sees the same answer the
+  # TS engine makes (the pin drives LC_ALL=C over the whole corpus). Astral-plane
+  # strings (emoji & co.) count 1 here but 2 UTF-16 units in TS, so for those the two
+  # engines may differ by a few chars — both outputs stay valid, bounded UTF-8.
   if [ "${#s}" -gt 160 ]; then
-    s="${s:0:160}…"
+    if [ -n "$SHIM_UTF8_LOCALE" ]; then
+      s=$(LC_ALL="$SHIM_UTF8_LOCALE" bash -c 'if [ "${#1}" -gt 160 ]; then printf "%s…" "${1:0:160}"; else printf "%s" "$1"; fi' _ "$s")
+    else
+      s="${s:0:160}…"
+    fi
   fi
   printf '%s' "$s"
 }
