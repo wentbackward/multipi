@@ -1,6 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { collectStream } from "./streamcap.ts";
 
 export interface IssueInfo {
 	number: number;
@@ -144,27 +145,20 @@ export function runFastCheck(command: string | null, cwd: string): Promise<{ pas
 		// the parent holds open for the entire run — that hung devloop.gate (see #48/#41).
 		const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
 		// As in execFile: maxBuffer is enforced per stream; the tail combines stdout then stderr.
-		const out: Buffer[] = [];
-		const err: Buffer[] = [];
-		let outBytes = 0;
-		let errBytes = 0;
-		child.stdout!.on("data", (chunk: Buffer) => {
-			outBytes += chunk.length;
-			if (outBytes <= FAST_CHECK_MAX_BUFFER) out.push(chunk);
-			else child.kill("SIGTERM");
-		});
-		child.stderr!.on("data", (chunk: Buffer) => {
-			errBytes += chunk.length;
-			if (errBytes <= FAST_CHECK_MAX_BUFFER) err.push(chunk);
-			else child.kill("SIGTERM");
-		});
+		const out = collectStream(child.stdout!, FAST_CHECK_MAX_BUFFER, () => child.kill("SIGTERM"));
+		const err = collectStream(child.stderr!, FAST_CHECK_MAX_BUFFER, () => child.kill("SIGTERM"));
+		let spawnErr = "";
 		const timer = setTimeout(() => child.kill("SIGTERM"), FAST_CHECK_TIMEOUT_MS);
-		child.on("error", () => {
-			// spawn failure: "close" still follows and maps to RED.
+		child.on("error", (e: Error) => {
+			// spawn failure: "close" still follows and maps to RED — keep the message for the tail.
+			spawnErr = e.message;
 		});
 		child.on("close", (code) => {
 			clearTimeout(timer);
-			const combined = Buffer.concat(out).toString() + Buffer.concat(err).toString();
+			const combined =
+				Buffer.concat(out).toString() +
+				Buffer.concat(err).toString() +
+				(spawnErr ? `\nspawn error: ${spawnErr}\n` : "");
 			// code===0 alone is the fail-safe: signal kills (code=null) and spawn failures
 			// (negative errno) are not 0, so they land RED just like non-zero exits.
 			resolve({

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { collectStream } from "./streamcap.ts";
 
 export interface GateOutcome {
 	status: "green" | "red" | "conflict" | "error";
@@ -45,29 +46,19 @@ export function runScript(script: string, opts: TrainRunOptions): Promise<{ code
 			env: { ...process.env, ...opts.env },
 			stdio: ["ignore", "pipe", "pipe"],
 		});
-		const out: Buffer[] = [];
-		const err: Buffer[] = [];
-		let outBytes = 0;
-		let errBytes = 0;
-		child.stdout!.on("data", (chunk: Buffer) => {
-			outBytes += chunk.length;
-			if (outBytes <= SCRIPT_MAX_BUFFER) out.push(chunk);
-			else child.kill("SIGTERM"); // same as execFile's maxBuffer: kill and fail
-		});
-		child.stderr!.on("data", (chunk: Buffer) => {
-			errBytes += chunk.length;
-			if (errBytes <= SCRIPT_MAX_BUFFER) err.push(chunk);
-			else child.kill("SIGTERM");
-		});
-		child.on("error", () => {
+		const out = collectStream(child.stdout!, SCRIPT_MAX_BUFFER, () => child.kill("SIGTERM"));
+		const err = collectStream(child.stderr!, SCRIPT_MAX_BUFFER, () => child.kill("SIGTERM"));
+		let spawnErr = "";
+		child.on("error", (e: Error) => {
 			// spawn failure (e.g. missing interpreter): "close" still follows and maps to code 1,
-			// like execFile's error path.
+			// like execFile's error path — keep the message so the tail carries a diagnostic.
+			spawnErr = e.message;
 		});
 		child.on("close", (code) => {
 			resolve({
 				code: normalizeCloseCode(code),
 				stdout: Buffer.concat(out).toString(),
-				stderr: Buffer.concat(err).toString(),
+				stderr: Buffer.concat(err).toString() + (spawnErr ? `\nspawn error: ${spawnErr}\n` : ""),
 			});
 		});
 	});
