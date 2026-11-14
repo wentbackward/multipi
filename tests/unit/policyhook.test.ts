@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -308,13 +308,18 @@ test("no live code or test references the removed hook-local redactSummary (#55 
 	// (`redactActionSummary`). A surviving reference in live code or a test comment keeps
 	// a dead symbol teachable and drift-inducing — scan the layers that emit the contract.
 	// docs/DECISIONS.md is deliberately out of scope: its entries are historical record.
+	// Recursive readdir yields DIRECTORY names too (lib/): filter to regular files or
+	// readFileSync dies with EISDIR.
 	const files = ["tests/smoke.sh"];
-	for (const rel of readdirSync(path.join(ROOT, "scripts", "policy-shims"), { recursive: true })) {
-		files.push(path.join("scripts", "policy-shims", rel as string));
-	}
-	for (const rel of readdirSync(path.join(ROOT, "extension", "src"))) {
-		files.push(path.join("extension", "src", rel as string));
-	}
+	const scan = (rel: string): void => {
+		for (const entry of readdirSync(path.join(ROOT, rel))) {
+			const abs = path.join(rel, entry);
+			if (statSync(path.join(ROOT, abs)).isDirectory()) scan(abs);
+			else files.push(abs);
+		}
+	};
+	scan("scripts/policy-shims");
+	scan("extension/src");
 	for (const f of files) {
 		assert.ok(!/\bredactSummary\b/.test(readFileSync(path.join(ROOT, f), "utf8")),
 			`${f}: references the removed symbol redactSummary (the shared name is redactActionSummary)`);
