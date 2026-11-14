@@ -308,3 +308,27 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
   before the verb (gh repo --help delete). (4) RULE_SHIM_ERROR drift pin; smoke
   audit-hygiene if-heredoc form; renamed-.git residual named (a core.worktree-style
   renamed git dir resolves nothing ⇒ deny, fail-safe direction).
+- 2026-11-13 — P3 review round-7 fixes (two live bypasses reproduced, two should-fixes).
+  (1) The doc pass-through in BOTH shims is now scoped to the ONE token immediately after
+  the subcommand (git) / verb (gh). Round 6's ANYWHERE scan let a mutation carrying a
+  literal help-shaped token as a flag VALUE skip the entire policy check (`git commit -m
+  --help` landed un-audited in a foreign repo; `git push -o --help origin main` attempted a
+  real push; `gh pr merge 12 -m --help` forwarded to the real gh). Named residuals of the
+  narrower reading, both over-CONSULT not over-allow: `git commit -q --help` and
+  `gh repo --help delete` now evaluate as mutations (self: allow, off-self: ask-shaped) —
+  fail-safe direction. (2) `--force-if-includes` joins the push force set (space and =
+  forms): conditionally forcing, and a topic push is invisible to the base rule. The
+  space-form optional ref is deliberately NOT value-consumed: if present it lands in the
+  positionals, where it can only over-deny (it cannot un-cover the remote/refspec, and the
+  force bit is set unconditionally). Chosen over value-consumption because swallowing the
+  word could mask the remote/destination while leaking a value can only add refspecs.
+  (3) The gh globals -c/--color/--api-version are value-CONSUMING on older gh releases, so
+  they now eat the next word in both scan sites (a leaked value became the noun/verb and
+  passed the flat deny: `gh --api-version v4 repo delete o/r`); --no-color stays no-value.
+  (4) Smoke test-10 harness: the logging stand-in git must exec the absolute path captured
+  on the PRISTINE PATH before the shim dir is armed — a command lookup inside the stand-in
+  runs under the armed PATH and re-resolved to the SHIM (infinite shim→stand-in exec loop;
+  argv.log grew without bound, suite hung). Parked from this round, carried forward:
+  corrupt-config `policy:unusable` audit fallback in the shims (needs a shim default audit
+  path or a stderr marker — not trivially <20 lines) and the TOKEN_DIR_RE/ACTION_SUMMARY_MAX
+  consolidation (the parked consolidation ticket).
