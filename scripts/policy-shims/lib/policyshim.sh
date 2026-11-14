@@ -194,9 +194,12 @@ _shim_json_escape() { # minimal JSON string escaper for the fallback audit line
   printf '%s' "$s"
 }
 
-# Probe (once, at source time) for a locale in which bash counts CHARACTERS: é must
-# measure as 1. The result is cached in SHIM_UTF8_LOCALE; empty = none found (the
-# documented byte-based fallback in _shim_redact_summary).
+# Find a locale in which bash counts CHARACTERS: é must measure as 1. Called LAZILY by
+# `_shim_redact_summary` — at most once per process, and only when the truncation branch
+# first needs it: every git/gh shim invocation sources this lib, so a source-time probe
+# paid 1-2 child-bash forks on the hot path for a feature the happy path never reaches
+# (#55 review round-2 SF1). Result is cached in SHIM_UTF8_LOCALE (flag SHIM_UTF8_PROBED);
+# empty = none found (the documented byte-based fallback in _shim_redact_summary).
 _shim_pick_utf8_locale() {
   local probe=$'\xc3\xa9' cand
   for cand in C.UTF-8 C.utf8; do
@@ -207,7 +210,6 @@ _shim_pick_utf8_locale() {
   done
   printf ''
 }
-SHIM_UTF8_LOCALE=$(_shim_pick_utf8_locale)
 
 # Minimal mirror of the driver's redactActionSummary for the ONE path that bypasses it:
 # scrub the token-dir shape and bound the length (a commit message may carry a token path
@@ -218,9 +220,12 @@ SHIM_UTF8_LOCALE=$(_shim_pick_utf8_locale)
 # The bound counts CHARACTERS, decided under a PINNED UTF-8 locale — never the caller's:
 # under a C locale ${#s}/${s:0:160} count BYTES and cut mid-UTF-8-sequence (a lone 0xB6
 # tail — an undecodable audit line; #55 review SF1, reproduced). The probe picks a locale
-# in which bash counts characters (C.UTF-8 / C.utf8), once at source time; if NONE is
-# found it degrades to the historical byte-based bound — documented fallback, only on
-# systems without any UTF-8 locale (the output can then split a sequence, as before).
+# in which bash counts characters (C.UTF-8 / C.utf8). The probe is evaluated LAZILY —
+# on the first call that actually needs it, cached per process — never at source time
+# (#55 review round-2 SF1: every shim invocation sources this lib, and only the
+# driver-broken fallback path ever truncates). If NO candidate is found it degrades to
+# the historical byte-based bound — documented fallback, only on systems without any
+# UTF-8 locale (the output can then split a sequence, as before).
 _shim_redact_summary() {
   local s=$1
   # ERE mirrors the TS TOKEN_DIR_RE: (~ | literal $HOME | literal ${HOME} | /), a span
@@ -242,6 +247,13 @@ _shim_redact_summary() {
   # strings (emoji & co.) count 1 here but 2 UTF-16 units in TS, so for those the two
   # engines may differ by a few chars — both outputs stay valid, bounded UTF-8.
   if [ "${#s}" -gt 160 ]; then
+    # Lazy init: probe the UTF-8 locale on first NEED, cache per process. The flag is
+    # separate from SHIM_UTF8_LOCALE because an EMPTY locale (no candidate) is a valid,
+    # already-probed answer and must not re-trigger the probe.
+    if [ -z "${SHIM_UTF8_PROBED:-}" ]; then
+      SHIM_UTF8_PROBED=1
+      SHIM_UTF8_LOCALE=$(_shim_pick_utf8_locale)
+    fi
     if [ -n "$SHIM_UTF8_LOCALE" ]; then
       s=$(LC_ALL="$SHIM_UTF8_LOCALE" bash -c 'if [ "${#1}" -gt 160 ]; then printf "%s…" "${1:0:160}"; else printf "%s" "$1"; fi' _ "$s")
     else
