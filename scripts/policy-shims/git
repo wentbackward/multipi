@@ -13,6 +13,14 @@
 # §7.2: the fail direction is the 2026-11-09 failure mode itself). Exit: 126 deny or ask
 # (nothing executed), 127 real git unlocatable, else the real git's own code.
 #
+# Named residual (P3 review round 12, beside the unclassified-verbs list in DECISIONS):
+# `git push <remote> --delete <unprefixed-name>` has a GENUINELY AMBIGUOUS destination —
+# git resolves the name against the remote, preferring a same-named branch, so a bare
+# tag name deletes refs/tags/<name> while a bare branch name deletes refs/heads/<name>.
+# The shim classifies the LITERAL name (a tag-name delete thus escapes the base/wildcard
+# checks the same way a same-named branch would); the remote's refs are not ground truth
+# at scan time, so NO lookup is attempted — the class is named, not silently widened.
+#
 # The SIM_* facts set below are read by shim_decide (policyshim.sh) — the consumer crosses
 # a file, so shellcheck cannot see the use (SC2034 is suppressed file-wide on purpose).
 # shellcheck disable=SC2034
@@ -157,6 +165,15 @@ case "$sub" in
           # so the §6 tag-push ASK applies. --no-follow-tags is NOT a match.
           tags=1 ;;
         --mirror) force=1; tags=1 ;;
+        --all | --branches)
+          # The implicit destination set is ALL local heads (P3 review round 12): it
+          # includes the base ref from ANY checked-out branch, while the no-refspec
+          # rule below resolves only the CURRENT branch (reproduced: from a topic
+          # branch, `git push --all origin` wrote main with zero policy lines).
+          # Over-deny to the base class — the documented fail-safe direction for
+          # wildcard destinations; `--no-all`/`--no-branches` are NOT a match and
+          # restore the default behaviour via the existing current-branch rule.
+          base=1 ;;
         --dry-run) exec "$REAL_GIT" "$@" ;;   # a dry-run executes nothing: not a mutation
         --repo=* | --receive-pack=*) dest_unknown=1 ;;
         -o | --push-option)
