@@ -33,15 +33,15 @@ import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { loadConfig, resolvePaths, scenariosOn, DEFAULT_POLICY } from "./config.ts";
-import { evaluate, loadPolicy, type Policy, type PolicyContext, type PolicyDecision } from "./policy.ts";
+import { evaluate, loadPolicy, formatPolicyDeny, formatPolicyAsk, redactActionSummary, type Policy, type PolicyContext, type PolicyDecision } from "./policy.ts";
 
 export const AUDIT_LOG_NAME = "policy-audit.jsonl";
-/** Bounded action summaries (spec §8): long enough to diagnose, short enough to stay noise-free. */
-export const ACTION_SUMMARY_MAX = 160;
-/** The rule id an ask-by-POSTURE (no matched rule) escalates under — structural-id family. */
-export const RULE_POSTURE_ASK = "posture:ask";
-/** `~` is LITERAL in the seeded Read/Edit denies: the evaluator matches it as a first segment. */
-const TOKEN_DIR_RE = /(~|\$HOME|\$\{HOME\}|\/)[^\s"'`|;&<>]*dev-loop-tokens[^\s"'`|;&<>]*/g;
+// The redaction contract — the bound, the token-dir regex, the posture-ask id, the deny/ask
+// line formatters and the redactor itself — lives ONCE in policy.ts (ticket #55). The hook
+// reuses it directly and re-exports the shared bindings, so every layer (hook, driver, shim
+// fallback) redacts with the same code and a one-line drift is impossible.
+export { ACTION_SUMMARY_MAX, RULE_POSTURE_ASK, TOKEN_DIR_RE } from "./policy.ts";
+export { formatPolicyDeny, formatPolicyAsk, redactActionSummary } from "./policy.ts";
 
 /**
  * The session-start hash of the EFFECTIVE policy (spec §8): sha256 over the canonical
@@ -84,29 +84,6 @@ export function summarizeCall(toolName: string, input: Record<string, unknown>):
 	if (tool === "bash" && typeof input.command === "string") return `bash: ${input.command}`;
 	const p = typeof input.path === "string" ? input.path : typeof input.file_path === "string" ? input.file_path : null;
 	return p !== null ? `${tool}: ${p}` : tool;
-}
-
-/**
- * Log hygiene (spec §8): bound the summary and scrub what must not survive — every
- * token-dir path (any home spelling) becomes `<token-dir>`; the scenario store dir becomes
- * `<store>`. Everything else travels verbatim (the summary is a tripwire aid, not a vault).
- */
-export function redactSummary(summary: string, storeDir: string | null): string {
-	let out = summary.replace(TOKEN_DIR_RE, "<token-dir>");
-	if (storeDir && out.includes(storeDir)) out = out.split(storeDir).join("<store>");
-	if (out.length > ACTION_SUMMARY_MAX) out = `${out.slice(0, ACTION_SUMMARY_MAX)}…`;
-	return out;
-}
-
-/** The deny block text (the tripwire: rule id + one-line reason is what makes the model reconsider). */
-export function formatDeny(d: PolicyDecision): string {
-	return `DENIED ${d.ruleId ?? "policy:unusable"}: ${d.reason ?? ""}`;
-}
-
-/** The ask block text — the §6 escalation directive, verbatim shape. */
-export function formatAsk(d: PolicyDecision, actionSummary: string): string {
-	const ruleId = d.ruleId ?? RULE_POSTURE_ASK;
-	return `ASK ${ruleId}: ${actionSummary}. Operator approval required: run 'multipi-approve ${ruleId}' in your own shell, then retry.`;
 }
 
 export interface PolicyEnforcer {
@@ -222,9 +199,9 @@ export function createPolicyEnforcer(opts: EnforcerOpts): PolicyEnforcer {
 
 	function denyEvery(args: { toolName: string; input: Record<string, unknown>; sessionId: string | null }, reason: string): { block: boolean; reason: string } {
 		const decision: PolicyDecision = { verdict: "deny", ruleId: "policy:unusable", reason };
-		const summary = redactSummary(summarizeCall(args.toolName, args.input), storeDir);
+		const summary = redactActionSummary(summarizeCall(args.toolName, args.input), storeDir);
 		append(verdictLine(args, decision, summary, null, null));
-		return { block: true, reason: formatDeny(decision) };
+		return { block: true, reason: formatPolicyDeny(decision) };
 	}
 
 	// The on-disk policy re-hashed at each non-default verdict (drift, §8). Cheap and rare:
@@ -268,7 +245,7 @@ export function createPolicyEnforcer(opts: EnforcerOpts): PolicyEnforcer {
 		onToolCall: (args) => {
 			const ctx = buildPolicyContext(args.toolName, args.input, actor);
 			const d = evaluate(policy, ctx);
-			const summary = redactSummary(summarizeCall(args.toolName, args.input), storeDir);
+			const summary = redactActionSummary(summarizeCall(args.toolName, args.input), storeDir);
 			if (d.verdict === "allow") {
 				// Curated-allow match (ruleId set) = the audit baseline / near-miss record; a
 				// posture default (no ruleId) is the steady state and stays out of the log.
@@ -281,8 +258,8 @@ export function createPolicyEnforcer(opts: EnforcerOpts): PolicyEnforcer {
 			// not masquerade as drift (spurious warnings are noise the operator stops trusting).
 			const drifted = dh !== "unreadable" && dh !== hash;
 			const reason = d.verdict === "deny"
-				? formatDeny(d)
-				: formatAsk(d, summary);
+				? formatPolicyDeny(d)
+				: formatPolicyAsk(d, summary);
 			const text = drifted
 				? `POLICY DRIFT: on-disk policy hash ${dh} != session-loaded hash ${hash} — enforcing the session-loaded policy (no hot reload). ${reason}`
 				: reason;
