@@ -982,6 +982,17 @@ bash "$POLS" show extra >/dev/null 2>&1;       expect "policy.sh show with extra
 bash "$POLS" explain >/dev/null 2>&1;          expect "policy.sh explain without a command exits 2" "2" "$?"
 bash "$POLS" audit --since abc >/dev/null 2>&1; expect "policy.sh audit --since abc exits 2" "2" "$?"
 bash "$POLS" audit --since >/dev/null 2>&1;    expect "policy.sh audit --since without a value exits 2" "2" "$?"
+# "positive integer" in the header means strictly positive: 0 (and 00) is usage.
+bash "$POLS" audit --since 0 >/dev/null 2>&1;    expect "policy.sh audit --since 0 exits 2 (not positive)" "2" "$?"
+bash "$POLS" audit --since 00 >/dev/null 2>&1;   expect "policy.sh audit --since 00 exits 2 (not positive)" "2" "$?"
+
+# Not a usable dev-loop project (no git repo here): dl_die's 2 — the header pins
+# 2 as usage/config, the same convention as the sibling loop scripts.
+out=$(cd "$work" && bash "$POLS" show 2>&1); rc=$?
+expect "policy.sh outside a git repo exits 2 (usage/config)" "2" "$rc"
+echo "$out" | grep -qF "multipi: not inside a git repository" &&
+  pass "the no-project failure is named (dl_die), not swallowed" ||
+  fail "no-project failure message wrong (got: $out)"
 
 # --- policy.sh show --------------------------------------------------------------
 seed_perms
@@ -1087,6 +1098,47 @@ expect "audit --since 30s (trailing s) exits 0" "0" "$rc"
 [ "$(echo "$out" | grep -c '"ts"')" = "1" ] &&
   pass "the trailing-s spelling filters identically" || fail "trailing-s spelling broken"
 
+# Leading zeroes are decimal, not octal: --since 09 is 9 seconds, and must not hit
+# the $(( now - 09 )) "value too great for base" crash (07 is a valid octal and
+# would mask the bug; 09 is the discriminator).
+printf '{"ts":"%s","session":"s6","actor":"orchestrator","ruleId":"Bash(sudo:*)","verdict":"deny","actionSummary":"lz-old","layer":"hook"}\n' "$old_iso" >"$audit_log"
+printf '{"ts":"%s","session":"s6","actor":"orchestrator","ruleId":"Bash(sudo:*)","verdict":"deny","actionSummary":"lz-recent","layer":"hook"}\n' "$now_iso" >>"$audit_log"
+out=$(bash "$POLS" audit --since 09); rc=$?
+expect "audit --since 09 (leading zero) exits 0 (no octal crash)" "0" "$rc"
+[ "$(echo "$out" | grep -c '"actionSummary"')" = "1" ] &&
+  pass "--since 09 filters as plain 9 seconds" ||
+  fail "--since 09 filtered wrong (want 1, got $(echo "$out" | grep -c '"actionSummary"'))"
+echo "$out" | grep -qF '"actionSummary":"lz-recent"' &&
+  pass "--since 09 keeps the recent line" || fail "--since 09 dropped the recent line"
+
+# A TIME-ONLY ts is not a full date+time: GNU `date -d "00:00:00"` parses it as today
+# (BSD rejects) — a platform coin-flip that must never reach date. Unparseable ⇒ KEPT,
+# deterministically on every platform (00:00:00 has already passed by the time any
+# test runs, so GNU pre-fix behaviour would DROP it — that is the discriminating bit).
+printf '{"ts":"00:00:00","session":"s7","actor":"orchestrator","ruleId":"Bash(sudo:*)","verdict":"deny","actionSummary":"time-only","layer":"hook"}\n' >"$audit_log"
+printf '{"ts":"12:00","session":"s7","actor":"orchestrator","ruleId":"Bash(sudo:*)","verdict":"deny","actionSummary":"hh-mm-only","layer":"hook"}\n' >>"$audit_log"
+out=$(bash "$POLS" audit --since 1); rc=$?
+expect "audit --since with time-only ts exits 0" "0" "$rc"
+echo "$out" | grep -qF '"actionSummary":"time-only"' &&
+  pass "a time-only ts is kept (never handed to date)" ||
+  fail "the 00:00:00 ts was parsed or dropped (platform coin-flip)"
+echo "$out" | grep -qF '"actionSummary":"hh-mm-only"' &&
+  pass "the 12:00 ts is kept too (not handed to date)" ||
+  fail "the 12:00 ts was parsed or dropped"
+
+# The guard must not OVER-tighten: a full datetime WITH an offset is still understood
+# (2001 is ancient regardless of the wall clock — deterministic).
+printf '{"ts":"2001-01-01T00:00:00+02:00","session":"s7","actor":"orchestrator","ruleId":"Bash(sudo:*)","verdict":"deny","actionSummary":"offset-old","layer":"hook"}\n' >"$audit_log"
+printf '{"ts":"%s","session":"s7","actor":"orchestrator","ruleId":"Bash(sudo:*)","verdict":"deny","actionSummary":"offset-recent","layer":"hook"}\n' "$now_iso" >>"$audit_log"
+out=$(bash "$POLS" audit --since 30); rc=$?
+expect "audit --since with offset datetimes exits 0" "0" "$rc"
+echo "$out" | grep -qF '"actionSummary":"offset-old"' &&
+  fail "the offset datetime was not parsed (guard over-tightened?)" ||
+  pass "an offset datetime is understood by --since"
+echo "$out" | grep -qF '"actionSummary":"offset-recent"' &&
+  pass "the recent line survives alongside the offset parse" ||
+  fail "the recent line was dropped in the offset test"
+
 # Numeric ts: epoch milliseconds (recent) and epoch seconds (old) are both understood.
 printf '{"ts":%s,"session":"s2","actor":"orchestrator","ruleId":"Bash(sudo:*)","verdict":"deny","actionSummary":"ms-recent","layer":"shim"}\n' "$now_ms" >"$audit_log"
 printf '{"ts":%s,"session":"s2","actor":"orchestrator","ruleId":"Bash(sudo:*)","verdict":"deny","actionSummary":"s-old","layer":"shim"}\n' "$old_s" >>"$audit_log"
@@ -1124,6 +1176,20 @@ echo "$out" | grep -qF '"actionSummary":"line-01"' &&
   pass "the tail keeps the NEWEST lines"
 echo "$out" | grep -qF '"actionSummary":"line-52"' &&
   pass "the last line survives the tail" || fail "the last line lost"
+
+# run_eval's stderr scratch file: a TERM mid-import must leak NOTHING (the EXIT-trap
+# ownership the doctor's policy report uses). A slow `node` stand-in holds the import
+# open; the trap, not the normal path, must be the one that cleans up.
+SLOW_NODE_DIR="$work/slownode"
+mkdir -p "$SLOW_NODE_DIR"
+printf '#!/bin/bash\nsleep 30\n' >"$SLOW_NODE_DIR/node" && chmod +x "$SLOW_NODE_DIR/node"
+EVAL_SCRATCH="$work/evaltmp"
+mkdir -p "$EVAL_SCRATCH"
+scratch_before=$(ls -A "$EVAL_SCRATCH" | wc -l)
+( cd "$work/project" && TMPDIR="$EVAL_SCRATCH" PATH="$SLOW_NODE_DIR:$PATH" bash "$POLS" show & p=$!; sleep 2; kill -TERM "$p" 2>/dev/null; wait "$p" 2>/dev/null )
+scratch_after=$(ls -A "$EVAL_SCRATCH" | wc -l)
+expect "a TERM mid-eval leaks no run_eval scratch file" "$scratch_before" "$scratch_after"
+rm -rf "$SLOW_NODE_DIR" "$EVAL_SCRATCH"
 
 # Tidy the fixture: no policy files, no shims, no token dir, no audit log, base config.
 rm -f permissions.json
