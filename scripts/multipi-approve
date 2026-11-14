@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# multipi-approve — the OPERATOR's ask-mint CLI (permission-policy spec 2026-11-09 §6).
+#
+# The operator runs this in THEIR OWN shell — outside the policy'd session. The seeded
+# `Bash(*multipi-approve*)` deny exists precisely so the policy'd agent can never mint
+# its own approvals from inside the session (a self-approval would be an audited,
+# visible event — not a quiet pass).
+#
+# Usage:
+#   multipi-approve <rule-id> [--target <scope>] [--ttl <minutes>]
+#
+# Writes <state>/dev-loop-tokens/<rule-id>.tok (dir 0700, file 0600) — the spec §6
+# layout `~/.multipi/<project>/dev-loop-tokens/` — carrying
+# {ruleId, targetScope, issuedAt, expiresAt, hmac}. The hmac is HMAC-SHA256 over the
+# canonical payload, signed with the PER-PROJECT secret:
+#   1. $POLICY_SIGNING_SECRET in the operator's environment (wins);
+#   2. else the keyring <state>/policy-secret (0600), created ONCE with 32 random hex
+#      bytes on the first mint when (1) is absent.
+# The secret is NEVER in the repo, never in .devloop.json, never on the loop's PATH,
+# and never printed. Replacing the env value or keyring file ROTATES the secret and
+# invalidates every outstanding token — by design.
+# <state> is the project state dir: $MULTIPI_HOME/<repo>, default ~/.multipi/<repo>.
+#
+# <rule-id> is the raw ask rule (e.g. 'Bash(*gh pr merge*)' or 'oneshot:install-
+# secondary'). --target narrows the token to one scope (default '*': any scope);
+# --ttl overrides the policy default (token_ttl_minutes, default 10). A re-mint
+# supersedes the outstanding token for the rule.
+#
+# MULTIPI_APPROVE_NOW_MS — documented TEST SEAM: override the issuing clock (integer
+# ms epoch) so tests drive TTL/expiry without sleeping. Never set in production.
+#
+# Exit codes (contract): 0 minted; 2 usage/environment error (nothing is half-written);
+# any other non-zero code is the underlying node failure, passed through.
+set -u
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$here/lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+multipi-approve <rule-id> [--target <scope>] [--ttl <minutes>]
+
+Mints the operator's approval token for one ask rule (permission-policy spec §6).
+Run in the OPERATOR'S shell, from anywhere inside the project. <rule-id> is the raw
+ask rule ('Bash(*gh pr merge*)', 'oneshot:install-secondary', ...); --target narrows
+the token to one scope (default '*'); --ttl overrides token_ttl_minutes (default 10).
+Exit: 0 minted, 2 usage/environment error.
+EOF
+}
+
+RULE_ID="" TARGET="" TTL=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    -h|--help) usage; exit 0 ;;
+    --target) [ $# -ge 2 ] || dl_die "--target needs a value"; TARGET=$2; shift 2 ;;
+    --ttl) [ $# -ge 2 ] || dl_die "--ttl needs a value"; TTL=$2; shift 2 ;;
+    -*) dl_die "unknown option: $1 (see --help)" ;;
+    *)
+      [ -z "$RULE_ID" ] || dl_die "unexpected argument: $1"
+      RULE_ID=$1; shift ;;
+  esac
+done
+[ -n "$RULE_ID" ] || { usage >&2; dl_die "missing <rule-id>"; }
+
+# The project: run from anywhere inside it (any worktree). DL_STATE/DL_CONFIG come
+# from .devloop.json; the token dir and keyring live OUTSIDE the repo.
+dl_load_config required
+
+if [ -n "$TTL" ]; then
+  printf '%s' "$TTL" | grep -Eq '^[1-9][0-9]*$' || dl_die "--ttl must be a positive whole number of minutes (got '$TTL')"
+else
+  TTL=$(cfg policy.token_ttl_minutes 10)
+  printf '%s' "$TTL" | grep -Eq '^[1-9][0-9]*$' || dl_die "policy.token_ttl_minutes in .devloop.json must be a positive whole number of minutes (got '$TTL')"
+fi
+
+command -v node >/dev/null 2>&1 || dl_die "node is required (the loop's own checks need it)"
+
+# The approvals module (single source of the HMAC/mint logic). Prefer the INSTALLED
+# copy next to the repo (what the session's policy stack loads), then the plugin's
+# own extension/ (when running from the plugin repo itself).
+APPROVALS=""
+for cand in \
+  "$DL_ROOT/.pi/extensions/multipi-devloop/src/approvals.ts" \
+  "$here/../extension/src/approvals.ts"
+do
+  [ -f "$cand" ] && { APPROVALS=$cand; break; }
+done
+[ -n "$APPROVALS" ] || dl_die "approvals module not found (run scripts/install.sh to sync the installed extension)"
+
+export APPROVALS_MODULE="$APPROVALS" APPR_STATE_DIR="$DL_STATE" APPR_RULE_ID="$RULE_ID" APPR_TARGET_SCOPE="$TARGET" APPR_TTL_MINUTES="$TTL"
+# POLICY_SIGNING_SECRET / MULTIPI_APPROVE_NOW_MS are INHERITED, never echoed.
+
+node --input-type=module -e '
+const env = process.env;
+if (!env.APPROVALS_MODULE || !env.APPR_STATE_DIR || !env.APPR_RULE_ID || !(Number(env.APPR_TTL_MINUTES) > 0)) {
+  console.error("multipi-approve: internal error: incomplete environment");
+  process.exit(2);
+}
+let mod;
+try {
+  mod = await import(env.APPROVALS_MODULE);
+} catch (e) {
+  console.error("multipi-approve: cannot load the approvals module: " + e.message);
+  process.exit(2);
+}
+const secretEnv = env[mod.SECRET_ENV_VAR];
+let secret, note;
+if (typeof secretEnv === "string" && secretEnv.length > 0) {
+  secret = secretEnv;
+  note = "secret from POLICY_SIGNING_SECRET";
+} else {
+  const k = mod.ensureKeyring(env.APPR_STATE_DIR);
+  secret = k.secret;
+  note = k.created ? "created a NEW keyring at " + k.path + " (keep it secret; it is outside the repo, never commit it)" : "secret from keyring " + k.path;
+}
+let now = Date.now();
+const nowSeam = env.MULTIPI_APPROVE_NOW_MS;
+if (nowSeam !== undefined && nowSeam !== "") {
+  if (!/^-?\d+$/.test(nowSeam)) {
+    console.error("multipi-approve: MULTIPI_APPROVE_NOW_MS must be an integer ms epoch (test seam)");
+    process.exit(2);
+  }
+  now = Number(nowSeam);
+}
+let token;
+try {
+  token = mod.mintToken({ ruleId: env.APPR_RULE_ID, ttlMinutes: Number(env.APPR_TTL_MINUTES), targetScope: env.APPR_TARGET_SCOPE || "*", secret, now });
+} catch (e) {
+  console.error("multipi-approve: " + e.message);
+  process.exit(2);
+}
+let p;
+try {
+  p = mod.writeTokenFile(mod.tokenDirFor(env.APPR_STATE_DIR), token);
+} catch (e) {
+  console.error("multipi-approve: cannot write the token: " + e.message);
+  process.exit(2);
+}
+console.log("multipi-approve: minted approval for rule " + env.APPR_RULE_ID);
+console.log("  token:   " + p);
+console.log("  scope:   " + token.targetScope);
+console.log("  ttl:     " + env.APPR_TTL_MINUTES + " minute(s) (expires " + new Date(token.expiresAt).toISOString() + ")");
+console.log("  " + note);
+console.log("the policy-controlled session may retry the action ONCE before expiry (singleshot).");
+'; rc=$?; [ "$rc" -eq 0 ] || exit "$rc"

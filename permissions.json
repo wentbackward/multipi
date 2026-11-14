@@ -21,7 +21,10 @@
       "Edit(./.env.*)",
       "Read(~/.multipi/*/dev-loop-tokens/**)",
       "Edit(~/.multipi/*/dev-loop-tokens/**)",
-      "Read(/run/user/**/dev-loop-tokens/**)"
+      "Read(/run/user/**/dev-loop-tokens/**)",
+      "Bash(*multipi-approve*)",
+      "Read(~/.multipi/*/policy-secret)",
+      "Edit(~/.multipi/*/policy-secret)"
     ],
     "allow": [
       "Bash(./scripts/*.sh)",

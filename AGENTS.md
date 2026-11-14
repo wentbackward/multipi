@@ -16,8 +16,8 @@ specified in `docs/superpowers/specs/2026-11-01-multipi-dark-factory.md`. Implem
 - **TypeScript**: erasable-only syntax (no enums/namespaces/parameter properties), strict,
   `tsc --noEmit` (Node 24 type stripping runs the tests; there is no build step).
 - **Dependency rule**: `config.ts` / `state.ts` / `brief.ts` / `stopgate.ts` / `formatter.ts` /
-  `gate.ts` / `merge.ts` / `issues.ts` / `policy.ts` are pure-node (testable without pi). Only `tools.ts` and
-  `index.ts` import pi types.
+  `gate.ts` / `merge.ts` / `issues.ts` / `policy.ts` / `approvals.ts` are pure-node
+  (testable without pi). Only `tools.ts` and `index.ts` import pi types.
 - **Contracts**: script exit codes are pinned in the design spec §2 and in each script's header;
   parsers in the extension key off them. Change a contract only in both places, with a DECISIONS.md
   entry.
@@ -66,6 +66,10 @@ is a seam; never introduce undocumented ones.
   passed to every judge of the gate run.
 - `MULTIPI_LIST_LAG_RETRY_MS` — the one bounded GitHub list-lag retry delay of
   `findOpenTicket` (default 1500 ms; tests drive dispatch without the wall-clock wait).
+- `MULTIPI_APPROVE_NOW_MS` — ask-machinery (spec 2026-11-09 §6), NOT a child seam:
+  the issuing-clock override (integer ms epoch) of the operator's
+  `scripts/multipi-approve`; tests drive TTL/expiry without sleeping. The
+  consumption-side clock is `attemptConsume`'s `now` parameter, not an env var.
 
 **Config keys (`.devloop.json`):** `"factory"` (`"collaborative"` | `"dark"`, default
 `"collaborative"` — a preset that only sets defaults; an explicit option always wins), the
