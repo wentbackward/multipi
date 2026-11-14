@@ -837,6 +837,288 @@ echo "$out" | grep -qF "factory collaborative, scenarios off (default)" &&
   fail "factory line lost after fixing the manifest"
 rm -rf "$BROKEN_EXT" node_modules
 
+# --- policy: doctor section + policy.sh (permission-policy spec §8, #42) ------
+# The doctor and policy.sh share ONE evaluator: both import loadPolicy/evaluate from
+# the plugin's extension/src (doctor's second candidate), so the fixture needs no .pi
+# install — only the config, a permissions.json, and FAITHFUL fake shims (forwarders
+# that drop the shim dir from PATH, the P3 idiom) inside the fixture's own tree.
+polcfg() { # fixture config WITH an explicit policy block
+  cat >.devloop.json <<'EOF'
+{
+  "base_branch": "main",
+  "fast_check": "test ! -e fast-fail",
+  "format": "echo formatted {file} >> fmt.log",
+  "format_extensions": [".txt"],
+  "checks": [
+    {"name": "unit", "command": "./check.sh", "summary": "passed|failed"},
+    {"name": "lint", "command": "test -x check.sh", "heavy": false}
+  ],
+  "heavy": {"slots": 2, "port_env": "SMOKE_PORT", "port_base": 9100, "port_step": 10, "poll_seconds": 1},
+  "policy": {"posture": "allow", "repos": ["self"], "secondaries": [], "token_ttl_minutes": 10}
+}
+EOF
+}
+seed_perms() { # one rule per class, so the counts and the explain pins are exact
+  cat >permissions.json <<'EOF'
+{
+  "permissions": {
+    "deny": ["Bash(sudo:*)"],
+    "ask": ["Bash(gh pr merge:*)"],
+    "allow": ["Bash(ls:*)"]
+  }
+}
+EOF
+}
+shim_dir="$work/project/scripts/policy-shims"
+mkfake_shims() { # faithful forwarders: the shim dir drops out of PATH for the exec
+  mkdir -p "$shim_dir"
+  local b
+  for b in git gh; do
+    cat >"$shim_dir/$b" <<EOS
+#!/usr/bin/env bash
+rest=\${PATH#"$shim_dir":}
+exec env PATH="\$rest" $b "\$@"
+EOS
+    chmod +x "$shim_dir/$b"
+  done
+}
+tok_dir="$work/home/project/dev-loop-tokens"
+audit_log="$work/home/project/logs/policy-audit.jsonl"
+POLS="$plugin/scripts/policy.sh"
+
+# Absent by design (no policy block, no permissions.json): a NOTE, never a problem.
+mkcfg ''
+rm -f permissions.json
+out=$(doct); rc=$?
+expect "doctor stays ready with the policy absent by design" "0" "$rc"
+echo "$out" | grep -qF "note    policy not configured (no policy block, no permissions.json — inactive by design)" &&
+  pass "absent policy is noted as inactive by design" || fail "no absent-by-design note"
+echo "$out" | grep -q "doctor: ready" && pass "the absent-policy note is not a problem" ||
+  fail "the absent-policy note was counted as a problem"
+
+# Present + valid + shims on PATH + no token dir yet: the healthy policy section.
+polcfg; seed_perms; mkfake_shims
+out=$(PATH="$shim_dir:$PATH" doct); rc=$?
+expect "doctor is ready with a valid policy and shims on PATH" "0" "$rc"
+echo "$out" | grep -qF "ok      policy loaded (posture allow; rules: 1 deny, 1 ask, 1 allow)" &&
+  pass "doctor renders posture and the rule counts per verdict" ||
+  fail "policy loaded line wrong (want: ok      policy loaded (posture allow; rules: 1 deny, 1 ask, 1 allow))"
+echo "$out" | grep -qF "ok      policy shims on PATH (git, gh)" &&
+  pass "shims on PATH are ok" || fail "no shims-ok line"
+echo "$out" | grep -qF "note    policy token dir not created yet ($tok_dir — phase 2)" &&
+  pass "the missing token dir is a phase-1 note" || fail "no token-dir note"
+
+# Token dir present: loose perms are a NOTE (the 0700 pin lands in P6), tight is ok.
+mkdir -p "$tok_dir" && chmod 0755 "$tok_dir"
+out=$(PATH="$shim_dir:$PATH" doct); rc=$?
+expect "doctor stays ready with a loose token dir" "0" "$rc"
+echo "$out" | grep -qF "policy token dir is 755" &&
+  pass "the loose token dir mode is noted" || fail "loose token dir not noted"
+chmod 0700 "$tok_dir"
+out=$(PATH="$shim_dir:$PATH" doct); rc=$?
+expect "doctor is ready with a 0700 token dir" "0" "$rc"
+echo "$out" | grep -qF "ok      policy token dir ($tok_dir, 0700)" &&
+  pass "the tight token dir is ok" || fail "no token-dir ok line"
+
+# Active policy but shims OFF PATH: MISSING, fail closed (spec §8), one problem.
+out=$(doct); rc=$?
+expect "doctor fails when the policy is active but the shims are off PATH" "1" "$rc"
+echo "$out" | grep -qF "MISSING policy shims on PATH (git, gh) — policy is active but the Layer-2 guarantee is absent (rerun scripts/install.sh)" &&
+  pass "the missing shims are MISSING with the repair line" ||
+  fail "wrong shim-MISSING line (got: $(echo "$out" | grep -F 'policy shims' || echo '<none>'))"
+echo "$out" | grep -qF "doctor: 1 problem(s)" && pass "the shim miss counts once" || fail "shim miss not tallied"
+
+# Partial shim set: only the absent binary is named.
+rm -f "$shim_dir/gh"
+out=$(PATH="$shim_dir:$PATH" doct); rc=$?
+expect "doctor fails with only the gh shim absent" "1" "$rc"
+echo "$out" | grep -qF "MISSING policy shims on PATH (gh)" &&
+  pass "only the absent shim is named" || fail "the absent shim is not named precisely"
+
+# Broken PRESENT file: MISSING with the fail-closed repair line, exact load error.
+printf 'not { json\n' >permissions.json
+out=$(PATH="$shim_dir:$PATH" doct); rc=$?
+expect "doctor fails on a broken present permissions.json" "1" "$rc"
+echo "$out" | grep -qF "MISSING policy: permissions.json is not valid JSON" &&
+  pass "the broken file is MISSING with the loader's error" ||
+  fail "broken policy not MISSING (got: $(echo "$out" | grep -F 'MISSING policy' || echo '<none>'))"
+echo "$out" | grep -qF "FAILS CLOSED" &&
+  pass "the repair line says the policy fails closed" || fail "no fail-closed text on the broken-policy line"
+
+# A valid JSON file with an invalid RULE is broken too — the rule is named.
+printf '{"permissions":{"deny":["not-a-rule"]}}\n' >permissions.json
+out=$(PATH="$shim_dir:$PATH" doct); rc=$?
+expect "doctor fails on an invalid rule" "1" "$rc"
+echo "$out" | grep -qF 'rule "not-a-rule" is not Tool(pattern)' &&
+  pass "the invalid rule is named" || fail "invalid rule not named"
+
+# Knobs only (explicit policy block, no permissions.json): posture-only policy —
+# still ACTIVE (the block carries the structural repo rules), so shims are still required.
+rm -f permissions.json
+out=$(PATH="$shim_dir:$PATH" doct); rc=$?
+expect "a knobs-only policy stays ready with the shims on PATH" "0" "$rc"
+echo "$out" | grep -qF "ok      policy posture allow (knobs only — no permissions.json)" &&
+  pass "the knobs-only policy is reported as posture-only" || fail "no knobs-only line"
+out=$(doct); rc=$?
+expect "the knobs-only policy still demands the shims (active means active)" "1" "$rc"
+echo "$out" | grep -qF "MISSING policy shims on PATH (git, gh)" &&
+  pass "a knobs-only policy still trips the shim MISSING" || fail "knobs-only skipped the shim check"
+
+# --- policy.sh: usage pins ------------------------------------------------------
+bash "$POLS" >/dev/null 2>&1;                  expect "policy.sh with no args exits 2 (usage)" "2" "$?"
+bash "$POLS" bogus >/dev/null 2>&1;            expect "policy.sh bogus subcommand exits 2" "2" "$?"
+bash "$POLS" show extra >/dev/null 2>&1;       expect "policy.sh show with extra args exits 2" "2" "$?"
+bash "$POLS" explain >/dev/null 2>&1;          expect "policy.sh explain without a command exits 2" "2" "$?"
+bash "$POLS" audit --since abc >/dev/null 2>&1; expect "policy.sh audit --since abc exits 2" "2" "$?"
+bash "$POLS" audit --since >/dev/null 2>&1;    expect "policy.sh audit --since without a value exits 2" "2" "$?"
+
+# --- policy.sh show --------------------------------------------------------------
+seed_perms
+out=$(bash "$POLS" show); rc=$?
+expect "policy.sh show exits 0 on a valid policy" "0" "$rc"
+echo "$out" | grep -qF "policy: loaded" && pass "show renders the loaded state" || fail "show does not render loaded"
+echo "$out" | grep -qF "posture:         allow — unmatched calls pass" &&
+  pass "show renders the posture with its plain-language meaning" || fail "posture line wrong"
+echo "$out" | grep -qF 'repos:           ["self"]' && pass "show renders the repos knob" || fail "repos line wrong"
+echo "$out" | grep -qF "token ttl:       10 minutes" && pass "show renders the token ttl" || fail "token ttl line wrong"
+echo "$out" | grep -qF "additionalDirectories (computed from .devloop.json):" &&
+  pass "show carries the additionalDirectories header" || fail "no additionalDirectories header"
+for d in "$work/project/worktrees/project" "$work/home/project/notes" "$work/project/worktrees/project/gate"; do
+  echo "$out" | grep -qF "$d" && pass "additionalDirectories carries $d" || fail "additionalDirectories missing $d"
+done
+for pair in "[deny] Bash(sudo:*)" "[ask] Bash(gh pr merge:*)" "[allow] Bash(ls:*)"; do
+  cls=${pair%% *}; rul=${pair#* ] }
+  block=$(echo "$out" | grep -A1 -F "  $cls (")
+  echo "$block" | grep -qF "$rul" && pass "show groups $rul under $cls" ||
+    fail "show does not group $rul under $cls (rules section:) $(echo "$out" | sed -n '/^rules/,$p')"
+done
+
+# show on a BROKEN policy: renders the unusable state (this tool's job), exit 0.
+printf 'not { json\n' >permissions.json
+out=$(bash "$POLS" show); rc=$?
+expect "policy.sh show exits 0 on a broken policy (rendering it is the job)" "0" "$rc"
+echo "$out" | grep -qF "policy: UNUSABLE — permissions.json is not valid JSON" &&
+  pass "show names the unusable policy with the loader's error" || fail "show hides the unusable state"
+echo "$out" | grep -qF "FAILING CLOSED" &&
+  pass "show says the hook is failing closed" || fail "show does not say fail-closed"
+seed_perms # restore
+
+# --- policy.sh explain: the tripwire made interactive -----------------------------
+out=$(bash "$POLS" explain sudo reboot); rc=$?
+expect "explain exits 0 on a denied command (it is a report, not an action)" "0" "$rc"
+echo "$out" | grep -qF "explain: sudo reboot" && pass "explain echoes the command" || fail "no command echo"
+echo "$out" | grep -qF "verdict: deny" && pass "explain renders the deny verdict" || fail "deny verdict wrong"
+echo "$out" | grep -qF "rule:    Bash(sudo:*)" && pass "explain renders the deciding rule" || fail "deny rule id wrong"
+echo "$out" | grep -qF "denied by rule: Bash(sudo:*)" && pass "explain renders the reason" || fail "deny reason wrong"
+
+out=$(bash "$POLS" explain gh pr merge 12); rc=$?
+expect "explain exits 0 on an ask command" "0" "$rc"
+echo "$out" | grep -qF "verdict: ask" && pass "explain renders the ask verdict" || fail "ask verdict wrong"
+echo "$out" | grep -qF "rule:    Bash(gh pr merge:*)" && pass "explain renders the ask rule" || fail "ask rule id wrong"
+
+out=$(bash "$POLS" explain ls -la); rc=$?
+expect "explain exits 0 on an allowed command" "0" "$rc"
+echo "$out" | grep -qF "verdict: allow" && pass "explain renders the allow verdict" || fail "allow verdict wrong"
+echo "$out" | grep -qF "rule:    Bash(ls:*)" && pass "explain renders the allow rule" || fail "allow rule id wrong"
+
+out=$(bash "$POLS" explain make check); rc=$?
+expect "explain exits 0 on a default-posture command" "0" "$rc"
+echo "$out" | grep -qF "verdict: allow" && pass "unmatched falls to the posture" || fail "default verdict wrong"
+echo "$out" | grep -qF "rule:    (none — posture default)" && pass "the default has no rule id" || fail "default rule line wrong"
+echo "$out" | grep -qF "no rule matched — default posture allow" && pass "the default reason names the posture" || fail "default reason wrong"
+echo "$out" | grep -qF "string layer only" &&
+  pass "explain carries the honesty note" || fail "no honesty note on explain"
+
+# explain on a BROKEN policy: the evaluator's fail-closed verdict, exit 0.
+printf 'not { json\n' >permissions.json
+out=$(bash "$POLS" explain ls); rc=$?
+expect "explain exits 0 on a broken policy (the verdict is the report)" "0" "$rc"
+echo "$out" | grep -qF "verdict: deny" && pass "broken policy explains as deny" || fail "broken policy did not explain as deny"
+echo "$out" | grep -qF "rule:    policy:unusable" && pass "the unusable rule id is rendered" || fail "no unusable rule id"
+seed_perms # restore
+
+# --- policy.sh audit ---------------------------------------------------------------
+out=$(bash "$POLS" audit); rc=$?
+expect "audit exits 0 when the log is absent" "0" "$rc"
+echo "$out" | grep -qF "audit: no events recorded yet ($audit_log absent)" &&
+  pass "the absent log is named" || fail "absent log line wrong"
+
+now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+old_iso=$(date -u -d '-600 seconds' +%Y-%m-%dT%H:%M:%SZ)
+now_ms=$(($(date +%s) * 1000 + 500))
+old_s=$(( $(date +%s) - 600 ))
+mline() { # mline "TS" LAYER SUMMARY — one audit line (the P2 writer's field set)
+  printf '{"ts":%s,"session":"sess-1","actor":"orchestrator","ruleId":"Bash(sudo:*)","verdict":"deny","actionSummary":"%s","layer":"%s"}\n' "$1" "$3" "$2"
+}
+mkdir -p "$(dirname "$audit_log")"
+# Order: old first, recent after — the reader preserves file order.
+mline "\"$old_iso\"" hook "sudo reboot (old)" >"$audit_log"
+mline "\"$now_iso\"" hook "sudo reboot" >>"$audit_log"
+out=$(bash "$POLS" audit); rc=$?
+expect "audit exits 0 on a seeded log" "0" "$rc"
+[ "$(echo "$out" | grep -c '"ts"')" = "2" ] &&
+  pass "audit prints both seeded lines in file order" ||
+  fail "audit line count wrong (want 2, got: $(echo "$out" | grep -c '"ts"'))"
+echo "$out" | grep -qF '"actionSummary":"sudo reboot"' &&
+  pass "audit lines are printed verbatim" || fail "audit line altered"
+
+# --since 30 drops the 600-second-old line only.
+out=$(bash "$POLS" audit --since 30); rc=$?
+expect "audit --since exits 0" "0" "$rc"
+[ "$(echo "$out" | grep -c '"ts"')" = "1" ] &&
+  pass "--since 30 keeps only the recent line" ||
+  fail "--since 30 wrong count (want 1, got: $(echo "$out" | grep -c '"ts"'))"
+echo "$out" | grep -qF '"actionSummary":"sudo reboot"' &&
+  pass "--since keeps the recent line" || fail "--since dropped the recent line"
+# The trailing-s spelling is the same filter.
+out=$(bash "$POLS" audit --since 30s); rc=$?
+expect "audit --since 30s (trailing s) exits 0" "0" "$rc"
+[ "$(echo "$out" | grep -c '"ts"')" = "1" ] &&
+  pass "the trailing-s spelling filters identically" || fail "trailing-s spelling broken"
+
+# Numeric ts: epoch milliseconds (recent) and epoch seconds (old) are both understood.
+printf '{"ts":%s,"session":"s2","actor":"orchestrator","ruleId":"Bash(sudo:*)","verdict":"deny","actionSummary":"ms-recent","layer":"shim"}\n' "$now_ms" >"$audit_log"
+printf '{"ts":%s,"session":"s2","actor":"orchestrator","ruleId":"Bash(sudo:*)","verdict":"deny","actionSummary":"s-old","layer":"shim"}\n' "$old_s" >>"$audit_log"
+out=$(bash "$POLS" audit --since 30); rc=$?
+[ "$(echo "$out" | grep -c '"ts"')" = "1" ] &&
+  pass "numeric ts (ms and s) is understood by --since" ||
+  fail "numeric ts wrong count (want 1, got: $(echo "$out" | grep -c '"ts"'))"
+echo "$out" | grep -qF '"actionSummary":"ms-recent"' &&
+  pass "the recent ms line survives --since" || fail "the recent ms line was dropped"
+
+# An unparseable/missing ts is KEPT: the reader never drops evidence.
+printf '{"ruleId":"Bash(sudo:*)","verdict":"deny","actionSummary":"no-ts","layer":"hook"}\n' >"$audit_log"
+printf '{"ts":"garbage","session":"s3","actor":"orchestrator","ruleId":"Bash(sudo:*)","verdict":"deny","actionSummary":"bad-ts","layer":"hook"}\n' >>"$audit_log"
+out=$(bash "$POLS" audit --since 1); rc=$?
+[ "$(echo "$out" | grep -c '"actionSummary"')" = "2" ] &&
+  pass "unparseable and missing ts are kept by --since" ||
+  fail "unparseable ts lines were dropped"
+echo "$out" | grep -qF '"actionSummary":"no-ts"' && pass "the no-ts line survives" || fail "no-ts line lost"
+echo "$out" | grep -qF '"actionSummary":"bad-ts"' && pass "the bad-ts line survives" || fail "bad-ts line lost"
+
+# Bounded output: only the newest AUDIT_TAIL (50) lines are ever printed.
+: >"$audit_log"
+i=1
+while [ "$i" -le 52 ]; do
+  printf '{"ts":"%s","session":"s4","actor":"orchestrator","ruleId":"Bash(sudo:*)","verdict":"deny","actionSummary":"line-%02d","layer":"hook"}\n' "$now_iso" "$i" >>"$audit_log"
+  i=$((i + 1))
+done
+out=$(bash "$POLS" audit); rc=$?
+expect "audit exits 0 on a long log" "0" "$rc"
+[ "$(echo "$out" | grep -c '"actionSummary"')" = "50" ] &&
+  pass "audit output is bounded to the newest 50 lines" ||
+  fail "audit tail not bounded (want 50, got: $(echo "$out" | grep -c '"actionSummary"'))"
+echo "$out" | grep -qF '"actionSummary":"line-01"' &&
+  fail "the oldest line was kept (a head, not a tail?)" ||
+  pass "the tail keeps the NEWEST lines"
+echo "$out" | grep -qF '"actionSummary":"line-52"' &&
+  pass "the last line survives the tail" || fail "the last line lost"
+
+# Tidy the fixture: no policy files, no shims, no token dir, no audit log, base config.
+rm -f permissions.json
+rm -rf "$shim_dir" "$tok_dir" "$audit_log"
+mkcfg ''
+
 # --- install.sh: the extension package.json is installer-owned (#37) --------
 # A stale npm-init'd type:commonjs manifest in the target's extension dir used
 # to SURVIVE the sync (the best-effort copy pointed at a source file that does
