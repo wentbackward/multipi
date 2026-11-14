@@ -203,8 +203,8 @@ function ensureTicker(): void {
  * session never prepends twice — and the comparison is CANONICAL (round-13 should-fix):
  * a symlinked main worktree spells the same shims dir differently per session, so both
  * sides resolve through symlinks before the contains-check (exact string compare doubled
- * the prepend). Nonexistent PATH entries cannot resolve; they fall back to their absolute
- * spelling and simply never match.
+ * the prepend). Nonexistent PATH entries cannot resolve; they fall back to their
+ * resolved/spelled form (safeCanon does not resolve) and simply never match.
  */
 const safeCanon = (p: string): string => {
 	try {
