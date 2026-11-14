@@ -15,7 +15,7 @@
 // (Node 24 type stripping; no build step).
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
-import { loadConfig, resolvePaths, scenariosOn } from "./config.ts";
+import { loadConfig, resolvePaths, scenariosOn, type DevloopConfig } from "./config.ts";
 import {
 	evaluate, loadPolicy, hasTrustedAncestor, formatPolicyDeny, formatPolicyAsk, redactActionSummary, DEVLOAD_ERROR_MARKER,
 	type PolicyContext,
@@ -72,24 +72,31 @@ function parseArgs(argv: string[]): {
 	return { root, command, targets, pushForce, pushBase, pushTags, tagMutation, ghAction, candidates, session };
 }
 
-/** The audit log path (the devloop logs dir; the hook writes to the same file). Resolved
- * ONCE per invocation (ticket #55): the config cannot change under a running process, so
- * re-reading it on every append was wasted IO on the audit's hot path. Null = the logs dir
- * is unresolvable (missing/unparseable .devloop.json) — the caller routes that through the
- * audit-degraded warning instead of dropping lines silently. */
-function auditLogPath(root: string): string | null {
-	try {
-		const cfg = loadConfig(root);
-		if (cfg) return path.join(resolvePaths(cfg).logsDir, "policy-audit.jsonl");
-	} catch {
-		/* fall through */
-	}
-	return null;
-}
-
 function main(): void {
 	const a = parseArgs(process.argv.slice(2));
-	const logPath = auditLogPath(a.root);
+	// The config is loaded EXACTLY ONCE per invocation (ticket #55 review): both the audit
+	// log path and the scenario-store dir derive from this single load — the config cannot
+	// change under a running process, so a second read was wasted IO on the audit path. A
+	// null (missing or unparseable .devloop.json) means no derived paths: the null case
+	// routes through the audit-degraded warning instead of dropping lines silently.
+	let cfg: DevloopConfig | null = null;
+	try {
+		cfg = loadConfig(a.root);
+	} catch {
+		cfg = null;
+	}
+	let logPath: string | null = null;
+	let storeDir: string | null = null;
+	if (cfg) {
+		try {
+			const p = resolvePaths(cfg);
+			logPath = path.join(p.logsDir, "policy-audit.jsonl");
+			storeDir = scenariosOn(cfg) ? p.scenariosDir : null;
+		} catch {
+			logPath = null;
+			storeDir = null;
+		}
+	}
 	const warnedAudit = { once: false };
 	const append = (line: object): void => {
 		if (!logPath) {
@@ -144,14 +151,8 @@ function main(): void {
 
 	// Log hygiene (spec §8): no store paths in action summaries — the shared
 	// redactActionSummary substitutes the store dir with <store>; the shim's audit + ask lines owe it equally.
-	// Same resolution as the hook (the store switch is the config's, not the policy's).
-	let storeDir: string | null = null;
-	try {
-		const cfg = loadConfig(a.root);
-		storeDir = cfg && scenariosOn(cfg) ? resolvePaths(cfg).scenariosDir : null;
-	} catch {
-		storeDir = null;
-	}
+	// Same resolution as the hook (the store switch is the config's, not the policy's) —
+	// from the single load above.
 	const summary = redactActionSummary(a.command, storeDir);
 
 	const d = evaluate(policy, ctx);
