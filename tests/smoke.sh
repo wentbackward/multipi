@@ -1920,6 +1920,85 @@ grep -qi "only the \`missing\`" "$skill_md" &&
 mkcfg '' # restore the base fixture config
 rm -rf "$store_dir"
 
+# --- permission policy P2: the orchestrator's tool_call tripwire (node probes, offline) ----
+# Seeded sibling policy in the operator's dialect: one deny, one ask, one allow, and the
+# literal-`~` token-dir deny convention the hook layer must honour WITHOUT pre-expanding:
+# the hook passes paths LITERALLY, so an expanded path skips the deny (ticket #40 addendum,
+# spec §9 — the documented tripwire-only limit, pinned HERE in both directions).
+cat >permissions.json <<'EOF'
+{
+  "permissions": {
+    "deny": ["Bash(sudo:*)", "Read(~/.multipi/*/dev-loop-tokens/**)"],
+    "ask":  ["Bash(gh pr merge:*)"],
+    "allow": ["Bash(git status:*)"]
+  }
+}
+EOF
+export AUDIT_LOG="$work/home/project/logs/policy-audit.jsonl"
+multipi_policy_probe() { # args: none; prints key=value lines (the asserts below pin them)
+  MULTIPI_PLUGIN_DIR="$plugin" env -u MULTIPI_CHILD node --input-type=module -e '
+const fs = await import("node:fs");
+const pi = { tools: [], handlers: {}, commands: [], registerTool(t) { this.tools.push(t.name); }, registerCommand(n) { this.commands.push(n); }, on(ev, h) { (this.handlers[ev] ??= []).push(h); } };
+const mod = await import(process.env.MULTIPI_PLUGIN_DIR + "/extension/index.ts");
+mod.default(pi);
+const ctx = { cwd: process.cwd(), hasUI: false, mode: "rpc", sessionManager: { getSessionId: () => "smoke-sess" } };
+for (const h of pi.handlers.session_start ?? []) await h({}, ctx);
+const call = async (toolName, input) => { const out = []; for (const h of pi.handlers.tool_call ?? []) out.push(await h({ toolName, input }, ctx)); return out; };
+const denied = (await call("bash", { command: "sudo reboot" })).find((r) => r?.block);
+console.log("deny=" + (denied?.block ? "yes" : "no"));
+console.log("denyreason=" + (denied?.reason ?? ""));
+const asked = (await call("bash", { command: "gh pr merge 12" })).find((r) => r?.block);
+console.log("askreason=" + (asked?.reason ?? ""));
+const tok = (await call("read", { path: "~/.multipi/project/dev-loop-tokens/a.tok" })).find((r) => r?.block);
+console.log("tokdeny=" + (tok ? "yes" : "no"));
+const tokexp = (await call("read", { path: process.env.TOK_EXP_PATH })).find((r) => r?.block);
+console.log("tokexpanded=" + (tokexp ? "blocked" : "passed"));
+const blockedAllow = (await call("bash", { command: "git status" })).some((r) => r?.block);
+console.log("allowpass=" + (blockedAllow ? "no" : "yes"));
+const lines = fs.existsSync(process.env.AUDIT_LOG) ? fs.readFileSync(process.env.AUDIT_LOG, "utf8").trim().split("\n").map(JSON.parse) : [];
+console.log("auditlines=" + lines.length);
+console.log("sessionhash=" + (lines[0]?.event === "policy_session_start" && typeof lines[0]?.policyHash === "string" ? "yes" : "no"));
+console.log("fields=" + (lines.slice(1).every((l) => ["ts","session","actor","ruleId","verdict","actionSummary","layer"].every((k) => k in l) && l.layer === "hook") ? "yes" : "no"));
+const hasTokenDir = lines.some((l) => String(l.actionSummary).includes("<token-dir>"));
+const leaksTokenDir = lines.some((l) => String(l.actionSummary).includes("dev-loop-tokens/"));
+console.log("redacted=" + (hasTokenDir && !leaksTokenDir ? "yes" : "no"));
+console.log("tokrule=" + (lines.find((l) => l.ruleId === "Read(~/.multipi/*/dev-loop-tokens/**)")?.verdict === "deny" ? "yes" : "no"));
+' 2>/dev/null
+}
+TOK_EXP_PATH="$HOME/.multipi/project/dev-loop-tokens/a.tok" multipi_policy_probe > "$work/.policy-probe" 2>/dev/null
+gk() { sed -n "s/^$1=//p" "$work/.policy-probe" | head -1; } # gk KEY → the probe's value for KEY
+expect "P2 smoke: a seeded deny rule blocks the orchestrator's bash call" "yes" "$(gk deny)"
+expect "P2 smoke: exact 'DENIED <rule-id>: <reason>' tripwire text" \
+  "DENIED Bash(sudo:*): denied by rule: Bash(sudo:*)" "$(gk denyreason)"
+expect "P2 smoke: exact §6 ask escalation directive shape" \
+  "ASK Bash(gh pr merge:*): bash: gh pr merge 12. Operator approval required: run 'multipi-approve Bash(gh pr merge:*)' in your own shell, then retry." "$(gk askreason)"
+expect "P2 smoke: LITERAL-~ token-dir read is denied by the seeded rule (as the model wrote it)" "yes" "$(gk tokdeny)"
+expect "P2 smoke: the token-dir deny lands in the audit under its seeded rule id" "yes" "$(gk tokrule)"
+expect "P2 smoke: the audit actionSummary redacts the token-dir path (log hygiene)" "yes" "$(gk redacted)"
+expect "P2 smoke: the EXPANDED token-dir path passes — the pinned tripwire-only limit (spec §9)" "passed" "$(gk tokexpanded)"
+expect "P2 smoke: a curated allow passes" "yes" "$(gk allowpass)"
+expect "P2 smoke: audit = session line + one per non-default verdict + the rule-backed allow (posture passes log nothing)" "5" "$(gk auditlines)"
+expect "P2 smoke: the session-start line records the effective policy hash" "yes" "$(gk sessionhash)"
+expect "P2 smoke: every verdict line carries the seven audit fields, layer=hook" "yes" "$(gk fields)"
+# Drift: the on-disk policy is re-hashed at every non-default verdict — a mid-session edit is noise, not silence.
+rm -f "$AUDIT_LOG"
+TOK_EXP_PATH=x MULTIPI_PLUGIN_DIR="$plugin" env -u MULTIPI_CHILD node --input-type=module -e '
+const fs = await import("node:fs");
+const pi = { tools: [], handlers: {}, commands: [], registerTool() {}, registerCommand() {}, on(ev, h) { (this.handlers[ev] ??= []).push(h); } };
+const mod = await import(process.env.MULTIPI_PLUGIN_DIR + "/extension/index.ts");
+mod.default(pi);
+const ctx = { cwd: process.cwd(), hasUI: false, mode: "rpc", sessionManager: { getSessionId: () => "smoke-drift" } };
+const first = (await (pi.handlers.tool_call ?? [])[0]({ toolName: "bash", input: { command: "sudo a" } }, ctx))?.reason ?? "";
+console.log("firstdrift=" + (first.startsWith("POLICY DRIFT") ? "unexpected" : "clean"));
+fs.writeFileSync("permissions.json", "{\"permissions\":{\"deny\":[\"Bash(sudo:*)\",\"Bash(rm -rf /:*)\"],\"ask\":[],\"allow\":[]}}");
+const second = (await (pi.handlers.tool_call ?? [])[0]({ toolName: "bash", input: { command: "sudo b" } }, ctx))?.reason ?? "";
+console.log("drift=" + (second.startsWith("POLICY DRIFT:") && second.includes("enforcing the session-loaded policy") ? "yes" : "no"));
+' 2>/dev/null > "$work/.drift-out"
+grep -q '^firstdrift=clean$' "$work/.drift-out" && pass "P2 smoke: no drift warning before the on-disk policy changes" || fail "P2 smoke: first verdict unexpectedly drifts"
+grep -q '^drift=yes$' "$work/.drift-out" && pass "P2 smoke: a mid-session permissions.json edit is announced as POLICY DRIFT on the next non-default verdict" || fail "P2 smoke: mid-session policy edit was silent (no POLICY DRIFT warning)"
+rm -f permissions.json "$work/.policy-probe" "$work/.drift-out" "$AUDIT_LOG"
+unset AUDIT_LOG
+
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
 MULTIPI_PLUGIN_DIR="$plugin" env -u MULTIPI_CHILD node --input-type=module -e '
 const pi = { registered: [], handlers: {}, commands: [], registerTool(t) { this.registered.push(t.name); }, registerCommand(n) { this.commands.push(n); }, on(ev, h) { this.handlers[ev] = h; } };
