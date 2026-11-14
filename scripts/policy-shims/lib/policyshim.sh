@@ -161,7 +161,7 @@ shim_decide() {
   while IFS= read -r c; do
     [ -n "$c" ] && drv+=(--candidate "$c")
   done < <(shim_trusted_candidates)
-  node >/dev/null 2>&1 || return 1
+  node --version >/dev/null 2>&1 || return 1   # NON-INTERACTIVE probe: a bare `node` reads stdin (gate-hang, post-approval review)
   [ -f "$SIM_DRIVER" ] || return 1   # evaluator missing ⇒ the verdict is unknown ⇒ fail closed
   [ "$SIM_HAVE_COMMON" = 1 ] || return 1   # config reader missing ⇒ facts incomplete ⇒ fail closed
   "${drv[@]}" 2>/dev/null
