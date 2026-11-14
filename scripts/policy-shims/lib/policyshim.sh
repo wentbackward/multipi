@@ -209,11 +209,14 @@ _shim_redact_summary() {
 # Best-effort audit append for the ONE case the driver cannot serve (itself broken): the
 # deny still lands in the log, shaped like every other line (layer=shim, seven fields).
 # The log dir resolves the way dl_logs_dir (lib/common.sh) does: the configured
-# logs_dir wins over the default state dir (P3 review round 11). A failing append never
-# breaks the verdict.
+# logs_dir wins over the default state dir (P3 review round 11). The basename/date
+# substitutions are GUARDED (P3 review round 12): with coreutils missing from PATH the
+# command-not-found noise must not reach fail-closed stderr (exactly one line: the
+# block) and the fallback line still lands (pure-shell basename; ts=unknown). A failing
+# append never breaks the verdict.
 shim_audit_fallback() { # shim_audit_fallback RULEID VERDICT SUMMARY
   local rule=$1 verdict=$2 summary=$3
-  local main=$SIM_INSTALL_ROOT logs="" configured=""
+  local main=$SIM_INSTALL_ROOT logs="" configured="" base ts
   if [ -f "$main/.git" ]; then
     local gd
     gd=$(sed -n 's/^gitdir://p' "$main/.git" | tr -d '[:space:]')
@@ -230,11 +233,13 @@ shim_audit_fallback() { # shim_audit_fallback RULEID VERDICT SUMMARY
       logs=$(dl_canonical "$(dl_resolve "$configured")")
     fi
   fi
-  [ -n "$logs" ] || logs="${MULTIPI_HOME:-$HOME/.multipi}/$(basename "$main")/logs"
+  base=$(basename "$main" 2>/dev/null) || base=${main##*/}
+  [ -n "$logs" ] || logs="${MULTIPI_HOME:-$HOME/.multipi}/$base/logs"
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || ts=unknown
   {
     mkdir -p "$logs" 2>/dev/null || return 0
     printf '{"ts":"%s","event":"verdict","session":"-","actor":"shim","ruleId":"%s","verdict":"%s","actionSummary":"%s","layer":"shim"}\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(_shim_json_escape "$rule")" "$verdict" "$(_shim_json_escape "$(_shim_redact_summary "$summary")")" \
+      "$ts" "$(_shim_json_escape "$rule")" "$verdict" "$(_shim_json_escape "$(_shim_redact_summary "$summary")")" \
       >>"$logs/policy-audit.jsonl" 2>/dev/null
   } || true
   return 0
