@@ -2514,7 +2514,7 @@ t0=$(date +%s)
 out=$( (cd "$work/p3-foreign" && PATH="$PSH:$PATH" git commit -q --allow-empty -m x) < <(sleep 15) 2>&1); rc=$?
 t1=$(date +%s)
 expect "P3 smoke: an open stdin pipe does not change the foreign deny (still 126)" "126" "$rc"
-[ $((t1-t0)) -lt 5 ] && pass "P3 smoke: the shimmed deny completes with an open stdin pipe (well under 5s; the feeder holds 15s)" ||
+[ $((t1-t0)) -lt 14 ] && pass "P3 smoke: the shimmed deny completes with an open stdin pipe (well under 14s; the feeder holds 15s — a hung probe runs the feeder dry)" ||
   fail "P3 smoke: the shimmed commit BLOCKED on the open stdin pipe ($((t1-t0))s - the probe must be non-interactive)"
 
 # 4. base-branch push ⇒ deny; 5. force push ⇒ deny (flag and +refspec forms)
@@ -2590,6 +2590,30 @@ p3git switch --force-create p3fc && pass "P3 smoke: a self switch --force-create
 git checkout -q main && git branch -q -D p3fc
 out=$(p3git tag -n5 2>&1); rc=$?
 expect "P3 smoke: the list spelling 'git tag -n5' is not classified as a tag mutation" "0" "$rc"
+
+# 4b-2. the short-cluster scan must be COREUTILS-INDEPENDENT (round-13 should-fix #1, priority 1):
+#      the f/t scanner's former `tail | fold` letter split emitted ZERO letters under a
+#      coreutils-stripped PATH — `-fu` lost its force bit and the force push was UNDER-denied
+#      (the dangerous direction). Dead stubs (no stdout, rc 1) emulate the strip for the scan's
+#      command substitution exactly: the same empty stream a missing binary yields. Both rule
+#      classes ride the scanner, so both are pinned; the -u-only control guards the other side
+#      (no over-deny).
+cc_stub="$work/p3-cc-stub"
+mkdir -p "$cc_stub"
+for cc_bin in tail fold; do printf '#!/bin/sh\nexit 1\n' >"$cc_stub/$cc_bin"; chmod +x "$cc_stub/$cc_bin"; done
+out=$(PATH="$cc_stub:$PSH:$PATH" git push -fu origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: a -fu cluster force push is STILL denied with 126 when tail/fold are unavailable (pure-shell scan)" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:force-push:" && pass "P3 smoke: the coreutils-stripped -fu deny carries the force rule id" ||
+  fail "P3 smoke: the -fu cluster lost its force bit without coreutils: $out"
+n0_cc=$(p3count '"ruleId":"policy:tag-push","verdict":"ask"')
+out=$(PATH="$cc_stub:$PSH:$PATH" git push -tu origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: a -tu cluster push is STILL blocked with 126 (the tag ask) when tail/fold are unavailable" "126" "$rc"
+echo "$out" | grep -qF "ASK policy:tag-push:" && pass "P3 smoke: the coreutils-stripped -tu push carries the tag-push ask" ||
+  fail "P3 smoke: the -tu cluster lost its tag bit without coreutils: $out"
+expect "P3 smoke: the coreutils-stripped tag ask is audited" "$((n0_cc + 1))" \
+  "$(p3count '"ruleId":"policy:tag-push","verdict":"ask"')"
+out=$(PATH="$cc_stub:$PSH:$PATH" git push -u origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: a -u-only cluster push is still allowed (the pure-shell scan does not over-deny)" "0" "$rc"
 
 # 4c. leading GLOBAL options cannot mask a mutation (P3 review round 6): the scan peels
 #     EVERY flag-shaped leading token (git's leading options are a closed, documented set;
