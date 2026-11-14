@@ -114,7 +114,9 @@ test("runScript: a script printing >20MB settles as exit code 1 within a bound (
 	writeFileSync(path.join(scriptsDir, "big.sh"), "#!/usr/bin/env bash\nhead -c $((21 * 1024 * 1024)) /dev/zero | tr '\\0' x\n", {
 		mode: 0o755,
 	});
-	// 21MB through a pipe takes a moment; generous but bounded.
-	const out = await within(runScript("big.sh", { scriptsDir, repoRoot: dir, branches: [] }), 30_000, "runScript maxBuffer probe");
+	// The kill fires once >20MB has crossed the pipe, and 21MB of local pipe throughput
+	// benches in tens of milliseconds — 5 s leaves ample margin for a slow CI while still
+	// converting a hang into a fast failure (was 30 s: the loosest bound in the suite).
+	const out = await within(runScript("big.sh", { scriptsDir, repoRoot: dir, branches: [] }), 5_000, "runScript maxBuffer probe");
 	assert.equal(out.code, 1);
 });
