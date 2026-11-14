@@ -23,8 +23,9 @@
 #
 # <rule-id> is the raw ask rule (e.g. 'Bash(*gh pr merge*)' or 'oneshot:install-
 # secondary'). --target narrows the token to one scope (default '*': any scope);
-# --ttl overrides the policy default (token_ttl_minutes, default 10). A re-mint
-# supersedes the outstanding token for the rule.
+# an EXPLICIT EMPTY --target is rejected at parse time (it would widen silently to
+# '*'), the widest possible scope. --ttl overrides the policy default (token_ttl_minutes,
+# default 10). A re-mint supersedes the outstanding token for the rule.
 #
 # MULTIPI_APPROVE_NOW_MS — documented TEST SEAM: override the issuing clock (integer
 # ms epoch) so tests drive TTL/expiry without sleeping. Never set in production.
@@ -52,7 +53,7 @@ RULE_ID="" TARGET="" TTL=""
 while [ $# -gt 0 ]; do
   case $1 in
     -h|--help) usage; exit 0 ;;
-    --target) [ $# -ge 2 ] || dl_die "--target needs a value"; TARGET=$2; shift 2 ;;
+    --target) [ $# -ge 2 ] || dl_die "--target needs a value"; [ -n "$2" ] || dl_die "--target must not be empty (omit --target for the default '*')"; TARGET=$2; shift 2 ;;
     --ttl) [ $# -ge 2 ] || dl_die "--ttl needs a value"; TTL=$2; shift 2 ;;
     -*) dl_die "unknown option: $1 (see --help)" ;;
     *)
