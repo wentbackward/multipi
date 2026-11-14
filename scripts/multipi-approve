@@ -29,7 +29,8 @@
 # MULTIPI_APPROVE_NOW_MS — documented TEST SEAM: override the issuing clock (integer
 # ms epoch) so tests drive TTL/expiry without sleeping. Never set in production.
 #
-# Exit codes (contract): 0 minted; 2 usage/environment error (nothing is half-written).
+# Exit codes (contract): 0 minted; 2 usage/environment error (nothing is half-written);
+# any other non-zero code is the underlying node failure, passed through.
 set -u
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -141,4 +142,4 @@ console.log("  scope:   " + token.targetScope);
 console.log("  ttl:     " + env.APPR_TTL_MINUTES + " minute(s) (expires " + new Date(token.expiresAt).toISOString() + ")");
 console.log("  " + note);
 console.log("the policy-controlled session may retry the action ONCE before expiry (singleshot).");
-' || exit 2
+'; rc=$?; [ "$rc" -eq 0 ] || exit "$rc"
