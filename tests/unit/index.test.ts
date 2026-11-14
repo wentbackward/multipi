@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
-import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, mkdirSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import devloopExtension from "../../extension/index.ts";
 import { GUARD_REFUSAL } from "../../extension/src/guard.ts";
@@ -296,6 +296,59 @@ test("orchestrator session_start prepends the installed policy shims to PATH (id
 		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
 		else process.env.MULTIPI_CHILD = savedChild;
 		fx.cleanup();
+	}
+});
+
+test("session_start shim PATH idempotency is CANONICAL (round-13 should-fix): an aliased or relative spelling of the shims dir on PATH is not double-prepended", () => {
+	const fx = makeFixture("{}");
+	const saved = process.env.PATH;
+	const savedChild = process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD;
+	const shims = path.join(fx.repo, "scripts", "policy-shims");
+	mkdirSync(shims, { recursive: true });
+	const real = realpathSync(shims);
+	// A symlink ALIAS of the shims dir: the surface spelling a session of the
+	// symlinked main worktree builds differs from the physical entry an earlier
+	// session already prepended — exact-string compare misses it.
+	const alias = path.join(fx.dir, "shims-alias");
+	symlinkSync(shims, alias);
+	const canon = (p: string): string => { try { return realpathSync(path.resolve(p)); } catch { return path.resolve(p); } };
+	// Count shims-dir entries resolving AGAINST fx.repo: that is the root the hook's
+	// own resolution uses while the session cwd is fx.repo (see fire below).
+	const countRepoCanon = (): number => (process.env.PATH ?? "").split(path.delimiter).filter(
+		(e) => e && canon(path.isAbsolute(e) ? e : path.join(fx.repo, e)) === real,
+	).length;
+	const fire = (): void => {
+		const { pi, hooks } = fakePi();
+		// Round-14 test-validity fix: fire the session_start hooks INSIDE withCwd — the
+		// production shape. The hook resolves PATH entries against process.cwd(), so
+		// firing after withCwd restored the runner's cwd made the relative entry
+		// unrecognisable while the same wrong cwd kept the count from seeing the
+		// double-prepend: the old case 2 pinned nothing.
+		withCwd(fx.repo, () => {
+			devloopExtension(pi);
+			const ctx = { cwd: fx.repo, hasUI: false, mode: "rpc" } as never;
+			for (const h of hooks.filter((x) => x.name === "session_start")) h.fn({}, ctx);
+		});
+	};
+	try {
+		// Case 1: a symlink alias of the shims dir already leads PATH (surface A armed it;
+		// this session of surface B must recognise it, not prepend a second entry).
+		process.env.PATH = `${alias}:${saved}`;
+		fire();
+		assert.equal(countRepoCanon(), 1, `the aliased entry must count as the shims dir, got: ${process.env.PATH}`);
+		assert.equal(process.env.PATH, `${alias}:${saved}`, "the alias was recognised — PATH untouched, nothing prepended");
+		// Case 2: a cwd-relative spelling of the shims dir is the same dir too.
+		process.env.PATH = `scripts/policy-shims:${saved}`;
+		fire();
+		assert.equal(countRepoCanon(), 1, `the relative entry must count as the shims dir, got: ${process.env.PATH}`);
+		assert.equal(process.env.PATH, `scripts/policy-shims:${saved}`, "the relative entry was recognised — PATH untouched, nothing prepended");
+	} finally {
+		process.env.PATH = saved;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		fx.cleanup();
+		rmSync(alias, { force: true });
 	}
 });
 
