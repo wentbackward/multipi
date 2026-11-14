@@ -142,8 +142,8 @@ function main(): void {
 	if (a.ghAction) ctx.ghAction = a.ghAction;
 	if (trusted) ctx.trusted = true;
 
-	// Log hygiene (spec §8): no store paths in action summaries — the hook's redactSummary
-	// substitutes the store dir with <store>; the shim's audit + ask lines owe it equally.
+	// Log hygiene (spec §8): no store paths in action summaries — the shared
+	// redactActionSummary substitutes the store dir with <store>; the shim's audit + ask lines owe it equally.
 	// Same resolution as the hook (the store switch is the config's, not the policy's).
 	let storeDir: string | null = null;
 	try {

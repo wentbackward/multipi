@@ -566,7 +566,8 @@ export function formatPolicyAsk(d: PolicyDecision, actionSummary: string): strin
 
 /** Log hygiene (spec §8): scrub token-dir paths (every home spelling); substitute the
  * scenario-store dir with `<store>` when the caller supplies one (no store paths in action
- * summaries — the hook's redactSummary has the same duty); then bound the summary. */
+ * summaries — the hook and the driver both funnel through THIS function); then bound the
+ * summary. */
 export function redactActionSummary(summary: string, storeDir?: string | null): string {
 	let out = summary.replace(TOKEN_DIR_RE, "<token-dir>");
 	if (storeDir && out.includes(storeDir)) out = out.split(storeDir).join("<store>");
