@@ -133,6 +133,96 @@ if (cfg) {
       fi
     fi
   fi
+
+  # --- policy (permission-policy spec §8) ---------------------------------------
+  # Same one-evaluator discipline as the factory report: doctor imports loadPolicy
+  # from policy.ts, so the doctor's "loaded/valid" means exactly what the hook's
+  # loader means — the doctor cannot drift from the hook on what a broken policy is.
+  # The MAIN root is passed as the policy root (a checkout may be a linked worktree;
+  # the config and permissions.json live in the main tree).
+  policy_perm_file="$DL_ROOT/permissions.json"
+  policy_active_files=0
+  [ -n "$(cfg policy "")" ] && policy_active_files=1   # explicit policy block in .devloop.json
+  [ -f "$policy_perm_file" ] && policy_active_files=1
+  if [ "$policy_active_files" -eq 0 ]; then
+    optional "policy not configured (no policy block, no permissions.json — inactive by design)"
+  elif ! command -v node >/dev/null 2>&1; then
+    missing "node (the policy files are present but cannot be validated without it)"
+  else
+    policy_src=""
+    for cand in "$DL_ROOT/.pi/extensions/multipi-devloop/src" "$scripts_dir/../extension/src"; do
+      if [ -f "$cand/policy.ts" ] && [ -f "$cand/config.ts" ]; then policy_src=$cand; break; fi
+    done
+    if [ -z "$policy_src" ]; then
+      optional "policy report unavailable (evaluator source not found)"
+    else
+      policy_err=$(mktemp)
+      # EXIT trap owns the temp file until the normal path resets it (the factory pattern).
+      trap 'rm -f "$policy_err"' EXIT
+      policy_json=$(
+        POLICY_SRC=$policy_src POLICY_ROOT=$DL_ROOT node --input-type=module -e '
+const { loadPolicy } = await import(process.env.POLICY_SRC + "/policy.ts");
+const policy = loadPolicy(process.env.POLICY_ROOT);
+const counts = { deny: 0, ask: 0, allow: 0 };
+for (const r of policy.rules) counts[r.cls]++;
+process.stdout.write(JSON.stringify({ ok: policy.ok, error: policy.error ?? null, posture: policy.config.posture, hasPermissionsFile: policy.hasPermissionsFile, counts }));
+' 2>"$policy_err"
+      )
+      if [ -z "$policy_json" ]; then
+        # First line of stderr only (the factory pattern): name the error class, do not
+        # re-print source text; the one-shot's own output was empty, so no store paths
+        # can travel either.
+        perr_first=$(head -n 1 "$policy_err")
+        missing "policy report (node import failed${perr_first:+: $perr_first})"
+      else
+        if [ "$(json_get ok <<<"$policy_json")" != "true" ]; then
+          # Broken PRESENT file: the hook fails closed (it denies everything non-trusted
+          # while the policy is broken), so doctor names the error AND the repair.
+          missing "policy: $(json_get error <<<"$policy_json") (repair the policy files — while broken the policy FAILS CLOSED and denies everything non-trusted)"
+        else
+          p_posture=$(json_get posture <<<"$policy_json")
+          if [ "$(json_get hasPermissionsFile <<<"$policy_json")" = "true" ]; then
+            ok "policy loaded (posture $p_posture; rules: $(json_get counts.deny <<<"$policy_json") deny, $(json_get counts.ask <<<"$policy_json") ask, $(json_get counts.allow <<<"$policy_json") allow)"
+          else
+            ok "policy posture $p_posture (knobs only — no permissions.json)"
+          fi
+          # Shim presence: PATH-resolved realpath inside the installed scripts/policy-shims.
+          # Spec §8: an uninstall that removes shims but leaves the policy is a BROKEN
+          # state, not a quiet bypass — MISSING, fail closed.
+          shim_c=$(dl_canonical "$DL_ROOT/scripts/policy-shims")
+          shim_missing=""
+          for bin in git gh; do
+            bin_path=$(command -v "$bin" 2>/dev/null) || { shim_missing=${shim_missing:+$shim_missing, }$bin; continue; }
+            case "$(dl_canonical "$bin_path")" in
+              "$shim_c"/*) ;;
+              *) shim_missing=${shim_missing:+$shim_missing, }$bin ;;
+            esac
+          done
+          if [ -z "$shim_missing" ]; then
+            ok "policy shims on PATH (git, gh)"
+          else
+            missing "policy shims on PATH ($shim_missing) — policy is active but the Layer-2 guarantee is absent (rerun scripts/install.sh)"
+          fi
+          # Token dir (spec §6): phase 1 observes and notes; the 0700/0600 pin lands in
+          # P6, so a loose dir is a NOTE here — observability, not a wall, until then.
+          tok_dir="$DL_STATE/dev-loop-tokens"
+          if [ ! -d "$tok_dir" ]; then
+            optional "policy token dir not created yet ($tok_dir — phase 2)"
+          else
+            tok_mode=$(stat -c %a "$tok_dir" 2>/dev/null)
+            tok_owner=$(stat -c %U "$tok_dir" 2>/dev/null)
+            if [ "$tok_mode" = 700 ] && [ -n "$tok_owner" ] && [ "$tok_owner" = "$(id -un)" ]; then
+              ok "policy token dir ($tok_dir, 0700)"
+            else
+              optional "policy token dir is ${tok_mode:-unreadable} owned by ${tok_owner:-unknown} — 0700 owner-only is the P6 pin ($tok_dir)"
+            fi
+          fi
+        fi
+      fi
+      rm -f "$policy_err"
+      trap - EXIT
+    fi
+  fi
   if [ -f "$DL_ROOT/AGENTS.md" ]; then ok "AGENTS.md"; else missing "AGENTS.md (run the devloop setup skill)"; fi
   if [ -f "$DL_ROOT/docs/DECISIONS.md" ]; then ok "docs/DECISIONS.md"; else optional "no docs/DECISIONS.md"; fi
 fi
