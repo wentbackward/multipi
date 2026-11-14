@@ -2866,7 +2866,6 @@ json.dump(v, open(p, "w"))
 PYR11
 rm -f "$P3_AUDIT"
 ( shim_dir="$PSH"; . "$PSH/lib/policyshim.sh"; shim_init
-  SIM_CMD="git commit -m x"
   shim_audit_fallback "policy:shim-error" "deny" "commit -m x" )
 [ -f "$P3_CUSTOMLOGS/policy-audit.jsonl" ] && grep -qF '"ruleId":"policy:shim-error"' "$P3_CUSTOMLOGS/policy-audit.jsonl" && \
   pass "P3 smoke: the fallback audit line honors the configured logs_dir" || \
@@ -2875,7 +2874,6 @@ expect "P3 smoke: the configured-dir fallback line did NOT land in the default s
   "$(p3count 'policy:shim-error')"
 mv .devloop.json.arm .devloop.json
 ( shim_dir="$PSH"; . "$PSH/lib/policyshim.sh"; shim_init
-  SIM_CMD="git commit -m x"
   shim_audit_fallback "policy:shim-error" "deny" "commit -m x" )
 expect "P3 smoke: without a configured logs_dir the fallback line uses the default state dir" "1" \
   "$(p3count 'policy:shim-error')"
