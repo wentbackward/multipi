@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { matchesKey } from "@earendil-works/pi-tui";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import * as childreg from "./src/childreg.ts";
 import { registerChildProcessGuards } from "./src/child.ts";
@@ -200,15 +200,29 @@ function ensureTicker(): void {
  * bash tool of the session resolves git/gh through the policy wrapper. Absent dir ⇒ the loop
  * is not installed here ⇒ nothing to arm (and the shims are inert without permissions.json
  * anyway — the installer, not this hook, decides where they live). Idempotent: a restarted
- * session never prepends twice.
+ * session never prepends twice — and the comparison is CANONICAL (round-13 should-fix):
+ * a symlinked main worktree spells the same shims dir differently per session, so both
+ * sides resolve through symlinks before the contains-check (exact string compare doubled
+ * the prepend). Nonexistent PATH entries cannot resolve; they fall back to their absolute
+ * spelling and simply never match.
  */
+const safeCanon = (p: string): string => {
+	try {
+		return realpathSync(p);
+	} catch {
+		return p;
+	}
+};
+
 function registerPolicyShimPath(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx: ExtensionContext) => {
 		try {
 			const shims = path.join(mainRoot(ctx.cwd) ?? ctx.cwd, "scripts", "policy-shims");
 			if (!existsSync(shims)) return;
+			const canon = safeCanon(shims);
 			const cur = process.env.PATH ?? "";
-			if (cur.split(path.delimiter).includes(shims)) return;
+			const alreadyArmed = cur.split(path.delimiter).some((entry) => entry && safeCanon(path.resolve(entry)) === canon);
+			if (alreadyArmed) return;
 			process.env.PATH = `${shims}${path.delimiter}${cur}`;
 		} catch {
 			// PATH bookkeeping must never block the session.
