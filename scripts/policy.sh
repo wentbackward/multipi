@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # policy.sh — the operator-facing surface of the permission policy (spec
-# 2026-11-09-multipi-permission-policy.md §8). ONE EVALUATOR: every subcommand
-# imports loadPolicy/evaluate from the extension's policy.ts (the doctor's
-# same candidates), so what you see here is what the hook decides. The policy
-# is read from the MAIN worktree root — a checkout may be a linked worktree,
-# and the config plus permissions.json live in the main tree.
+# 2026-11-09-multipi-permission-policy.md §8). ONE EVALUATOR: every
+# evaluator-using subcommand (show, explain — audit tails the log, it never
+# invokes the evaluator) imports loadPolicy/evaluate from the extension's
+# policy.ts (the doctor's same candidates), so what you see here is what the
+# hook decides. The policy is read from the MAIN worktree root — a checkout
+# may be a linked worktree, and the config plus permissions.json live in the
+# main tree.
 #
 #   policy.sh show             render the EFFECTIVE policy: load state, knobs,
 #                              the computed additionalDirectories, rules grouped
