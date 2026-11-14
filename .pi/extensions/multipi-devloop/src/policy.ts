@@ -28,7 +28,9 @@
 // rule (foreign target ⇒ deny, secondary ⇒ ask) → gh repo-delete (dangerous class: flat deny,
 // NEVER exempt) → Layer-2 refspec/dangerous-class rules (spec §4-L2, populated ONLY by the
 // P3 shim's ground truth: base-branch/force ⇒ deny; tag mutation / tag push / gh pr merge ⇒
-// ask — the classes the trusted identity LIFTS, spec §5) → trusted exemption (string rules
+// ask. The trusted identity lifts exactly the base-branch/force denials and the pr-merge
+// ask (spec §5 scopes it to "outside a trusted program") — NOT the tag asks (spec §6's
+// ask list carries them with no trusted carve-out; spec §4-L2) → trusted exemption (string rules
 // ONLY, spec §5 — no exemption lifts a repo-scope or repo-delete rule; the 2026-11-09 oneshot
 // failure class is the one no exemption reopens) → string rules (deny > ask > allow) →
 // posture default. `gitTargets` entries must be main-repo ROOTS (the parent of the rev-parse
@@ -78,8 +80,9 @@ export const RULE_ONESHOT_INSTALL_SECONDARY = "oneshot:install-secondary";
 export const RULE_TRUSTED_EXEMPT = "trusted:exemption";
 
 /** Layer-2 shim rule ids (spec §4-L2) — decided from the P3 shim's ground truth, never from
- * strings. The deny/ask classes here are the ones the §5 trusted identity lifts, EXCEPT
- * gh:repo-delete (dangerous class: flat deny, never exempt — pinned in tests). */
+ * strings. The §5 trusted identity lifts exactly the base-branch/force denials and the
+ * pr-merge ask; the git-tag / tag-push asks and gh:repo-delete are NEVER lifted
+ * (pinned in tests). */
 export const RULE_BASE_BRANCH = "policy:base-branch";
 export const RULE_FORCE_PUSH = "policy:force-push";
 export const RULE_GIT_TAG = "policy:git-tag";
@@ -118,8 +121,9 @@ export interface PolicyContext {
 	ghAction?: "repo-delete" | "pr-merge";
 	/** Set ONLY on the shim's PPID-ancestry proof (a /proc parent-chain walk to the installed
 	 * loop script — an env-marker alternative was rejected as forgeable) that the call comes
-	 * from an installed script's own process tree (spec §5). Lifts string rules and the §5-exemptible Layer-2
-	 * classes; NEVER the repo-scope or repo-delete rules. */
+	 * from an installed script's own process tree (spec §5). Lifts string rules, the
+	 * base-branch/force denials and the pr-merge ask — never the tag asks, the repo-scope
+	 * rules or the repo-delete deny. */
 	trusted?: boolean;
 }
 
@@ -483,16 +487,21 @@ export function evaluate(policy: Policy, ctx: PolicyContext): PolicyDecision {
 	if (ctx.ghAction === "repo-delete") {
 		return { verdict: "deny", ruleId: RULE_GH_REPO_DELETE, reason: "gh repo delete is a dangerous class — the loop never deletes repositories (spec §4-L2)" };
 	}
-	// The remaining Layer-2 classes are exactly the ones the §5 trusted identity lifts
-	// (base-branch/force denies; tag, tag-push and pr-merge asks):
-	if (!ctx.trusted) {
+	// The remaining Layer-2 classes SPLIT on the §5 scope. The §5 exemption lifts exactly
+	// the base-branch/force DENIALS and the pr-merge ask — the spec's ask list scopes that
+	// one to "outside a trusted program" — but NOT the tag asks: `git tag` (create/delete)
+	// and `push --tags` ride the §6 ask list with NO trusted carve-out, so a proven trusted
+	// program tagging still needs operator consent (P3 review round 10, must-fix).
+	{
 		const gp = ctx.gitPush;
 		const flags: Flag[] = [];
-		if (gp?.force) flags.push({ verdict: "deny", ruleId: RULE_FORCE_PUSH, reason: "force push — the ref-history-rewrite class; merges travel through merge-train.sh only (spec §4-L2)" });
-		if (gp?.baseRef) flags.push({ verdict: "deny", ruleId: RULE_BASE_BRANCH, reason: "push to the base branch — merges travel through merge-train.sh only (spec §4-L2)" });
-		if (ctx.gitTagMutation) flags.push({ verdict: "ask", ruleId: RULE_GIT_TAG, reason: "git tag mutation — tags are release metadata; operator consent required (spec §6 ask list)" });
-		if (gp?.tags) flags.push({ verdict: "ask", ruleId: RULE_TAG_PUSH, reason: "push of tag refs — operator consent required (spec §6 ask list)" });
-		if (ctx.ghAction === "pr-merge") flags.push({ verdict: "ask", ruleId: RULE_GH_PR_MERGE, reason: "gh pr merge outside a trusted program — merges travel through the train; operator consent required (spec §6 ask list)" });
+		if (ctx.gitTagMutation) flags.push({ verdict: "ask", ruleId: RULE_GIT_TAG, reason: "git tag mutation — tags are release metadata; operator consent required (spec §6 ask list, no trusted carve-out)" });
+		if (gp?.tags) flags.push({ verdict: "ask", ruleId: RULE_TAG_PUSH, reason: "push of tag refs — operator consent required (spec §6 ask list, no trusted carve-out)" });
+		if (!ctx.trusted) {
+			if (gp?.force) flags.push({ verdict: "deny", ruleId: RULE_FORCE_PUSH, reason: "force push — the ref-history-rewrite class; merges travel through merge-train.sh only (spec §4-L2)" });
+			if (gp?.baseRef) flags.push({ verdict: "deny", ruleId: RULE_BASE_BRANCH, reason: "push to the base branch — merges travel through merge-train.sh only (spec §4-L2)" });
+			if (ctx.ghAction === "pr-merge") flags.push({ verdict: "ask", ruleId: RULE_GH_PR_MERGE, reason: "gh pr merge outside a trusted program — merges travel through the train; operator consent required (spec §6 ask list)" });
+		}
 		let worst: Flag | null = null;
 		for (const f of flags) if (!worst || RANK[f.verdict] > RANK[worst.verdict]) worst = f;
 		if (worst) return { verdict: worst.verdict, ruleId: worst.ruleId, reason: worst.reason };
@@ -551,9 +560,12 @@ export function formatPolicyAsk(d: PolicyDecision, actionSummary: string): strin
 	return `ASK ${ruleId}: ${actionSummary}. Operator approval required: run 'multipi-approve ${ruleId}' in your own shell, then retry.`;
 }
 
-/** Log hygiene (spec §8): scrub token-dir paths (every home spelling) and bound the summary. */
-export function redactActionSummary(summary: string): string {
+/** Log hygiene (spec §8): scrub token-dir paths (every home spelling); substitute the
+ * scenario-store dir with `<store>` when the caller supplies one (no store paths in action
+ * summaries — the hook's redactSummary has the same duty); then bound the summary. */
+export function redactActionSummary(summary: string, storeDir?: string | null): string {
 	let out = summary.replace(TOKEN_DIR_RE, "<token-dir>");
+	if (storeDir && out.includes(storeDir)) out = out.split(storeDir).join("<store>");
 	if (out.length > ACTION_SUMMARY_MAX) out = `${out.slice(0, ACTION_SUMMARY_MAX)}…`;
 	return out;
 }

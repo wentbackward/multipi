@@ -15,7 +15,7 @@
 // (Node 24 type stripping; no build step).
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
-import { loadConfig, resolvePaths } from "./config.ts";
+import { loadConfig, resolvePaths, scenariosOn } from "./config.ts";
 import {
 	evaluate, loadPolicy, hasTrustedAncestor, formatPolicyDeny, formatPolicyAsk, redactActionSummary, DEVLOAD_ERROR_MARKER,
 	type PolicyContext,
@@ -130,6 +130,18 @@ function main(): void {
 	if (a.ghAction) ctx.ghAction = a.ghAction;
 	if (trusted) ctx.trusted = true;
 
+	// Log hygiene (spec §8): no store paths in action summaries — the hook's redactSummary
+	// substitutes the store dir with <store>; the shim's audit + ask lines owe it equally.
+	// Same resolution as the hook (the store switch is the config's, not the policy's).
+	let storeDir: string | null = null;
+	try {
+		const cfg = loadConfig(a.root);
+		storeDir = cfg && scenariosOn(cfg) ? resolvePaths(cfg).scenariosDir : null;
+	} catch {
+		storeDir = null;
+	}
+	const summary = redactActionSummary(a.command, storeDir);
+
 	const d = evaluate(policy, ctx);
 	// Audit exactly like the hook: every non-default verdict + every allow BY CURATED RULE
 	// (the baseline / near-miss record; the posture default stays out of the log).
@@ -141,7 +153,7 @@ function main(): void {
 			actor: "shim",
 			ruleId: d.ruleId ?? "",
 			verdict: d.verdict,
-			actionSummary: redactActionSummary(a.command),
+			actionSummary: summary,
 			layer: "shim",
 		});
 	}
@@ -151,7 +163,7 @@ function main(): void {
 	}
 	const line = d.verdict === "deny"
 		? formatPolicyDeny(d)
-		: formatPolicyAsk(d, redactActionSummary(a.command));
+		: formatPolicyAsk(d, summary);
 	console.log(`BLOCK\t${line}`);
 }
 

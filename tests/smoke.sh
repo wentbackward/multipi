@@ -2779,10 +2779,23 @@ else
   fail "P3 smoke: a shim audit line is malformed"
 fi
 
+# 15b. log hygiene (spec §8): the scenario-store path never reaches the shim's audit — the
+#      driver computes the store dir from the loaded config and substitutes <store>, exactly
+#      like the hook's redactSummary (P3 review round 10).
+mkcfg '"policy": {"repos": ["self"], "secondaries": ["'"$work"'/sec"]}, "scenarios": {}'
+P3_STORE="$work/home/project/scenarios"
+rm -f "$P3_AUDIT"
+out=$(cd "$work/p3-foreign" && PATH="$PSH:$PATH" git commit -q --allow-empty -m "steps in $P3_STORE/t1.md" 2>&1); rc=$?
+cd "$work/project"
+expect "P3 smoke: a foreign commit carrying the store path is denied" "126" "$rc"
+expect "P3 smoke: the shim audit line carries <store>" "1" "$(p3count '<store>')"
+! grep -qF "$P3_STORE" "$P3_AUDIT" && pass "P3 smoke: the raw store path never reached the shim audit log" ||
+  fail "P3 smoke: the raw store path leaked into the shim audit log"
+
 # Teardown: leave the fixture the way the prior sections left it.
 mkcfg ''
 rm -f permissions.json scripts/p3-push-main.sh
-rm -rf "$work/p3-foreign" "$work/p3-nr" "$work/p3-nogit" "$work/p3-gitlog" "$work/sec"
+rm -rf "$work/p3-foreign" "$work/p3-nr" "$work/p3-nogit" "$work/p3-gitlog" "$work/sec" "$work/p3-stubbin"
 git reset -q --hard HEAD 2>/dev/null || true
 git checkout -q main 2>/dev/null || true
 git branch -q -D feat/p3 2>/dev/null || true
