@@ -1186,7 +1186,14 @@ printf '#!/bin/bash\nsleep 30\n' >"$SLOW_NODE_DIR/node" && chmod +x "$SLOW_NODE_
 EVAL_SCRATCH="$work/evaltmp"
 mkdir -p "$EVAL_SCRATCH"
 scratch_before=$(ls -A "$EVAL_SCRATCH" | wc -l)
-( cd "$work/project" && TMPDIR="$EVAL_SCRATCH" PATH="$SLOW_NODE_DIR:$PATH" bash "$POLS" show & p=$!; sleep 2; kill -TERM "$p" 2>/dev/null; wait "$p" 2>/dev/null )
+( cd "$work/project"
+  # Background a SINGLE simple command, not the `cd && ...` list — backgrounding
+  # the AND-list forks a wrapper subshell and $! would not be the policy.sh pid.
+  TMPDIR="$EVAL_SCRATCH" PATH="$SLOW_NODE_DIR:$PATH" bash "$POLS" show &
+  p=$!
+  sleep 2
+  kill -TERM "$p" 2>/dev/null
+  wait "$p" 2>/dev/null )
 scratch_after=$(ls -A "$EVAL_SCRATCH" | wc -l)
 expect "a TERM mid-eval leaks no run_eval scratch file" "$scratch_before" "$scratch_after"
 rm -rf "$SLOW_NODE_DIR" "$EVAL_SCRATCH"
