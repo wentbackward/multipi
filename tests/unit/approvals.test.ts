@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	readFileSync,
@@ -15,6 +16,7 @@ import {
 import { mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import {
 	ensureKeyring,
@@ -29,6 +31,7 @@ import {
 	SECRET_ENV_VAR,
 	tokenDirFor,
 	tokenFileName,
+	consumeTokenFile,
 	verifyToken,
 	writeTokenFile,
 } from "../../extension/src/approvals.ts";
@@ -37,6 +40,8 @@ import { evaluate, loadPolicy } from "../../extension/src/policy.ts";
 const SECRET = "unit-test-signing-secret-not-a-real-credential";
 const OTHER_SECRET = "a-different-signing-secret";
 const RULE = "Bash(*gh pr merge*)";
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const APPROVALS_MODULE = path.join(REPO_ROOT, "extension", "src", "approvals.ts");
 /** A fixed "now" (ms epoch) so the TTL tests steer the clock instead of sleeping. */
 const T0 = 1_750_000_000_000;
 const MIN = 60_000;
@@ -199,6 +204,74 @@ test("a scope mismatch denies and leaves the token; the matching scope passes", 
 	assert.ok(!existsSync(p));
 });
 
+// --- #54 should-fix 1: the rename race — consumption must decide, never throw ---------
+
+test("consumeTokenFile: a token file that vanished before the rename (lost the race) is reported no-token", (t) => {
+	const f = fx(t);
+	assert.equal(consumeTokenFile(path.join(f.tokenDir, tokenFileName(RULE))), "no-token",
+		"a missing token file IS the lost rename race — not an error");
+});
+
+test("consumeTokenFile: a rename it cannot perform (unwritable token dir) is reported io-error, file left in place", (t) => {
+	const f = fx(t);
+	const p = mintTo(f, RULE);
+	chmodSync(f.tokenDir, 0o555); // stat- and readable, unwritable
+	try {
+		assert.equal(consumeTokenFile(p), "io-error", "a foreign fs failure is io-error, not no-token");
+		assert.ok(existsSync(p), "an io-error consume leaves the token in place for inspection");
+	} finally {
+		chmodSync(f.tokenDir, 0o755);
+	}
+});
+
+test("attemptConsume maps a failed consume rename to a deny (io-error) with an audit line — never an uncaught throw", (t) => {
+	const f = fx(t);
+	const p = mintTo(f, RULE);
+	chmodSync(f.tokenDir, 0o555);
+	try {
+		const out = attemptConsume({ tokenDir: f.tokenDir, ruleId: RULE, secret: SECRET, now: T0 + MIN });
+		assert.equal(out.verdict, "deny");
+		assert.equal(out.reason, "io-error");
+		assert.equal(out.audit.kind, "deny");
+		assert.ok(existsSync(p), "the token is left in place for inspection");
+	} finally {
+		chmodSync(f.tokenDir, 0o755);
+	}
+});
+
+test("two CONCURRENT consumers of one token: exactly one passes, the loser denies no-token, neither throws", async (t) => {
+	const f = fx(t);
+	mintTo(f, RULE);
+	const outcomes = await Promise.all([0, 1].map(() => runConsumeWorker(f.tokenDir)));
+	assert.deepEqual(outcomes.map((o) => o.error).filter((e) => e !== undefined), [],
+		`no consumer may throw: ${outcomes.map((o) => o.error).filter((e) => e !== undefined).join(" | ")}`);
+	const passes = outcomes.filter((o) => o.verdict === "pass");
+	const denies = outcomes.filter((o) => o.verdict === "deny");
+	assert.equal(passes.length, 1, "exactly one consumer spends the token");
+	assert.equal(denies.length, 1, "the other consumer gets a verdict, not an exception");
+	assert.equal(denies[0].reason, "no-token", "the loser of the rename race denies no-token");
+});
+
+/** One REAL concurrent consumer: a fresh worker thread running the shipped attemptConsume.
+ * Its result is invariant under scheduling: either it finds no file, or it loses the
+ * atomic rename to the other worker — both are the `no-token` deny, never a throw. */
+function runConsumeWorker(tokenDir: string): Promise<{ verdict?: string; reason?: string; error?: string }> {
+	const code =
+		`const { parentPort } = require("node:worker_threads");\n` +
+		`(async () => {\n` +
+		`  try {\n` +
+		`    const mod = await import(${JSON.stringify(APPROVALS_MODULE)});\n` +
+		`    const out = mod.attemptConsume({ tokenDir: ${JSON.stringify(tokenDir)}, ruleId: ${JSON.stringify(RULE)}, secret: ${JSON.stringify(SECRET)}, now: ${T0 + MIN} });\n` +
+		`    parentPort.postMessage({ verdict: out.verdict, ...(out.reason !== undefined ? { reason: out.reason } : {}) });\n` +
+		`  } catch (e) { parentPort.postMessage({ error: String(e) }); }\n` +
+		`})();`;
+	return new Promise((resolve) => {
+		const w = new Worker(code, { eval: true });
+		w.on("message", (m: { verdict?: string; reason?: string; error?: string }) => { w.terminate(); resolve(m); });
+		w.on("error", (e: Error) => { w.terminate(); resolve({ error: String(e) }); });
+	});
+}
+
 test("tokenFileName is filesystem-safe, stable, and distinct per rule", () => {
 	assert.equal(tokenFileName(RULE), "Bash__gh_pr_merge__.tok");
 	assert.match(tokenFileName(RULE), /^[A-Za-z0-9._-]+\.tok$/, "no metacharacters survive");
@@ -248,6 +321,24 @@ test("an orphan .consuming residue from a crashed consume is swept on the next a
 	const out = attemptConsume({ tokenDir: f.tokenDir, ruleId: RULE, secret: SECRET, now: T0 + MIN });
 	assert.equal(out.verdict, "pass");
 	assert.deepEqual(listVisible(f.tokenDir), [], "the orphan is swept");
+});
+
+// #54 should-fix 3: writeTokenFile's hidden .<name>.mint-<hex> temp must be swept too
+test("an orphan .mint-* temp from an interrupted mint is swept on the next attempt; other hidden files are never touched", (t) => {
+	const f = fx(t);
+	mintTo(f, RULE);
+	const name = tokenFileName(RULE);
+	const strayMint = `.${name}.mint-${"ab".repeat(4)}`;
+	const wrongShape = `.${name}.mint-not-hex-hex`;
+	const unrelated = ".unrelated-hidden";
+	writeFileSync(path.join(f.tokenDir, strayMint), "half-minted");
+	writeFileSync(path.join(f.tokenDir, wrongShape), "not a mint-temp shape");
+	writeFileSync(path.join(f.tokenDir, unrelated), "hidden, unrelated");
+	const out = attemptConsume({ tokenDir: f.tokenDir, ruleId: RULE, secret: SECRET, now: T0 + MIN });
+	assert.equal(out.verdict, "pass");
+	assert.ok(!existsSync(path.join(f.tokenDir, strayMint)), "the interrupted-mint temp is swept");
+	assert.ok(existsSync(path.join(f.tokenDir, wrongShape)), "a name outside the mint-temp shape is left alone");
+	assert.ok(existsSync(path.join(f.tokenDir, unrelated)), "hidden files in general are never touched");
 });
 
 test("writeTokenFile creates the dir 0700 and the file 0600, replacing any stale token", (t) => {
@@ -305,6 +396,11 @@ test("seeded permissions.json: the POLICY'D SESSION can never mint; the keyring 
 		"the keyring file is Read-denied");
 	assert.equal(evaluate(p, { ...ORCH, tool: "edit", paths: ["~/.multipi/proj/policy-secret"] }).verdict, "deny",
 		"the keyring file is Edit-denied");
+	// #54 should-fix 2: the /run/user keyring spelling gets the same shield as the token dir
+	assert.equal(evaluate(p, { ...ORCH, tool: "read", paths: ["/run/user/1000/policy-secret"] }).verdict, "deny",
+		"the /run/user keyring spelling is Read-denied (symmetric with the token-dir shields)");
+	assert.equal(evaluate(p, { ...ORCH, tool: "edit", paths: ["/run/user/1000/policy-secret"] }).verdict, "deny",
+		"the /run/user keyring spelling is Edit-denied");
 });
 
 /** Non-hidden files in a dir (orphans like .consuming-… excluded by design). */
