@@ -2958,7 +2958,7 @@ grep -o '"ts":"[^"]*"' "$P3_AUDIT" | tail -1 | grep -qE '"ts":"[0-9]{4}-[0-9]{2}
 # Teardown: leave the fixture the way the prior sections left it.
 mkcfg ''
 rm -f permissions.json scripts/p3-push-main.sh
-rm -rf "$work/p3-foreign" "$work/p3-nr" "$work/p3-nogit" "$work/p3-gitlog" "$work/sec" "$work/p3-stubbin" "$work/p3-nocu-bin" "$work/p3-nocu-home"
+rm -rf "$work/p3-foreign" "$work/p3-nr" "$work/p3-nogit" "$work/p3-gitlog" "$work/sec" "$work/p3-stubbin" "$work/p3-nocu-bin" "$work/p3-nocu-home" "$work/p3-cc-stub"
 git reset -q --hard HEAD 2>/dev/null || true
 git checkout -q main 2>/dev/null || true
 git branch -q -D feat/p3 2>/dev/null || true
