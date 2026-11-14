@@ -249,6 +249,15 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
   round-4 pinned resolution semantics mid-stream; a future ticket), and treating ANY
   --work-tree/GIT_WORK_TREE as unresolvable ⇒ deny (over-denies the legitimate detached-
   HEAD and secondary-checkout spellings the loop may need).
+  Added in review round 12 (named, NOT fixed): plain `git push` with a CONFIG-FLAVORED
+  implicit destination — the shim resolves the no-refspec destination from the CHECKED-OUT
+  branch (bare-push semantics), but with `push.default=matching` the destination set is ALL
+  matching local heads, the same class as `--all`/`--branches` (round-12 entry below). The
+  configured `push.default` is probed nowhere; a config probe was considered and declined
+  this round (matching is a rarely set value whose legitimate users collide with the
+  loop's own bare-push ergonomics, and reading config into a scan meant to stay argv-only
+  is a wider change than this residual owes) — same fail-safe asymmetry family and
+  compensations (tripwire layer + audit) as the unclassified-verbs residual above.
 - 2026-11-10 — P3 review round-3 fixes + named residual. (1) Restored the
   checkout/switch standalone+attached arm (`flag=-$ch`; the round-2 refactor left `flag=0`,
   which turned the arm into a positional-argument matcher — an over-deny on branches
@@ -407,3 +416,37 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
   duplicating the logs_dir rule by hand (adds a fourth resolution copy — the anti-pattern
   #55 exists to remove). (4) Housekeeping per the review: the park entry above now names
   the opened consolidation ticket, issue #55.
+- 2026-11-14 — P3 review round-12 fixes (one must-fix, three should-fixes). (1) MUST-FIX:
+  `git push --all` / `--branches` — whose implicit destination set is ALL local heads,
+  i.e. it includes the base ref from ANY checked-out branch while the scan's no-refspec
+  rule resolved only the CURRENT branch — wrote the base ref unclassified (reproduced
+  from a topic branch against a real bare remote: rc=0, `* [new branch] main -> main`,
+  zero policy lines, zero audit; same for `--branches`). Fixed with an exact
+  `--all | --branches)` arm in the push scan (beside `--mirror`) setting base=1: over-deny
+  is the fail-safe direction, consistent with the documented wildcard-destination policy
+  (a literal-topic-named ref under a glob costs an ask line, never data); the `=`/prefix
+  forms do not exist in git's grammar, so exact match is complete, and `--no-all`/
+  `--no-branches` do NOT match — they ride the generic long-flag arm and restore the
+  default current-branch behaviour. No loop script pushes `--all`/`--branches` (grepped:
+  none). Smoke pins both FROM A TOPIC BRANCH (where the current-branch rule alone sees
+  only the topic): 126 + base rule id + audit, and the remote's full ref set
+  bit-for-bit unchanged before/after (round-11 pinning idiom, generalized from a single
+  victim ref to the whole set). (2) SF1: `git push <remote> --delete <unprefixed-name>`
+  has a GENUINELY AMBIGUOUS destination — git resolves the name against the remote,
+  preferring a same-named branch, so a bare tag name deletes refs/tags/<name> while a
+  bare branch name deletes refs/heads/<name>; the shim classifies the LITERAL name. No
+  lookup was attempted (remote refs are not ground truth at scan time); the class is
+  NAMED in the shim header beside the unclassified-verbs list here, not silently widened
+  — same fail-safe asymmetry family (it over-ALLows a tag delete, never a base write
+  with the base's own name) and compensations as that list. (3) SF2: named DECISIONS
+  residual appended to the round-8 work-tree entry above: plain `git push` with
+  `push.default=matching` (config-flavored implicit destination, same class as `--all`);
+  config probe deliberately not added. (4) SF3: `shim_audit_fallback`'s
+  `$(basename …)` / `$(date -u …)` substitutions were unguarded — with coreutils missing
+  from PATH the command-not-found noise leaked onto fail-closed stderr and threatened
+  to swallow the block line. Both are now guarded (`basename` falls back to a pure-shell
+  `${main##*/}`, `date` to `ts=unknown`), so the fail-closed stderr carries EXACTLY ONE
+  line (the block line) and the fallback audit line still lands. Alternatives considered
+  and rejected: emitting the fallback ts as an empty string (the line would no longer be
+  parseable-as-seven-fields) and requiring coreutils (turns a missing-utility incident
+  into a silent no-audit incident — worse).
