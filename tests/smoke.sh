@@ -955,6 +955,7 @@ echo "$out" | grep -qF 'rule "not-a-rule" is not Tool(pattern)' &&
 # Knobs only (explicit policy block, no permissions.json): posture-only policy —
 # still ACTIVE (the block carries the structural repo rules), so shims are still required.
 rm -f permissions.json
+mkfake_shims # restore the full shim set (the partial-shim test removed the gh shim)
 out=$(PATH="$shim_dir:$PATH" doct); rc=$?
 expect "a knobs-only policy stays ready with the shims on PATH" "0" "$rc"
 echo "$out" | grep -qF "ok      policy posture allow (knobs only — no permissions.json)" &&
@@ -983,11 +984,11 @@ echo "$out" | grep -qF 'repos:           ["self"]' && pass "show renders the rep
 echo "$out" | grep -qF "token ttl:       10 minutes" && pass "show renders the token ttl" || fail "token ttl line wrong"
 echo "$out" | grep -qF "additionalDirectories (computed from .devloop.json):" &&
   pass "show carries the additionalDirectories header" || fail "no additionalDirectories header"
-for d in "$work/project/worktrees/project" "$work/home/project/notes" "$work/project/worktrees/project/gate"; do
+for d in "$work/home/project/worktrees/project" "$work/home/project/notes" "$work/home/project/worktrees/project/gate"; do
   echo "$out" | grep -qF "$d" && pass "additionalDirectories carries $d" || fail "additionalDirectories missing $d"
 done
-for pair in "[deny] Bash(sudo:*)" "[ask] Bash(gh pr merge:*)" "[allow] Bash(ls:*)"; do
-  cls=${pair%% *}; rul=${pair#* ] }
+for pair in "[deny]|Bash(sudo:*)" "[ask]|Bash(gh pr merge:*)" "[allow]|Bash(ls:*)"; do
+  cls=${pair%%|*}; rul=${pair#*|}
   block=$(echo "$out" | grep -A1 -F "  $cls (")
   echo "$block" | grep -qF "$rul" && pass "show groups $rul under $cls" ||
     fail "show does not group $rul under $cls (rules section:) $(echo "$out" | sed -n '/^rules/,$p')"
