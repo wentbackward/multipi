@@ -2940,6 +2940,183 @@ git checkout -q main 2>/dev/null || true
 git branch -q -D feat/p3 2>/dev/null || true
 rm -f self.txt inert.txt
 
+
+# --- permission policy P5: acceptance — oneshot-incident replay, Layer-1/2 honesty,
+#     fail-closed matrix (ticket #43; spec 2026-11-09-multipi-permission-policy.md §10) ----
+# The cross-cutting suite the per-ticket pins don't cover: a scripted REPLAY of the
+# 2026-11-09 oneshot command sequences (install.sh at a foreign repo; git -C foreign commit
+# in the incident's two commit shapes; cd foreign && git push) under a policy fixture —
+# every step denied or asked at the LAYER THE SPEC ASSIGNS, with the correct rule id and
+# the audit line present, and the foreign fixture repo BYTE-UNCHANGED (hash pin). Plus the
+# Layer-1/Layer-2 honesty contract (§9): the wrapped invocation defeats the string pattern
+# (proven passing Layer 1) but dies at the shim (proven exit 126) — pinned so nobody
+# "fixes" it by pretending Layer 1 is the wall. Plus the fail-closed matrix. The
+# full-train zero-deny acceptance lives in tests/unit/policy-acceptance.test.ts (it needs
+# the tools' dispatch/review/gate/merge drives, which the unit runner provides offline).
+cd "$work/project" || exit 1
+git checkout -q main 2>/dev/null || true
+# Productized install (installer-owned shims in the fixture's own tree), then arm the
+# policy: self-only repos with ONE whitelisted secondary (the replay's ask path), and one
+# seeded deny string rule (the honesty pin's tripwire — it catches the UNwrapped spelling
+# only, which is the point).
+bash "$plugin/scripts/install.sh" "$work/project" >/dev/null
+PS5="$work/project/scripts/policy-shims"
+mkcfg '"policy": {"posture": "allow", "repos": ["self"], "secondaries": ["'"$work"'/p5-sec"]}'
+cat >permissions.json <<'EOF'
+{"permissions":{"deny":["Bash(git push --force:*)"],"ask":[],"allow":[]}}
+EOF
+P5_AUDIT="$work/home/project/logs/policy-audit.jsonl"
+rm -f "$P5_AUDIT"   # a clean slate: every audit line asserted below is THIS section's
+p5aud() { local c; c=$(grep -c "$1" "$P5_AUDIT" 2>/dev/null); [ -n "$c" ] || c=0; printf '%s' "$c"; }
+# L1 probe: drive the REAL enforcer (the orchestrator's tool_call seat, P2) against this
+# fixture. Prints "pass" or "block:<first reason line>".
+p5hook() { # p5hook TOOL INPUT-JSON
+  MULTIPI_PLUGIN_DIR="$plugin" POLICY_ROOT="$work/project" P5_TOOL="$1" P5_INPUT="$2" node --input-type=module -e '
+const { createPolicyEnforcer } = await import(process.env.MULTIPI_PLUGIN_DIR + "/extension/src/policyhook.ts");
+const en = createPolicyEnforcer({ root: process.env.POLICY_ROOT, env: process.env, warn: () => {} });
+const d = en.onToolCall({ toolName: process.env.P5_TOOL, input: JSON.parse(process.env.P5_INPUT), sessionId: "p5" });
+console.log(d && d.block ? "block:" + d.reason.split("\n")[0] : "pass");
+' 2>/dev/null
+}
+
+# --- the oneshot-incident replay ----------------------------------------------------------
+F5="$work/p5-foreign"; S5="$work/p5-sec"
+git clone -q "$work/origin.git" "$F5" 2>/dev/null
+git clone -q "$work/origin.git" "$S5" 2>/dev/null
+# Incident pre-state: the foreign repo already holds the prior install; stage (with the
+# UNSHIMMED real git) the change the denied mutations must never commit.
+( cd "$F5" && echo pin >pin.txt && git add pin.txt )
+( cd "$S5" && echo pin >pin.txt && git add pin.txt )
+# The byte pin: EVERY file (including .git) digested — a denied step that writes nothing
+# anywhere leaves the pin intact; any write (even a stray lockfile) breaks it.
+p5pin() { ( cd "$1" && find . -type f | LC_ALL=C sort | xargs -r sha256sum | sha256sum | cut -d' ' -f1 ); }
+PIN_F=$(p5pin "$F5"); PIN_S=$(p5pin "$S5")
+F_HEAD0=$(git -C "$F5" rev-parse HEAD)
+REFS0=$(git -C "$work/origin.git" for-each-ref | sha256sum | cut -d' ' -f1)
+
+# Step 1 — install.sh against the foreign repo: the spec assigns install-target scope to the
+# DECLARED action, i.e. the Layer-1 hook (the shims only see git/gh). Foreign ⇒ DENY.
+out=$(p5hook bash "{\"command\":\"bash scripts/install.sh $F5\"}")
+case "$out" in
+  "block:DENIED oneshot:install-foreign: "*)
+    pass "P5 replay: install.sh at the foreign repo is denied at Layer 1 with the oneshot rule id" ;;
+  *)
+    fail "P5 replay: the foreign-install step was not a Layer-1 oneshot:install-foreign deny (got: $out)" ;;
+esac
+expect "P5 replay: the foreign-install deny is audited (rule id, verdict deny)" \
+  "1" "$(p5aud '\"ruleId\":\"oneshot:install-foreign\",\"verdict\":\"deny\"')"
+# The whitelisted secondary is the consent path: ASK, not deny (spec §6 ask list, §7.1).
+out=$(p5hook bash "{\"command\":\"bash scripts/install.sh $S5\"}")
+case "$out" in
+  "block:ASK oneshot:install-secondary: "*)
+    pass "P5 replay: install.sh at the whitelisted secondary ASKS at Layer 1 (consent path)" ;;
+  *)
+    fail "P5 replay: the secondary-install step did not ask (got: $out)" ;;
+esac
+
+# Steps 2+3 — the git mutations, through the REAL Layer-2 shim (the shims see ground truth,
+# not the string): the two oneshot commits' shapes, then cd foreign && git push.
+out=$(PATH="$PS5:$PATH" git -C "$F5" commit -q -m "chore: refresh multipi devloop install" 2>&1); rc=$?
+expect "P5 replay: git -C foreign commit (shape 1) dies at the shim with exit 126" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && \
+  pass "P5 replay: the shape-1 commit deny carries the foreign rule id" || \
+  fail "P5 replay: the shape-1 commit deny line is wrong: $out"
+out=$(PATH="$PS5:$PATH" git -C "$F5" commit -q -m "chore(devloop): resync extension mirror" 2>&1); rc=$?
+expect "P5 replay: git -C foreign commit (shape 2) dies at the shim with exit 126" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && \
+  pass "P5 replay: the shape-2 commit deny carries the foreign rule id" || \
+  fail "P5 replay: the shape-2 commit deny line is wrong: $out"
+out=$(cd "$F5" && PATH="$PS5:$PATH" git push -q origin main 2>&1); rc=$?
+expect "P5 replay: cd foreign && git push dies at the shim with exit 126" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && \
+  pass "P5 replay: the foreign push deny carries the foreign rule id" || \
+  fail "P5 replay: the foreign push deny line is wrong: $out"
+expect "P5 replay: all three foreign mutations are audited (rule id, verdict deny)" \
+  "3" "$(p5aud '\"ruleId\":\"oneshot:foreign-repo\",\"verdict\":\"deny\"')"
+grep -q '"ruleId":"oneshot:foreign-repo","verdict":"deny","actionSummary":"[^"]*","layer":"shim"' "$P5_AUDIT" && \
+  pass "P5 replay: the foreign audit lines are shaped like every other (layer shim)" || \
+  fail "P5 replay: a foreign-mutation audit line lost its shim layer"
+# The whitelisted secondary mutation: ASK (operator consent required), still blocked phase-1.
+out=$(PATH="$PS5:$PATH" git -C "$S5" commit -q -m "chore: operator-consented upgrade" 2>&1); rc=$?
+expect "P5 replay: the secondary commit blocks at the shim (phase-1 ask is a block)" "126" "$rc"
+echo "$out" | grep -qF "ASK oneshot:secondary-repo:" && \
+  pass "P5 replay: the secondary commit carries the secondary ASK rule id" || \
+  fail "P5 replay: the secondary commit line is wrong: $out"
+
+# The incident's end-state is what the policy must make impossible: NOTHING moved.
+expect "P5 replay: the foreign fixture repo is byte-unchanged (hash pin)" "$PIN_F" "$(p5pin "$F5")"
+expect "P5 replay: the secondary fixture repo is byte-unchanged (hash pin)" "$PIN_S" "$(p5pin "$S5")"
+expect "P5 replay: the foreign HEAD never moved" "$F_HEAD0" "$(git -C "$F5" rev-parse HEAD)"
+expect "P5 replay: the shared origin's ref set never changed" "$REFS0" \
+  "$(git -C "$work/origin.git" for-each-ref | sha256sum | cut -d' ' -f1)"
+
+# --- the Layer-1/Layer-2 honesty contract (spec §9) -----------------------------------------
+# The WRAPPED invocation defeats the string pattern (the documented Layer-1 limit — it is
+# allowed BY THE HOOK OR ABSENT: no rule can match `sh -c`); the UNWRAPPED twin is caught by
+# the seeded tripwire. BOTH die at the shim, which sees the real argv. Pinning both halves is
+# what stops someone "fixing" Layer 1 into believing it is the wall.
+out=$(p5hook bash '{"command":"git push --force origin main"}')
+case "$out" in
+  "block:DENIED Bash(git push --force:*): "*)
+    pass "P5 honesty: the unwrapped force push is caught by the Layer-1 string rule" ;;
+  *)
+    fail "P5 honesty: the unwrapped force push escaped Layer 1 (got: $out)" ;;
+esac
+out=$(p5hook bash '{"command":"sh -c '\''git push --force origin main'\''"}')
+case "$out" in
+  pass)
+    pass "P5 honesty: the wrapped invocation passes Layer 1 (allowed-by-hook-or-absent — the documented limit)" ;;
+  *)
+    fail "P5 honesty: the wrapped invocation was NOT allowed by Layer 1 (got: $out)" ;;
+esac
+MAIN0=$(git -C "$work/project" rev-parse origin/main)
+out=$(PATH="$PS5:$PATH" sh -c "git push --force origin main" 2>&1); rc=$?
+expect "P5 honesty: the wrapped invocation dies at the shim with exit 126" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:force-push:" && \
+  pass "P5 honesty: the shim names the force-push class from the REAL argv" || \
+  fail "P5 honesty: the shim deny line is wrong: $out"
+expect "P5 honesty: the wrapped-invocation force deny is audited (rule id, deny, shim)" \
+  "1" "$(p5aud '\"ruleId\":\"policy:force-push\",\"verdict\":\"deny\"')"
+expect "P5 honesty: origin/main never moved" "$MAIN0" "$(git -C "$work/project" rev-parse origin/main)"
+
+# --- the fail-closed matrix ------------------------------------------------------------------
+# (a) broken-PRESENT policy file ⇒ the hook is ACTIVE and denies non-trusted actions.
+printf 'not { json\n' >permissions.json
+out=$(p5hook bash '{"command":"ls -la"}')
+case "$out" in
+  "block:DENIED policy:unusable: "*)
+    pass "P5 matrix: a broken-present policy file makes the hook deny non-trusted actions" ;;
+  *)
+    fail "P5 matrix: the broken-policy hook did not fail closed (got: $out)" ;;
+esac
+expect "P5 matrix: the broken-policy deny is audited (policy:unusable)" \
+  "1" "$(p5aud '\"ruleId\":\"policy:unusable\",\"verdict\":\"deny\"')"
+cat >permissions.json <<'EOF'
+{"permissions":{"deny":["Bash(git push --force:*)"],"ask":[],"allow":[]}}
+EOF
+# (b) shims missing + policy active ⇒ doctor MISSING (an uninstall that keeps the policy is a
+# broken state, not a quiet bypass — spec §8).
+out=$(doct); rc=$?
+expect "P5 matrix: doctor fails when the policy is active but the shims are off PATH" "1" "$rc"
+echo "$out" | grep -qF "MISSING policy shims on PATH (git, gh)" && \
+  pass "P5 matrix: the missing shims are named with the repair line" || \
+  fail "P5 matrix: no shim-MISSING line (got: $(echo "$out" | grep -F 'policy shims' || echo '<none>'))"
+# (c) unresolvable repo target ⇒ deny — the 2026-11-09 failure mode is now the fail direction.
+mkdir -p "$work/p5-nogit"
+out=$(cd "$work/p5-nogit" && PATH="$PS5:$PATH" git commit -q --allow-empty -m x 2>&1); rc=$?
+expect "P5 matrix: a commit with an unresolvable repo target dies with exit 126" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:unresolvable-target:" && \
+  pass "P5 matrix: the unresolvable-target deny carries the oneshot rule id" || \
+  fail "P5 matrix: the unresolvable-target deny line is wrong: $out"
+expect "P5 matrix: the unresolvable-target deny is audited" \
+  "1" "$(p5aud '\"ruleId\":\"oneshot:unresolvable-target\",\"verdict\":\"deny\"')"
+
+# Teardown: leave the fixture the way the prior sections left it.
+mkcfg ''
+rm -f permissions.json
+rm -rf "$work/p5-foreign" "$work/p5-sec" "$work/p5-nogit"
+git reset -q --hard HEAD 2>/dev/null || true
+
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
 MULTIPI_PLUGIN_DIR="$plugin" env -u MULTIPI_CHILD node --input-type=module -e '
 const pi = { registered: [], handlers: {}, commands: [], registerTool(t) { this.registered.push(t.name); }, registerCommand(n) { this.commands.push(n); }, on(ev, h) { this.handlers[ev] = h; } };

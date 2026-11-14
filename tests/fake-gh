@@ -44,7 +44,26 @@
 # are encoded as \n (line-join applied AFTER the quoting, so escaped
 # backslashes survive). All other values stay single-line (a deliberate,
 # documented limit of the fake).
+#
+# Tracker is not an actor: the Layer-2 git/gh shims (scripts/policy-shims) policy-check
+# every invocation they front. The REAL `gh` is a compiled binary — its server-side merge
+# never re-enters the bash PATH shims — so this fake emulates that: with a policy-shims
+# dir on PATH, its INTERNAL git calls (the squash emulation clones + pushes as the
+# "server") run unshimmed, or the emulated push would be classified as a foreign
+# mutation and the P5 full-train acceptance could never merge.
 set -u
+case ":$PATH:" in
+  *"/policy-shims:"*)
+    IFS=: read -r -a _entries <<<"$PATH"
+    _np=""
+    for _e in "${_entries[@]}"; do
+      case "/${_e%/}" in */policy-shims) continue ;; esac
+      [ -n "$_e" ] || continue
+      _np=${_np:+$_np:}$_e
+    done
+    [ -n "$_np" ] && export PATH="$_np"    # server-side git, never the shielded session PATH
+    ;;
+esac
 dir=${FAKE_GH_DIR:?FAKE_GH_DIR not set}
 mkdir -p "$dir" "$dir/issues" "$dir/issues-closed" "$dir/labels"
 gh_repo="${GH_REPO:--}"
