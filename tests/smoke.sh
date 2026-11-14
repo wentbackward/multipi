@@ -2909,7 +2909,7 @@ expect "P3 smoke: without a configured logs_dir the fallback line uses the defau
 #      caller (shim_fail_closed), so the subshell plays out audit + block itself.
 P3_NOCU="$work/p3-nocu-bin"
 mkdir -p "$P3_NOCU"
-for cu in bash pwd jq python3 sed tr grep cat awk dirname sh; do
+for cu in bash pwd mkdir jq python3 sed tr grep cat awk dirname sh; do
   src=$(command -v "$cu") && ln -sf "$src" "$P3_NOCU/$cu"
 done
 p3no_out=$(P3_PSH="$PSH" P3_MH="$work/p3-nocu-home" PATH="$P3_NOCU" bash -c '
