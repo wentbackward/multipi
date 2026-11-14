@@ -208,16 +208,29 @@ _shim_redact_summary() {
 
 # Best-effort audit append for the ONE case the driver cannot serve (itself broken): the
 # deny still lands in the log, shaped like every other line (layer=shim, seven fields).
-# A failing append never breaks the verdict.
+# The log dir resolves the way dl_logs_dir (lib/common.sh) does: the configured
+# logs_dir wins over the default state dir (P3 review round 11). A failing append never
+# breaks the verdict.
 shim_audit_fallback() { # shim_audit_fallback RULEID VERDICT SUMMARY
   local rule=$1 verdict=$2 summary=$3
-  local main=$SIM_INSTALL_ROOT logs
+  local main=$SIM_INSTALL_ROOT logs="" configured=""
   if [ -f "$main/.git" ]; then
     local gd
     gd=$(sed -n 's/^gitdir://p' "$main/.git" | tr -d '[:space:]')
     if [ -n "$gd" ]; then main=$(dirname "$(dirname "$(dirname "$gd")")"); fi
   fi
-  logs="${MULTIPI_HOME:-$HOME/.multipi}/$(basename "$main")/logs"
+  if [ "$SIM_HAVE_COMMON" = 1 ] && [ -f "$SIM_INSTALL_ROOT/.devloop.json" ]; then
+    configured=$(json_get logs_dir <"$SIM_INSTALL_ROOT/.devloop.json")
+    if [ -n "$configured" ]; then
+      # dl_resolve/dl_canonical need DL_ROOT set (relative logs_dir resolves against the
+      # MAIN root). The shim deliberately does not dl_load_config — its helpers call bare
+      # `git`, which would re-enter the shimmed binary — so set the resolver context
+      # locally for this call only.
+      local DL_ROOT=$main
+      logs=$(dl_canonical "$(dl_resolve "$configured")")
+    fi
+  fi
+  [ -n "$logs" ] || logs="${MULTIPI_HOME:-$HOME/.multipi}/$(basename "$main")/logs"
   {
     mkdir -p "$logs" 2>/dev/null || return 0
     printf '{"ts":"%s","event":"verdict","session":"-","actor":"shim","ruleId":"%s","verdict":"%s","actionSummary":"%s","layer":"shim"}\n' \
