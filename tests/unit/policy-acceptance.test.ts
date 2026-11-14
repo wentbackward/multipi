@@ -55,6 +55,18 @@ function setupEnv(fx: ReturnType<typeof makeFixture>) {
 	process.env.PATH = `${bin}:${process.env.PATH}`;
 }
 
+/** Snapshot the env vars the test arms, so the finally block can restore them exactly like
+ * PATH/FAKE_PI_REPORT (the test process must not leak armed policy state across tests). */
+const ENV_KEYS = [
+	"PATH",
+	"MULTIPI_HOME",
+	"MULTIPI_LOCK_DIR",
+	"FAKE_GH_DIR",
+	"MULTIPI_GH_SETTLE_SECONDS",
+	"MULTIPI_PI_BIN",
+	"MULTIPI_AGENTS_DIR",
+] as const;
+
 /** Install the loop INTO the fixture and arm the policy: the Layer-2 shims (the
  * installer-owned copies in the fixture's own tree) go first on PATH for EVERY process
  * this test spawns — the loop scripts, the fake-pi children, and the test's own git. */
@@ -106,8 +118,9 @@ const textOf = (r: { content: Array<{ type: string; text?: string }> }): string 
 
 test("P5 acceptance: the full train (dispatch -> review -> gate -> merge) runs zero-deny through the armed shims", async () => {
 	const fx = makeFixture(POLICY_TRAIN_CONFIG);
+	const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
+	for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
 	setupEnv(fx);
-	const savedPath = process.env.PATH;
 	try {
 		armPolicy(fx);
 		const ctx = buildContext(fx.repo);
@@ -162,7 +175,10 @@ test("P5 acceptance: the full train (dispatch -> review -> gate -> merge) runs z
 		assert.ok(mergeExempt.length >= 1, "merge-train's main push passed via the trusted:exemption allow (ruleId + layer shim + the merge action)");
 	} finally {
 		delete process.env.FAKE_PI_REPORT;
-		process.env.PATH = savedPath;
+		for (const k of ENV_KEYS) {
+			if (savedEnv[k] === undefined) delete process.env[k];
+			else process.env[k] = savedEnv[k]!;
+		}
 		fx.cleanup();
 	}
 });
