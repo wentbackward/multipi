@@ -237,6 +237,17 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
   residual of the enumerated-set design (flipping to a read-only allowlist would change
   every git call's cost profile; the tripwire layer and P5's zero-deny acceptance are the
   compensations, and the residual is named here so it is a decision, not a surprise).
+  Added in review round 8 (reproduced; named, NOT fixed this round): a work-tree REDIRECT
+  decouples a mutation's EFFECT from the repo identity the shim classifies —
+  `git --git-dir=<self> --work-tree=<foreign-checkout> reset --hard` classifies SELF
+  (identity follows the redirected git-dir's common dir, the round-4 resolution rule, which
+  stays pinned) yet lands the overwrite on the FOREIGN tree. Same fail-safe asymmetry
+  family as the unclassified-verbs residual above (it over-ALLOWs, not under-); same
+  compensations. Alternatives considered and deferred: also resolving the effective
+  work-tree and denying when it lies outside the classified repo's own trees (changes the
+  round-4 pinned resolution semantics mid-stream; a future ticket), and treating ANY
+  --work-tree/GIT_WORK_TREE as unresolvable ⇒ deny (over-denies the legitimate detached-
+  HEAD and secondary-checkout spellings the loop may need).
 - 2026-11-10 — P3 review round-3 fixes + named residual. (1) Restored the
   checkout/switch standalone+attached arm (`flag=-$ch`; the round-2 refactor left `flag=0`,
   which turned the arm into a positional-argument matcher — an over-deny on branches
