@@ -31,11 +31,13 @@ args=("$@")
 i=0
 while [ "$i" -lt "${#args[@]}" ]; do
   case "${args[$i]}" in
-    -R | --repo | --hostname)
+    -R | --repo | --hostname | -c | --color | --api-version)
+      # -c/--color/--api-version consume a VALUE on older gh releases (round-7
+      # should-fix): swallowing the value keeps it out of the noun/verb slots.
       [ "$((i + 1))" -lt "${#args[@]}" ] || break
       i=$((i + 2))
       ;;
-    -q | -v | -h | --help | --version | -c | --color | --no-color | --api-version) i=$((i + 1)) ;;
+    -q | -v | -h | --help | --version | --no-color) i=$((i + 1)) ;;
     --*=*) i=$((i + 1)) ;;
     *) break ;;
   esac
@@ -51,8 +53,11 @@ vi=$((i + 1))
 while [ "$vi" -lt "${#args[@]}" ]; do
   va=${args[$vi]}
   case "$va" in
-    -R | --repo | --hostname) [ "$((vi + 1))" -lt "${#args[@]}" ] || break; vi=$((vi + 2)) ;;
-    -q | -v | -h | --help | --version | -c | --color | --no-color | --api-version) vi=$((vi + 1)) ;;
+    -R | --repo | --hostname | -c | --color | --api-version)
+      [ "$((vi + 1))" -lt "${#args[@]}" ] || break
+      vi=$((vi + 2))
+      ;;
+    -q | -v | -h | --help | --version | --no-color) vi=$((vi + 1)) ;;
     --*=*) vi=$((vi + 1)) ;;
     -*) break ;;  # unknown flag: stop skipping, it IS the verb position (classified or not)
     *) break ;;   # the verb
@@ -60,15 +65,14 @@ while [ "$vi" -lt "${#args[@]}" ]; do
 done
 [ "$vi" -ge "${#args[@]}" ] && exec "$REAL_GH" "$@"   # noun with no verb: not a classified action
 verb=${args[$vi]}
-# A `--help`/`--version` ANYWHERE in the remainder is documentation, not an action:
-# `gh repo delete --help` must not classify as the delete (harmless over-deny closed).
-h=0
-k=$((i + 1))
-while [ "$k" -lt "${#args[@]}" ]; do
-  case "${args[$k]}" in -h | --help | --version) h=1; break ;; esac
-  k=$((k + 1))
-done
-[ "$h" = 1 ] && exec "$REAL_GH" "$@"
+# A `--help`/`--version` immediately following the VERB is documentation, not an action:
+# `gh repo delete --help` must not classify as the delete. Scoped to that ONE token
+# (round-7 must-fix, parity with the git shim): a help-shaped token consumed as another
+# flag's value (`gh pr merge 12 -m --help`) is data, not a help request, and must never
+# skip the classification.
+if [ "$((vi + 1))" -lt "${#args[@]}" ]; then
+  case "${args[$((vi + 1))]}" in -h | --help | --version) exec "$REAL_GH" "$@" ;; esac
+fi
 
 case "$noun" in
   repo)

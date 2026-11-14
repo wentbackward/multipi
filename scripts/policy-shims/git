@@ -73,11 +73,14 @@ sub=${args[$i]}
 
 # git's own documentation/invocation-meta flags pass through without consulting the
 # evaluator — parity with the gh shim's --help/--version treatment (round-6 should-fix).
-_k=$i
-while [ "$_k" -lt "${#args[@]}" ]; do
-  case "${args[$_k]}" in -h | --help | --version) exec "$REAL_GIT" "$@" ;; esac
-  _k=$((_k + 1))
-done
+# Scoped to the token IMMEDIATELY following the subcommand (round-7 must-fix): a token
+# consumed as another flag's value (`git commit -m --help`, `git push -o --help origin`
+# …) is data, not a help request, and must never skip the policy check. The cost of the
+# narrower reading is an over-CONSULT (e.g. `git commit -q --help`), which evaluates like
+# any other mutation — harmless on self, ask-shaped off-self: the fail-safe direction.
+if [ "$((i + 1))" -lt "${#args[@]}" ]; then
+  case "${args[$((i + 1))]}" in -h | --help | --version) exec "$REAL_GIT" "$@" ;; esac
+fi
 
 force=0; base=0; tags=0; dest_unknown=0
 case "$sub" in
@@ -134,6 +137,15 @@ case "$sub" in
       a=${args[$j]}
       case "$a" in
         -f | --force | --force-with-lease | --force-with-lease=*) force=1 ;;
+        --force-if-includes | --force-if-includes=*)
+          # Conditionally forcing (round-7 should-fix): when the incoming tip is already
+          # contained the update is a fast-forward, but a topic push that ISN'T contained
+          # still moves the ref backwards — the base rule cannot see that, only the force
+          # set can. A space-form ref, if present, simply falls into the positionals and
+          # over-denies at worst (it can never UN-cover the remote/refspec: the force bit
+          # is set unconditionally).
+          force=1
+          ;;
         -t | --tags) tags=1 ;;
         --mirror) force=1; tags=1 ;;
         --dry-run) exec "$REAL_GIT" "$@" ;;   # a dry-run executes nothing: not a mutation
