@@ -2578,6 +2578,40 @@ echo "$out" | grep -qF "DENIED policy:base-branch:" && pass "P3 smoke: the -o-ma
 out=$(p3git push --no-verify origin feat/p3 2>&1); rc=$?
 expect "P3 smoke: --no-verify is NOT force (long flags never join the f/t cluster scan)" "0" "$rc"
 
+# 4e. review round 7: a help/version token CONSUMED as another flag's value must not
+#     trigger the doc pass-through (only the token IMMEDIATELY after the subcommand
+#     qualifies), and --force-if-includes joins the force set.
+cd "$work/p3-foreign"
+n0_fh=$(p3count '\"ruleId\":\"oneshot:foreign-repo\",\"verdict\":\"deny\"')
+out=$(PATH="$PSH:$PATH" git commit -m '--help' -q --allow-empty 2>&1); rc=$?
+cd "$work/project"
+expect "P3 smoke: 'git commit -m --help' in a foreign repo is DENIED (the help token is -m's value)" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: the value-spelled commit carries the foreign rule id" ||
+  fail "P3 smoke: a help-spelled commit slipped past the policy check: $out"
+expect "P3 smoke: the value-spelled foreign deny is audited" "$((n0_fh + 1))" \
+  "$(p3count '\"ruleId\":\"oneshot:foreign-repo\",\"verdict\":\"deny\"')"
+[ "$(git -C "$work/p3-foreign" log --format=%s -1)" != "--help" ] && \
+  pass "P3 smoke: the value-spelled foreign commit did NOT land" || fail "P3 smoke: the value-spelled foreign commit LANDED"
+out=$(p3git push -o --help origin main 2>&1); rc=$?
+expect "P3 smoke: 'git push -o --help origin main' is DENIED (the help token is -o's value)" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:base-branch:" && pass "P3 smoke: the -o-value-spelled base push carries the base rule id" ||
+  fail "P3 smoke: a -o-value-spelled push slipped past the policy check: $out"
+# Control: the token immediately after the subcommand IS still the doc form (zero policy cost).
+out=$(p3git commit --help 2>&1); rc=$?
+expect "P3 smoke: 'git commit --help' (immediate token) still passes through" "0" "$rc"
+echo "$out" | grep -qi "usage" && pass "P3 smoke: the doc pass-through shows real git's help" ||
+  fail "P3 smoke: the doc pass-through output is not git's help: $out"
+# --force-if-includes: conditionally forcing — a TOPIC push is caught only by the force
+# set, never by the base rule (space form and = form; the flag is present or not).
+out=$(p3git push --force-if-includes origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: 'git push --force-if-includes origin feat/p3' is DENIED as force" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:force-push:" && pass "P3 smoke: --force-if-includes carries the force rule id" ||
+  fail "P3 smoke: --force-if-includes was not classified as force: $out"
+out=$(p3git push --force-if-includes=origin/feat/p3 origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: the --force-if-includes= form is DENIED as force too" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:force-push:" && pass "P3 smoke: the = form carries the force rule id" ||
+  fail "P3 smoke: the = form was not classified as force: $out"
+
 # 6. the §5 identity exemption: a loop script under the installed scripts/ pushing base
 #    passes clean (this is merge-train's exact identity rule; the fixture script stands in
 #    for merge-train.sh, which carries the same parent-chain shape in production).
@@ -2626,13 +2660,47 @@ echo "$out" | grep -qF "ASK gh:pr-merge:" && pass "P3 smoke: the interleaved spe
 n1_il=$(grep -c 'merge 12$' "$GH_CALLS" 2>/dev/null); n1_il=${n1_il:-0}
 expect "P3 smoke: the real gh never saw the interleaved merge" "$n0_il" "$n1_il"
 
+# 8b. review round 7: the value-token rule applies to gh too, and the globals that CONSUME
+#     a value on older gh releases (-c --color --api-version) must not leak their value
+#     into the noun/verb slots.
+n0_hv=$(grep -c 'merge 12' "$GH_CALLS" 2>/dev/null); n0_hv=${n0_hv:-0}
+out=$(p3gh pr merge 12 -m --help 2>&1); rc=$?
+expect "P3 smoke: 'gh pr merge 12 -m --help' is ASKED (the help token is -m's value)" "126" "$rc"
+echo "$out" | grep -qF "ASK gh:pr-merge:" && pass "P3 smoke: the value-spelled merge carries the pr-merge ask" ||
+  fail "P3 smoke: a help-spelled merge slipped past the class: $out"
+n1_hv=$(grep -c 'merge 12' "$GH_CALLS" 2>/dev/null); n1_hv=${n1_hv:-0}
+expect "P3 smoke: the real gh never saw the value-spelled merge" "$n0_hv" "$n1_hv"
+# Control: the token immediately after the verb IS still the doc form — the shim is
+# TRANSPARENT (fake-gh does not implement repo delete, so pin the FORWARDING, not its rc).
+n0_hp=$(grep -c 'repo delete --help' "$GH_CALLS" 2>/dev/null); n0_hp=${n0_hp:-0}
+out=$(p3gh repo delete --help 2>&1); rc=$?
+[ "$rc" -ne 126 ] && pass "P3 smoke: 'gh repo delete --help' (immediate token) is not shim-blocked" ||
+  fail "P3 smoke: the doc-form delete was blocked at the shim (rc $rc): $out"
+n1_hp=$(grep -c 'repo delete --help' "$GH_CALLS" 2>/dev/null); n1_hp=${n1_hp:-0}
+expect "P3 smoke: the doc-form delete was forwarded to the real gh" "$((n0_hp + 1))" "$n1_hp"
+n0_av=$(grep -c 'repo delete' "$GH_CALLS" 2>/dev/null); n0_av=${n0_av:-0}
+out=$(p3gh --api-version v4 repo delete o/r 2>&1); rc=$?
+expect "P3 smoke: 'gh --api-version v4 repo delete o/r' is DENIED (the value does not become the noun)" "126" "$rc"
+echo "$out" | grep -qF "DENIED gh:repo-delete:" && pass "P3 smoke: the api-version-spelled delete carries the rule id" ||
+  fail "P3 smoke: the api-version-spelled delete slipped past the flat deny: $out"
+n1_av=$(grep -c 'repo delete' "$GH_CALLS" 2>/dev/null); n1_av=${n1_av:-0}
+expect "P3 smoke: the real gh never saw the api-version-spelled delete" "$n0_av" "$n1_av"
+out=$(p3gh repo --api-version v4 delete o/r 2>&1); rc=$?
+expect "P3 smoke: the mid-verb 'gh repo --api-version v4 delete o/r' is DENIED too" "126" "$rc"
+echo "$out" | grep -qF "DENIED gh:repo-delete:" || fail "P3 smoke: the mid-verb api-version spelling was not caught: $out"
+
 # 10. passthrough: the real git receives the argv UNTOUCHED (a logging stand-in for it,
 #     first non-shim dir on PATH; it still execs the system git so the work happens).
 mkdir -p "$work/p3-gitlog"
+# Round-7 must-fix: the stand-in must exec the git captured on the PRISTINE PATH, as an
+# ABSOLUTE path. Its own runtime PATH has the shim dir FIRST — a bare command lookup there
+# re-resolves to the SHIM, and the shim resolves this stand-in again: an infinite
+# shim→stand-in exec loop that grew argv.log without bound and hung the suite.
+REALGIT=$(command -v git)
 cat >"$work/p3-gitlog/git" <<EOF
 #!/usr/bin/env bash
 { printf 'ARGV:'; printf ' [%s]' "\$@"; echo; } >>"$work/p3-gitlog/argv.log"
-exec "$(command -v git)" "\$@"
+exec "$REALGIT" "\$@"
 EOF
 chmod +x "$work/p3-gitlog/git"
 out=$(PATH="$PSH:$work/p3-gitlog:$PATH" git commit -m "two words" --allow-empty 2>&1)
