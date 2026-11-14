@@ -465,3 +465,16 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
   invocations only, so no later smoke section is affected. Alternatives considered and
   rejected: the symlink farm (fragile in exactly the way the test is meant to police), and
   a `PATH` listing only hand-picked dirs (same fragility, less explicit about intent).
+- 2026-11-14 — Round-14 must-do (ticket #56): the relative-spelling shim-PATH sub-case was
+  pinned vacuously — the session_start hooks fired AFTER withCwd restored the runner's cwd,
+  so the hook's `path.resolve(entry)` and the assertion's canonical count both resolved the
+  relative entry against the WRONG root (double-prepend invisible to the count). Fixed in the
+  production shape: the hooks now fire INSIDE `withCwd(fx.repo, …)`, and each sub-case asserts
+  the PATH was UNTOUCHED (canonical count vs fx.repo stays 1 AND the full PATH string is
+  unchanged). The sub-case is KEPT, not dropped (the reviewer permitted the drop if it could
+  not be pinned honestly — it can: with the session cwd as process cwd, a relative entry
+  resolves exactly as in a real session). Verified discriminative: the rewritten sub-case
+  fails against the pre-fix exact-string compare, both sub-cases independently. Alternatives
+  considered and rejected: dropping the sub-case (loses the regression pin the ticket asked
+  for) and asserting the count only (a counting root mismatch could re-hollow it — the
+  unchanged-PATH string assertion is root-independent).
