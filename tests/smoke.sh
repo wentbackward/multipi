@@ -2549,6 +2549,22 @@ cd "$work/project"
 expect "P3 smoke: the attached-form checkout -Bname in a foreign repo is denied" "126" "$rc"
 echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: -Bname is classified as a ref write" ||
   fail "P3 smoke: -Bname bypassed the ref-write class: $out"
+# --force-create is the documented LONG form of `switch -C` (P3 review round 11): the
+# same ref-write class as -B/-C — it must consult the evaluator, not ride the generic
+# long-flag arm (reproduced: it fell through unconsulted and rewrote the foreign ref).
+cd "$work/p3-foreign"
+out=$(PATH="$PSH:$PATH" git switch --force-create victim 2>&1); rc=$?
+cd "$work/project"
+expect "P3 smoke: switch --force-create in a foreign repo is denied (the long -C form is a ref write)" "126" "$rc"
+echo "$out" | grep -qF "DENIED oneshot:foreign-repo:" && pass "P3 smoke: --force-create is classified as a ref write" ||
+  fail "P3 smoke: --force-create bypassed the ref-write class: $out"
+git -C "$work/p3-foreign" show-ref --verify -q refs/heads/victim && \
+  fail "P3 smoke: the --force-create victim ref LANDED" || \
+  pass "P3 smoke: the --force-create victim ref did NOT land"
+# Control: the new arm does not OVER-deny self — a self --force-create still passes.
+p3git switch --force-create p3fc && pass "P3 smoke: a self switch --force-create passes" ||
+  fail "P3 smoke: a self --force-create was over-denied"
+git checkout -q main && git branch -q -D p3fc
 out=$(p3git tag -n5 2>&1); rc=$?
 expect "P3 smoke: the list spelling 'git tag -n5' is not classified as a tag mutation" "0" "$rc"
 
@@ -2577,6 +2593,16 @@ echo "$out" | grep -qF "DENIED policy:base-branch:" && pass "P3 smoke: the -o-ma
   fail "P3 smoke: the -o-masked base push was not caught: $out"
 out=$(p3git push --no-verify origin feat/p3 2>&1); rc=$?
 expect "P3 smoke: --no-verify is NOT force (long flags never join the f/t cluster scan)" "0" "$rc"
+# --follow-tags publishes all tags reachable from the pushed refs (P3 review round 11):
+# tag-ref publication is the SAME class as --tags/-t — it joins the tag set, so the §6
+# tag-push ASK must apply instead of being silently skipped (reproduced: it pushed clean).
+n0_ft=$(p3count '"ruleId":"policy:tag-push","verdict":"ask"')
+out=$(p3git push --follow-tags origin feat/p3 2>&1); rc=$?
+expect "P3 smoke: 'git push --follow-tags origin feat/p3' is blocked with 126 (the tag ASK)" "126" "$rc"
+echo "$out" | grep -qF "ASK policy:tag-push:" && pass "P3 smoke: --follow-tags carries the tag-push ask" ||
+  fail "P3 smoke: --follow-tags skipped the tag-push ASK: $out"
+expect "P3 smoke: the follow-tags ask is audited" "$((n0_ft + 1))" \
+  "$(p3count '"ruleId":"policy:tag-push","verdict":"ask"')"
 
 # 4e. review round 7: a help/version token CONSUMED as another flag's value must not
 #     trigger the doc pass-through (only the token IMMEDIATELY after the subcommand
@@ -2823,6 +2849,36 @@ expect "P3 smoke: a foreign commit carrying the store path is denied" "126" "$rc
 expect "P3 smoke: the shim audit line carries <store>" "1" "$(p3count '<store>')"
 ! grep -qF "$P3_STORE" "$P3_AUDIT" && pass "P3 smoke: the raw store path never reached the shim audit log" ||
   fail "P3 smoke: the raw store path leaked into the shim audit log"
+
+# 15c. the fallback audit honors the configured logs_dir (P3 review round 11): the ONE
+#      path that bypasses the driver resolves the log dir the way dl_logs_dir does —
+#      the configured logs_dir wins over the default state dir. The function is driven
+#      DIRECTLY: it exists for the driver-broken case, so the smoke tests it as a
+#      function, the way 11b drives the resolver.
+P3_CUSTOMLOGS="$work/p3-customlogs"
+cp .devloop.json .devloop.json.arm
+python3 - "$P3_CUSTOMLOGS" <<'PYR11'
+import json, sys
+p = ".devloop.json"
+v = json.load(open(p))
+v["logs_dir"] = sys.argv[1]
+json.dump(v, open(p, "w"))
+PYR11
+rm -f "$P3_AUDIT"
+( shim_dir="$PSH"; . "$PSH/lib/policyshim.sh"; shim_init
+  SIM_CMD="git commit -m x"
+  shim_audit_fallback "policy:shim-error" "deny" "commit -m x" )
+[ -f "$P3_CUSTOMLOGS/policy-audit.jsonl" ] && grep -qF '"ruleId":"policy:shim-error"' "$P3_CUSTOMLOGS/policy-audit.jsonl" && \
+  pass "P3 smoke: the fallback audit line honors the configured logs_dir" || \
+  fail "P3 smoke: the fallback audit line missed the configured logs_dir"
+expect "P3 smoke: the configured-dir fallback line did NOT land in the default state dir" "0" \
+  "$(p3count 'policy:shim-error')"
+mv .devloop.json.arm .devloop.json
+( shim_dir="$PSH"; . "$PSH/lib/policyshim.sh"; shim_init
+  SIM_CMD="git commit -m x"
+  shim_audit_fallback "policy:shim-error" "deny" "commit -m x" )
+expect "P3 smoke: without a configured logs_dir the fallback line uses the default state dir" "1" \
+  "$(p3count 'policy:shim-error')"
 
 # Teardown: leave the fixture the way the prior sections left it.
 mkcfg ''
