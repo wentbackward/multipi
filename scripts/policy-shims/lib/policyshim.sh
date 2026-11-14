@@ -233,8 +233,10 @@ shim_audit_fallback() { # shim_audit_fallback RULEID VERDICT SUMMARY
       logs=$(dl_canonical "$(dl_resolve "$configured")")
     fi
   fi
-  base=$(basename "$main" 2>/dev/null) || base=${main##*/}
-  [ -n "$logs" ] || logs="${MULTIPI_HOME:-$HOME/.multipi}/$base/logs"
+  if [ -z "$logs" ]; then
+    base=$(basename "$main" 2>/dev/null) || base=${main##*/}
+    logs="${MULTIPI_HOME:-$HOME/.multipi}/$base/logs"
+  fi
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || ts=unknown
   {
     mkdir -p "$logs" 2>/dev/null || return 0
