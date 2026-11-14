@@ -373,7 +373,9 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
   store substitution, then the 160 bound — the hook's order). This deliberately does NOT merge
   the hook's parallel copy: that is the parked consolidation below. (4) SF3: the "parked
   consolidation ticket" named in the round-7 entry does not exist in the tracker — the park is
-  hereby TRACKED in this file instead (per the review: do not open it from this branch). Proposed
+  hereby TRACKED in this file instead (per the review: do not open it from this branch). The
+  consolidation was opened in the tracker as ISSUE #55 (review round 11), including the
+  auditPath and config-note folds. Proposed
   ticket title when it is opened: "Consolidate the policy redaction + policy-line format —
   TOKEN_DIR_RE / ACTION_SUMMARY_MAX / DENIED|ASK line duplicated in extension/src/policy.ts
   (redactActionSummary + formatPolicyDeny/Ask), extension/src/policyhook.ts (redactSummary, its
@@ -382,3 +384,26 @@ One line each: `YYYY-MM-DD — decision — why — alternatives considered`.
   Until then the three copies are kept in lockstep by the unit pins in both layers plus the
   smoke's line-format greps; SF2 above moved one shape (store substitution) into the canonical
   policy.ts home rather than adding a fourth copy.
+- 2026-11-14 — P3 review round-11 fixes (one must-fix, two should-fixes). (1) MUST-FIX:
+  `--force-create` — git's documented long form of `switch -C`, i.e. a ticket-listed
+  "-B-style ref write" — rode the checkout|switch scan's generic `--*)` ignore arm and
+  bypassed the shim entirely (reproduced: `git switch --force-create victim` in the
+  secondary repo exited 0, ref rewritten, no policy line, no audit). Fixed by matching the
+  exact flag in the scan BEFORE the generic long-flag arm; `--force-create*`/`=` forms do
+  not exist in git's grammar, so the exact match is complete; over-matching it in the
+  checkout scan as well is harmless (over-consult evaluates to ALLOW on self). (2) SF:
+  `push --follow-tags` publishes all tags reachable from the pushed refs but never set
+  tags=1, so the §6 tag-push ASK was silently skipped (reproduced: it pushed clean). It
+  joins the tag set exactly like `--tags`/`-t`; `--no-follow-tags` is not a match. (3) SF:
+  `shim_audit_fallback` hard-coded `${MULTIPI_HOME:-$HOME/.multipi}/<repo>/logs`, ignoring
+  the configured `logs_dir`/state-dir overrides. It now reads the configured `logs_dir`
+  from the installed checkout's `.devloop.json` and resolves it with common.sh's own
+  resolvers (`dl_resolve` against the main root, `dl_canonical`) — the same rule as
+  `dl_logs_dir`. The shim deliberately does not call `dl_load_config`: that helper runs
+  bare `git rev-parse`, which would re-enter the shimmed binary — so `DL_ROOT` is set
+  locally for the resolver call only. Default stands when common.sh or the key is absent
+  (that path fails closed as a deny anyway). Alternatives considered: stating the
+  limitation in the header (weaker — the audit then lies about where it logged), and
+  duplicating the logs_dir rule by hand (adds a fourth resolution copy — the anti-pattern
+  #55 exists to remove). (4) Housekeeping per the review: the park entry above now names
+  the opened consolidation ticket, issue #55.
