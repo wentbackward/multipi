@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # policy.sh — the operator-facing surface of the permission policy (spec
-# 2026-11-09-multipi-permission-policy.md §8). ONE EVALUATOR: every subcommand
-# imports loadPolicy/evaluate from the extension's policy.ts (the doctor's
-# same candidates), so what you see here is what the hook decides. The policy
-# is read from the MAIN worktree root — a checkout may be a linked worktree,
-# and the config plus permissions.json live in the main tree.
+# 2026-11-09-multipi-permission-policy.md §8). ONE EVALUATOR: every
+# evaluator-using subcommand (show, explain — audit tails the log, it never
+# invokes the evaluator) imports loadPolicy/evaluate from the extension's
+# policy.ts (the doctor's same candidates), so what you see here is what the
+# hook decides. The policy is read from the MAIN worktree root — a checkout
+# may be a linked worktree, and the config plus permissions.json live in the
+# main tree.
 #
 #   policy.sh show             render the EFFECTIVE policy: load state, knobs,
 #                              the computed additionalDirectories, rules grouped
@@ -32,7 +34,8 @@
 # Exit codes (PINNED — parsers key off these):
 #   0  the command ran and rendered (any verdict, any policy state)
 #   1  the evaluator is unreachable (no node, no evaluator source, node crashed)
-#   2  usage
+#   2  usage/config (bad invocation, or no usable dev-loop project — not a git
+#      repository or no config; the shared dl_die code, as in the sibling scripts)
 set -u
 scripts_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
@@ -63,6 +66,9 @@ command -v node >/dev/null 2>&1 || { echo "policy.sh: node not found (the evalua
 run_eval() {
   local mode=$1 err rc first
   err=$(mktemp)
+  # The EXIT trap owns the scratch file until the normal path resets it (the doctor's
+  # policy-report pattern): a hard TERM/INT mid-import must not leak it.
+  trap 'rm -f "$err"' EXIT
   EVAL_JSON=$(
     POLICY_SRC=$policy_src POLICY_ROOT=$DL_ROOT POLICY_MODE=$mode POLICY_CMD=${2-} node --input-type=module -e '
 const { loadPolicy, evaluate } = await import(process.env.POLICY_SRC + "/policy.ts");
@@ -83,16 +89,18 @@ process.stdout.write(JSON.stringify(out));
     first=$(head -n 1 "$err")
     echo "policy.sh: evaluator failed${first:+: $first}" >&2
     rm -f "$err"
+    trap - EXIT
     return 1
   fi
   rm -f "$err"
+  trap - EXIT
   return 0
 }
 
 # audit_ts_epoch LINE → epoch seconds on stdout, EMPTY when unparseable (the caller
 # treats empty as "keep the line" — evidence is never dropped by the reader).
 audit_ts_epoch() {
-  local ts
+  local ts iso_shape
   ts=$(json_get ts <<<"$1")
   [ -n "$ts" ] || return 0
   case $ts in
@@ -103,12 +111,14 @@ audit_ts_epoch() {
       return 0
       ;;
   esac
-  # ISO-8601: only ISO-shaped values reach date (a free-form date -d would happily
-  # parse relative phrases like "30 seconds" as a timestamp). The trailing - is a
-  # literal in the class (a mid-class - would form a range).
-  case $ts in
-    *[!0-9T:.Z-]*) return 0 ;;
-  esac
+  # ISO-8601: only a FULL date+time shape reaches date. A bare time ("12:00") or a
+  # bare date parses on GNU `date -d` (as today) and is rejected by BSD — a
+  # platform coin-flip on malformed ts — and a free-form date -d would happily
+  # parse relative phrases like "30 seconds" as a timestamp. The writer emits
+  # full-second Z stamps; an offset (±HH:MM) is accepted as ISO. Anything else
+  # stays "unparseable" — the line is kept (evidence is never dropped).
+  iso_shape='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[-+][0-9]{2}:?[0-9]{2})?$'
+  [[ $ts =~ $iso_shape ]] || return 0
   # GNU date first, then the BSD/macOS spelling.
   date -u -d "$ts" +%s 2>/dev/null && return 0
   date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null && return 0
@@ -192,6 +202,8 @@ cmd_audit() {
     case $since in
       '' | *[!0-9]*) usage ;;
     esac
+    since=$(( 10#$since )) # decimal: a leading-zero value must not hit octal math
+    [ "$since" -gt 0 ] || usage # "positive integer" — a 0-second window is meaningless
   fi
   log="$(dl_logs_dir)/policy-audit.jsonl"
   if [ ! -f "$log" ]; then
