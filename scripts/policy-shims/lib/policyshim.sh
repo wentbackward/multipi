@@ -373,6 +373,9 @@ shim_audit_fallback() { # shim_audit_fallback RULEID VERDICT SUMMARY
       # MAIN root). The shim deliberately does not dl_load_config — its helpers call bare
       # `git`, which would re-enter the shimmed binary — so set the resolver context
       # locally for this call only.
+      # dl_resolve/dl_canonical read DL_ROOT from the CALLER's scope (dynamic scope, no
+      # subshell) — this local assignment IS the mechanism, hence the suppression.
+      # shellcheck disable=SC2034
       local DL_ROOT=$main
       logs=$(dl_canonical "$(dl_resolve "$configured")")
     fi
