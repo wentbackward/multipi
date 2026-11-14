@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { redactActionSummary, ACTION_SUMMARY_MAX } from "../../extension/src/policy.ts";
 
@@ -121,5 +123,88 @@ test("a C-locale caller gets the same output, always valid UTF-8 (locale-pinned 
 		const ts = redactActionSummary(input, null);
 		const sh = shimRedact(input, { LC_ALL: "C", LANG: "C" });
 		assert.equal(sh, ts, `${name}: C-locale shell ${JSON.stringify(sh)} !== TS ${JSON.stringify(ts)}`);
+	}
+});
+
+/**
+ * #55 review round-2 SF1: the UTF-8 locale probe (`_shim_pick_utf8_locale`) forks 1-2
+ * child bashes. It is only CONSUMED by the truncation branch of `_shim_redact_summary`
+ * (the driver-broken fallback path), but every git/gh shim invocation SOURCES the lib —
+ * so probing at source time paid the fork on the hot path for a feature the happy path
+ * never reaches. These pins instrument `bash` on PATH with a recording wrapper: every
+ * child bash invoked with the é probe ARGUMENT appends one marker to PROBE_LOG, and the
+ * test counts probe forks. Offline: the wrapper execs the system bash; the only side
+ * effect is temp files under os.tmpdir (removed on exit).
+ */
+function findRealBash(): string {
+	for (const p of ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]) {
+		if (fs.existsSync(p)) return p;
+	}
+	assert.fail("no system bash for probe instrumentation");
+}
+
+function probeContext(): { env: NodeJS.ProcessEnv; count: () => number; cleanup: () => void } {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "shim-probe-"));
+	const log = path.join(dir, "probes");
+	// POSIX sh so the wrapper itself needs no bash. The marker fires only for the probe
+	// argument — the single character é, delivered via PROBE_CHAR so this file carries
+	// no shell octal/quote escaping. The bound-decision child (argument = the summary
+	// being cut) never matches.
+	const wrapper = [
+		"#!/bin/sh",
+		'if [ -n "${PROBE_LOG:-}" ] && [ -n "${PROBE_CHAR:-}" ] && [ -n "${BASH_REAL:-}" ]; then',
+		'  for a in "$@"; do',
+		'    [ "$a" = "$PROBE_CHAR" ] && printf x >> "$PROBE_LOG"',
+		"  done",
+		"fi",
+		'exec "${BASH_REAL}" "$@"',
+		"",
+	].join("\n");
+	fs.writeFileSync(path.join(dir, "bash"), wrapper, { mode: 0o755 });
+	return {
+		env: {
+			...process.env,
+			PATH: `${dir}${path.delimiter}${process.env.PATH ?? ""}`,
+			PROBE_LOG: log,
+			PROBE_CHAR: "\u00e9",
+			BASH_REAL: findRealBash(),
+		},
+		count: () => (fs.existsSync(log) ? (fs.readFileSync(log, "utf8").match(/x/g) ?? []).length : 0),
+		cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+	};
+}
+
+function runShim(ctx: { env: NodeJS.ProcessEnv }, script: string): void {
+	execFileSync("bash", ["-c", script], { cwd: ROOT, encoding: "buffer", env: ctx.env });
+}
+
+test("the locale probe is NOT forked at source time (lazy eval, #55 review round-2 SF1)", () => {
+	const ctx = probeContext();
+	try {
+		runShim(ctx, ". ./scripts/policy-shims/lib/policyshim.sh; :");
+		assert.equal(ctx.count(), 0, "sourcing the shim lib must not fork the locale probe");
+	} finally {
+		ctx.cleanup();
+	}
+});
+
+test("the locale probe is lazy AND cached: sub-bound summaries never probe; once the bound is needed, one probe per process despite repeat calls and re-sources", () => {
+	const ctx = probeContext();
+	const src = ". ./scripts/policy-shims/lib/policyshim.sh;";
+	try {
+		// Fresh process, under the bound: the probe is never needed, never paid.
+		runShim(ctx, `${src} _shim_redact_summary "short summary"; _shim_redact_summary "another"; :`);
+		assert.equal(ctx.count(), 0, "sub-bound summaries must not fork the probe");
+		// Fresh process, THREE over-bound calls plus a mid-flight RE-SOURCE of the lib:
+		// a correct implementation probes ONCE here (1-2 candidate attempts), never
+		// three times (no per-call re-probe) and never on the re-source (no source-time
+		// probe). A count >= 3 would expose either regression.
+		runShim(ctx, `${src} long=$(printf 'a%.0s' {1..161}); _shim_redact_summary "$long"; ${src} _shim_redact_summary "$long"; _shim_redact_summary "$long"; :`);
+		assert.ok(
+			ctx.count() >= 1 && ctx.count() <= 2,
+			`expected one probe (1-2 candidate attempts) for three over-bound calls + a re-source in one process, got ${ctx.count()}`,
+		);
+	} finally {
+		ctx.cleanup();
 	}
 });
