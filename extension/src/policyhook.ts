@@ -64,7 +64,7 @@ export function policyHash(policy: Policy): string {
  * SINGLE path target for read/edit/write, in the LITERAL form the model wrote (no `~`
  * expansion, no cwd resolution — the evaluator owns `./` normalization, the hook owns honesty).
  * `gitTargets`/`trusted` are deliberately ABSENT at the hook layer: they need the P3 shim's
- * rev-parse ground truth and PPID/env-marker proof respectively — never derived here.
+ * rev-parse ground truth and PPID-ancestry proof respectively — never derived here.
  */
 export function buildPolicyContext(toolName: string, input: Record<string, unknown>, actor: string): PolicyContext {
 	const tool = toolName.toLowerCase(); // pi names tools lowercase; the evaluator keys off the same value

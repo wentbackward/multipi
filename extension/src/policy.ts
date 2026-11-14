@@ -17,7 +17,7 @@
 // only TOP-LEVEL command tokens are inspected (no env-assignment prefixes, no cwd — a relative
 // install target resolves against the repo ROOT, and if that is not certain the answer is deny,
 // never guess). `gitTargets` must be RESOLVED main-repo roots (the P3 shim computes them from
-// rev-parse ground truth); the `trusted` flag must be backed by the shim's PPID/env-marker proof
+// rev-parse ground truth); the `trusted` flag must be backed by the shim's PPID-ancestry proof
 // of script ancestry — a bare claim here is not verified, and mentioning a script path in a
 // command never confers trust. "Self" is prefix CONTAINMENT under scopeRoot: a git repo
 // cloned INSIDE the repo tree (vendored clone, submodule) classifies as self by design —
@@ -116,8 +116,9 @@ export interface PolicyContext {
 	gitTagMutation?: boolean;
 	/** gh subcommand classification the P3 shim reads from the REAL argv (spec §4-L2). */
 	ghAction?: "repo-delete" | "pr-merge";
-	/** Set ONLY on the shim's PPID/env-marker proof that the call comes from an installed
-	 * script's own process tree (spec §5). Lifts string rules and the §5-exemptible Layer-2
+	/** Set ONLY on the shim's PPID-ancestry proof (a /proc parent-chain walk to the installed
+	 * loop script — an env-marker alternative was rejected as forgeable) that the call comes
+	 * from an installed script's own process tree (spec §5). Lifts string rules and the §5-exemptible Layer-2
 	 * classes; NEVER the repo-scope or repo-delete rules. */
 	trusted?: boolean;
 }
