@@ -2716,6 +2716,38 @@ grep -qxF "ARGV: [status] [--porcelain]" "$work/p3-gitlog/argv.log" &&
 out=$(PATH="$PSH:$PSH:$PATH" git status --porcelain 2>&1); rc=$?
 expect "P3 smoke: a doubled shim dir does not recurse" "0" "$rc"
 
+# 11b. worktree common-dir spellings (P3 review round 10): the resolver must also accept the
+#      version-dependent <main>/.git/worktrees/<name> spelling (strip the suffix, VERIFY the
+#      survivor — unverified stays empty, the caller denies) besides the main .git spelling
+#      (verified on git 2.53). A STUBBED real git pins every branch host-version-independently.
+STUBBIN="$work/p3-stubbin"
+mkdir -p "$STUBBIN"
+p3_stubgit() { # p3_stubgit COMMON BARE — stand-in real git answering the resolver's two probes
+  cat >"$STUBBIN/git" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *is-bare-repository*) printf '%s\n' "$2" ;;
+  *) printf '%s\n' "$1" ;;
+esac
+EOF
+  chmod +x "$STUBBIN/git"
+}
+p3_resolved() { # the installed helper, sourced the way the shims source it
+  ( shim_dir="$PSH"; . "$PSH/lib/policyshim.sh"; shim_resolve_repo "$STUBBIN/git" "$work/project" )
+}
+p3_stubgit "$work/project/.git" false
+expect "P3 shim: the main .git spelling of --git-common-dir resolves to the main root" \
+  "$work/project" "$(p3_resolved)"
+p3_stubgit "$work/project/.git/worktrees/wt" false
+expect "P3 shim: the worktrees spelling (<main>/.git/worktrees/<name>) resolves to the same main root" \
+  "$work/project" "$(p3_resolved)"
+p3_stubgit "$work/p3-nowhere/.git/worktrees/wt" false
+expect "P3 shim: an UNVERIFIED worktrees survivor resolves to EMPTY (deny, never guess)" \
+  "" "$(p3_resolved)"
+p3_stubgit "$work/project/.git" true
+expect "P3 shim: a bare repository still resolves to the .git dir itself" \
+  "$work/project/.git" "$(p3_resolved)"
+
 # 12. a whitelisted secondary ASKS (the consent path)
 cd "$work/sec" && echo s >s.txt && git add s.txt
 cd "$work/project"

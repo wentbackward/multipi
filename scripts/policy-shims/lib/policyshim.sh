@@ -10,6 +10,9 @@
 # Exit codes (pinned; DECISIONS 2026-11-10): 126 = policy deny or ask (nothing executed —
 # phase-1 ask is a block; token consumption arrives with P6); 127 = the real binary cannot
 # be located outside the shim dir (broken install). Any other exit is the real binary's own.
+#
+# Requires git >= 2.36 (rev-parse --path-format=absolute). On older git the probe errors,
+# resolution stays EMPTY and the shim denies the mutation (fail closed, never misresolves).
 
 # Set by the caller before sourcing completes: shim_dir (the policy-shims dir, -P resolved).
 # shim_dir is the CALLER's variable (dot-sourced context): SC2154 is suppressed file-wide.
@@ -26,6 +29,9 @@ shim_init() {
   SIM_SCRIPTS_DIR=$(cd "$SIM_SHIM_DIR/.." 2>/dev/null && pwd -P)
   if [ -n "$SIM_SCRIPTS_DIR" ] && [ -f "$SIM_SCRIPTS_DIR/lib/common.sh" ]; then
     # shellcheck source=lib/common.sh
+    # The path is built from the -P-resolved scripts dir (presence checked above); the hint
+    # cannot be followed CWD-relative in the gate's input set, so the info is disabled:
+    # shellcheck disable=SC1091
     . "$SIM_SCRIPTS_DIR/lib/common.sh"
     SIM_HAVE_COMMON=1
     if [ -f "$SIM_INSTALL_ROOT/.devloop.json" ]; then
@@ -130,6 +136,18 @@ shim_resolve_repo() { # shim_resolve_repo REALGIT DIR
     [ -d "$common" ] && { printf '%s\n' "$common"; return 0; }
     return 0
   fi
+  case "$common" in
+    */.git/worktrees/*)
+      # Version-dependent git spells the linked-worktree common dir as
+      # <main>/.git/worktrees/<name>: strip the suffix and VERIFY the survivor —
+      # resolution stays empty (the caller denies) when it does not check out.
+      main_git="${common%/.git/worktrees/*}/.git"
+      if [ "$(basename "$main_git")" = ".git" ] && [ -d "$main_git" ]; then
+        printf '%s\n' "$(dirname "$main_git")"
+      fi
+      return 0
+      ;;
+  esac
   if [ "$(basename "$common")" = ".git" ] && [ -d "$common" ]; then
     printf '%s\n' "$(dirname "$common")"
   fi
