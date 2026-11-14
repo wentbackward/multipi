@@ -188,11 +188,16 @@ case "$sub" in
                                         # `--no-verify` used to feed its letters to the
                                         # f/t scanner and over-deny as force)
         -?*[-a-zA-Z]*)
-          # Short-flag CLUSTER: `-fu`, `-tf`, … parse char-by-char (git's grammar).
+          # Short-flag CLUSTER: `-fu`, `-tf`, … classify char-by-char (git's grammar).
           # `-f -u origin` and `-fu origin` are the SAME call: one spelling must not bypass.
-          for ch2 in $(printf '%s' "${a}" | tail -c +2 | fold -w1); do
-            case "$ch2" in f) force=1 ;; t) tags=1 ;; esac
-          done
+          # PURE-SHELL membership tests (round-13 should-fix, priority 1): the former
+          # `tail | fold` letter split shelled out to coreutils — under a coreutils-stripped
+          # PATH it emitted zero letters, `-fu` lost its force bit and the force push was
+          # UNDER-denied. The tests scan exactly the characters after the leading `-`
+          # (which can never match), so they are equivalent for push's short-flag
+          # alphabet and take zero externals (pinned: smoke 4b-2, dead tail/fold stubs).
+          [[ $a == *f* ]] && force=1
+          [[ $a == *t* ]] && tags=1
           ;;
         -*) : ;;
         *) positionals+=("$a") ;;
