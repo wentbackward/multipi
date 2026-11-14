@@ -313,23 +313,36 @@ test("session_start shim PATH idempotency is CANONICAL (round-13 should-fix): an
 	const alias = path.join(fx.dir, "shims-alias");
 	symlinkSync(shims, alias);
 	const canon = (p: string): string => { try { return realpathSync(path.resolve(p)); } catch { return path.resolve(p); } };
-	const countCanon = (): number => (process.env.PATH ?? "").split(path.delimiter).filter((e) => e && canon(e) === real).length;
+	// Count shims-dir entries resolving AGAINST fx.repo: that is the root the hook's
+	// own resolution uses while the session cwd is fx.repo (see fire below).
+	const countRepoCanon = (): number => (process.env.PATH ?? "").split(path.delimiter).filter(
+		(e) => e && canon(path.isAbsolute(e) ? e : path.join(fx.repo, e)) === real,
+	).length;
 	const fire = (): void => {
 		const { pi, hooks } = fakePi();
-		withCwd(fx.repo, () => devloopExtension(pi));
-		const ctx = { cwd: fx.repo, hasUI: false, mode: "rpc" } as never;
-		for (const h of hooks.filter((x) => x.name === "session_start")) h.fn({}, ctx);
+		// Round-14 test-validity fix: fire the session_start hooks INSIDE withCwd — the
+		// production shape. The hook resolves PATH entries against process.cwd(), so
+		// firing after withCwd restored the runner's cwd made the relative entry
+		// unrecognisable while the same wrong cwd kept the count from seeing the
+		// double-prepend: the old case 2 pinned nothing.
+		withCwd(fx.repo, () => {
+			devloopExtension(pi);
+			const ctx = { cwd: fx.repo, hasUI: false, mode: "rpc" } as never;
+			for (const h of hooks.filter((x) => x.name === "session_start")) h.fn({}, ctx);
+		});
 	};
 	try {
 		// Case 1: a symlink alias of the shims dir already leads PATH (surface A armed it;
 		// this session of surface B must recognise it, not prepend a second entry).
 		process.env.PATH = `${alias}:${saved}`;
 		fire();
-		assert.equal(countCanon(), 1, `the aliased entry must count as the shims dir, got: ${process.env.PATH}`);
+		assert.equal(countRepoCanon(), 1, `the aliased entry must count as the shims dir, got: ${process.env.PATH}`);
+		assert.equal(process.env.PATH, `${alias}:${saved}`, "the alias was recognised — PATH untouched, nothing prepended");
 		// Case 2: a cwd-relative spelling of the shims dir is the same dir too.
 		process.env.PATH = `scripts/policy-shims:${saved}`;
 		fire();
-		assert.equal(countCanon(), 1, `the relative entry must count as the shims dir, got: ${process.env.PATH}`);
+		assert.equal(countRepoCanon(), 1, `the relative entry must count as the shims dir, got: ${process.env.PATH}`);
+		assert.equal(process.env.PATH, `scripts/policy-shims:${saved}`, "the relative entry was recognised — PATH untouched, nothing prepended");
 	} finally {
 		process.env.PATH = saved;
 		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
