@@ -2536,6 +2536,29 @@ out=$(p3git push origin main: 2>&1); rc=$?
 expect "P3 smoke: deleting the base ref (main:) is denied as a base write" "126" "$rc"
 echo "$out" | grep -qF "DENIED policy:base-branch:" || fail "P3 smoke: the base-ref delete was not caught: $out"
 
+# 4f. --all / --branches (P3 review round 12): the implicit destination set is ALL local
+#     heads — it includes the base ref from ANY checked-out branch, while the no-refspec
+#     rule below the scan resolves only the CURRENT branch. Pinned FROM A TOPIC BRANCH,
+#     where the current-branch rule alone sees only the topic. Over-deny to the base class
+#     is the documented fail-safe direction (same as the wildcard-destination policy).
+snap_before=$(git -C "$work/origin.git" for-each-ref --format='%(refname) %(objectname)')
+git checkout -q feat/p3
+n0_wild=$(p3count '"ruleId":"policy:base-branch","verdict":"deny"')
+out=$(p3git push --all origin 2>&1); rc=$?
+expect "P3 smoke: 'git push --all origin' from a topic branch is denied with 126 (its destination set includes base)" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:base-branch:" && pass "P3 smoke: the --all push carries the base rule id" ||
+  fail "P3 smoke: the --all push was not caught by the base rule: $out"
+out=$(p3git push --branches origin 2>&1); rc=$?
+expect "P3 smoke: 'git push --branches origin' from a topic branch is denied with 126 too" "126" "$rc"
+echo "$out" | grep -qF "DENIED policy:base-branch:" && pass "P3 smoke: the --branches push carries the base rule id" ||
+  fail "P3 smoke: the --branches push was not caught by the base rule: $out"
+expect "P3 smoke: both wildcard-destination denies are audited" "$((n0_wild + 2))" \
+  "$(p3count '"ruleId":"policy:base-branch","verdict":"deny"')"
+snap_after=$(git -C "$work/origin.git" for-each-ref --format='%(refname) %(objectname)')
+[ "$snap_before" = "$snap_after" ] && pass "P3 smoke: no ref (in particular the base) ever landed on the remote" ||
+  fail "P3 smoke: a ref landed on the remote despite the denies: $(diff <(printf '%s\n' "$snap_before") <(printf '%s\n' "$snap_after") | head -5)"
+git checkout -q main
+
 # 4b. spelling-variant holes (P3 review round 2): attached/clustered short flags must
 #     not bypass a rule class — `-fu` is the SAME call as `-f -u`, and `-Bname` is the
 #     canonical attached spelling of the ref-writing `-B name`.
@@ -2878,10 +2901,40 @@ mv .devloop.json.arm .devloop.json
 expect "P3 smoke: without a configured logs_dir the fallback line uses the default state dir" "1" \
   "$(p3count 'policy:shim-error')"
 
+# 15d. fail-closed stderr carries EXACTLY ONE line even when coreutils is missing
+#      (P3 review round 12): the fallback audit's $(basename …) / $(date -u …)
+#      substitutions are guarded — with them absent from PATH the command-not-found
+#      noise must not leak onto stderr and the fallback line must still land. Driven
+#      directly, the way 15c drives the function; the block line is emitted by the
+#      caller (shim_fail_closed), so the subshell plays out audit + block itself.
+P3_NOCU="$work/p3-nocu-bin"
+mkdir -p "$P3_NOCU"
+for cu in bash pwd jq python3 sed tr grep cat awk dirname sh; do
+  src=$(command -v "$cu") && ln -sf "$src" "$P3_NOCU/$cu"
+done
+p3no_out=$(P3_PSH="$PSH" P3_MH="$work/p3-nocu-home" PATH="$P3_NOCU" bash -c '
+  shim_dir="$P3_PSH"; . "$shim_dir/lib/policyshim.sh"; shim_init
+  MULTIPI_HOME="$P3_MH" shim_audit_fallback "policy:shim-error" "deny" "commit -m x"
+  shim_block "DENIED policy:shim-error: the policy evaluator could not be consulted (missing node/driver?)"' 2>&1); p3no_rc=$?
+expect "P3 smoke: the fail-closed path exits 126 with coreutils missing" "126" "$p3no_rc"
+p3no_lines=$(printf '%s\n' "$p3no_out" | sed -n '/./p' | wc -l | tr -d '[:space:]')
+expect "P3 smoke: fail-closed stderr carries exactly one line (no command-not-found noise)" "1" "$p3no_lines"
+echo "$p3no_out" | grep -qF "DENIED policy:shim-error:" && pass "P3 smoke: the single line is the block line" ||
+  fail "P3 smoke: the single fail-closed line is not the block line: $p3no_out"
+[ -f "$work/p3-nocu-home/project/logs/policy-audit.jsonl" ] && grep -qF '"ruleId":"policy:shim-error"' "$work/p3-nocu-home/project/logs/policy-audit.jsonl" && \
+  pass "P3 smoke: the fallback audit line still lands with coreutils missing (pure-shell basename)" || \
+  fail "P3 smoke: the fallback audit line was lost: $(ls "$work/p3-nocu-home/project/logs" 2>&1)"
+# Control: the guard does not degrade the happy path — present coreutils yield a real ts.
+( shim_dir="$PSH"; . "$PSH/lib/policyshim.sh"; shim_init
+  shim_audit_fallback "policy:shim-error" "deny" "commit -m ctrl" )
+grep -o '"ts":"[^"]*"' "$P3_AUDIT" | tail -1 | grep -qE '"ts":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"' && \
+  pass "P3 smoke: with coreutils present the fallback line still carries a real UTC ts" || \
+  fail "P3 smoke: the guarded fallback degraded the timestamp"
+
 # Teardown: leave the fixture the way the prior sections left it.
 mkcfg ''
 rm -f permissions.json scripts/p3-push-main.sh
-rm -rf "$work/p3-foreign" "$work/p3-nr" "$work/p3-nogit" "$work/p3-gitlog" "$work/sec" "$work/p3-stubbin"
+rm -rf "$work/p3-foreign" "$work/p3-nr" "$work/p3-nogit" "$work/p3-gitlog" "$work/sec" "$work/p3-stubbin" "$work/p3-nocu-bin" "$work/p3-nocu-home"
 git reset -q --hard HEAD 2>/dev/null || true
 git checkout -q main 2>/dev/null || true
 git branch -q -D feat/p3 2>/dev/null || true
