@@ -17,8 +17,13 @@
 // Fixed verdict order in attemptConsume (pinned by tests/unit/approvals.test.ts):
 // no-token → malformed → bad-hmac → expired → foreign-rule → scope-mismatch → pass.
 // Only PASS consumes; every deny LEAVES THE FILE IN PLACE (it is evidence for the
-// operator's inspection). Orphan `<name>.consuming-*` residue from a crash between
-// rename and unlink is swept best-effort at the start of every attempt.
+// operator's inspection). A failed consume rename is an out-of-band deny
+// (`io-error`, or `no-token` when the file vanished first — the lost rename race):
+// the module contract is one audit line per attempt, pass or deny; consumption never
+// throws. Crash residue is swept
+// best-effort at the start of every attempt: orphan `<name>.consuming-*` names from a
+// consume that died between rename and unlink, and hidden `<name>.mint-*` temps from
+// a mint that died between write and rename.
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
 	appendFileSync,
@@ -149,7 +154,7 @@ export function scopesMatch(storedScope: string, actionScope?: string): boolean 
 	return s === a;
 }
 
-export type ConsumeDenyReason = "no-token" | "malformed" | "bad-hmac" | "expired" | "foreign-rule" | "scope-mismatch";
+export type ConsumeDenyReason = "no-token" | "malformed" | "bad-hmac" | "expired" | "foreign-rule" | "scope-mismatch" | "io-error";
 
 /** One audit line per consume outcome (spec §8: JSONL, bounded, no secrets/store paths).
  * The caller persists it (appendAudit / the P2 audit writer); the module returns it. */
@@ -191,9 +196,12 @@ export interface ConsumeOutcome {
 }
 
 /** Sweep crash-residue: `<anything>.consuming-<digits>-<hex>` names from a consume that
- * died between rename and unlink. Best-effort: a failed unlink is not an error here —
- * the NEXT attempt sweeps again. Hidden files are never touched. */
-function sweepConsumingResidue(tokenDir: string): void {
+ * died between rename and unlink, and hidden `.<name>.mint-<hex>` temps from a mint
+ * that died between write and rename. Best-effort: a failed unlink is not an error
+ * here — the NEXT attempt sweeps again. Only those two known transient shapes are
+ * touched; every other file (including all other hidden files) is never touched. */
+const RESIDUE_PATTERNS = [/\.consuming-\d+-[0-9a-f]+$/, /^\.[A-Za-z0-9._-]+\.mint-[0-9a-f]{8}$/];
+function sweepResidue(tokenDir: string): void {
 	let names: string[];
 	try {
 		names = readdirSync(tokenDir);
@@ -201,7 +209,7 @@ function sweepConsumingResidue(tokenDir: string): void {
 		return;
 	}
 	for (const n of names) {
-		if (/\.consuming-\d+-[0-9a-f]+$/.test(n)) {
+		if (RESIDUE_PATTERNS.some((re) => re.test(n))) {
 			try {
 				unlinkSync(path.join(tokenDir, n));
 			} catch {
@@ -211,12 +219,33 @@ function sweepConsumingResidue(tokenDir: string): void {
 	}
 }
 
+/** Atomic singleshot consumption of ONE token file (rename-then-unlink; a rename within
+ * one directory is atomic, a crash in the gap orphans a `.consuming-*` name that the
+ * next sweep removes). Never throws: a file that vanished before the rename is the lost
+ * rename race → `no-token`; any other fs failure (e.g. unwritable dir) → `io-error`.
+ * Both leave the file exactly as found — the caller turns each into a deny verdict. */
+export function consumeTokenFile(file: string): "consumed" | "no-token" | "io-error" {
+	const residue = `${file}.consuming-${process.pid}-${randomBytes(4).toString("hex")}`;
+	try {
+		renameSync(file, residue);
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException).code === "ENOENT") return "no-token";
+		return "io-error";
+	}
+	try {
+		unlinkSync(residue);
+	} catch {
+		// the next attempt's sweep finishes the job
+	}
+	return "consumed";
+}
+
 /** THE consume entry (P2 hook / P3 shims / smokes all call this): verify a live token
  * for the rule, atomically consume it, and return the verdict + audit entry.
  * See the module header for the fixed verdict order and the left-in-place evidence rule. */
 export function attemptConsume(o: ConsumeOptions): ConsumeOutcome {
 	const now = o.now ?? Date.now();
-	sweepConsumingResidue(o.tokenDir);
+	sweepResidue(o.tokenDir);
 	const audit = (kind: "consumed" | "deny", reason?: ConsumeDenyReason): ApprovalAudit => ({
 		ts: now,
 		kind,
@@ -239,15 +268,9 @@ export function attemptConsume(o: ConsumeOptions): ConsumeOutcome {
 	if (!v.ok) return deny(v.reason);
 	if (v.token.ruleId !== o.ruleId) return deny("foreign-rule");
 	if (!scopesMatch(v.token.targetScope, o.actionScope)) return deny("scope-mismatch");
-	// SINGESHOT consumption, atomic by rename-then-unlink (rename within one directory is
-	// atomic; a crash in the gap orphans a .consuming-* name that the next sweep removes).
-	const residue = `${file}.consuming-${process.pid}-${randomBytes(4).toString("hex")}`;
-	renameSync(file, residue);
-	try {
-		unlinkSync(residue);
-	} catch {
-		// the next attempt's sweep finishes the job
-	}
+	const consumed = consumeTokenFile(file);
+	if (consumed === "no-token") return deny("no-token");
+	if (consumed === "io-error") return deny("io-error");
 	return { verdict: "pass", ruleId: o.ruleId, audit: audit("consumed") };
 }
 

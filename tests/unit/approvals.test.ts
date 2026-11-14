@@ -216,21 +216,27 @@ test("consumeTokenFile: a rename it cannot perform (unwritable token dir) is rep
 	const f = fx(t);
 	const p = mintTo(f, RULE);
 	chmodSync(f.tokenDir, 0o555); // stat- and readable, unwritable
-	t.after(() => chmodSync(f.tokenDir, 0o755));
-	assert.equal(consumeTokenFile(p), "io-error", "a foreign fs failure is io-error, not no-token");
-	assert.ok(existsSync(p), "an io-error consume leaves the token in place for inspection");
+	try {
+		assert.equal(consumeTokenFile(p), "io-error", "a foreign fs failure is io-error, not no-token");
+		assert.ok(existsSync(p), "an io-error consume leaves the token in place for inspection");
+	} finally {
+		chmodSync(f.tokenDir, 0o755);
+	}
 });
 
 test("attemptConsume maps a failed consume rename to a deny (io-error) with an audit line — never an uncaught throw", (t) => {
 	const f = fx(t);
 	const p = mintTo(f, RULE);
 	chmodSync(f.tokenDir, 0o555);
-	t.after(() => chmodSync(f.tokenDir, 0o755));
-	const out = attemptConsume({ tokenDir: f.tokenDir, ruleId: RULE, secret: SECRET, now: T0 + MIN });
-	assert.equal(out.verdict, "deny");
-	assert.equal(out.reason, "io-error");
-	assert.equal(out.audit.kind, "deny");
-	assert.ok(existsSync(p), "the token is left in place for inspection");
+	try {
+		const out = attemptConsume({ tokenDir: f.tokenDir, ruleId: RULE, secret: SECRET, now: T0 + MIN });
+		assert.equal(out.verdict, "deny");
+		assert.equal(out.reason, "io-error");
+		assert.equal(out.audit.kind, "deny");
+		assert.ok(existsSync(p), "the token is left in place for inspection");
+	} finally {
+		chmodSync(f.tokenDir, 0o755);
+	}
 });
 
 test("two CONCURRENT consumers of one token: exactly one passes, the loser denies no-token, neither throws", async (t) => {
