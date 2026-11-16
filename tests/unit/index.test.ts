@@ -3,7 +3,8 @@ import test from "node:test";
 import path from "node:path";
 import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, mkdirSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import devloopExtension, { livenessWriteAttempts } from "../../extension/index.ts";
+import { fileURLToPath } from "node:url";
+import devloopExtension, { livenessWriteAttempts, resolveWatchScript } from "../../extension/index.ts";
 import { GUARD_REFUSAL } from "../../extension/src/guard.ts";
 import { loadState, sidecarPath, writeState } from "../../extension/src/liveness.ts";
 import { BASE_CONFIG, makeFixture } from "../fixtures.ts";
@@ -96,6 +97,34 @@ test("extension registers 6 tools, the full orchestrator hook set and the /devlo
 		else process.env.MULTIPI_HOME = savedHome;
 		rmSync(home, { recursive: true, force: true });
 	}
+});
+
+// --- watchdog script anchor (round-2 review item 1) ---------------------------------
+// The auto-start must find the repo's vendored scripts/; when it is missing (a session not
+// rooted in an installed loop) the module-relative fallback covers BOTH loaded layouts:
+// the source tree (extension/index.ts → ../scripts) and the installed mirror
+// (.pi/extensions/multipi-devloop/index.ts → ../../scripts). Neither depth alone is right;
+// the parent-of-the-repo (a bare ../../ from the source tree) must never win.
+
+test("resolveWatchScript: the repo's vendored copy wins, wherever the module was loaded from", () => {
+	const root = mkdtempSync(path.join(tmpdir(), "multipi-watch-root-"));
+	try {
+		mkdirSync(path.join(root, "scripts"));
+		writeFileSync(path.join(root, "scripts", "multipi-watch.sh"), "#!/usr/bin/env bash\n");
+		assert.equal(resolveWatchScript(root), path.join(root, "scripts", "multipi-watch.sh"));
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("resolveWatchScript: the module-relative fallback lands in the REPO's scripts dir, never the repo parent's", () => {
+	const empty = mkdtempSync(path.join(tmpdir(), "multipi-watch-empty-"));
+	const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+	try {
+		const resolved = resolveWatchScript(empty);
+		assert.ok(resolved, "the fallback found a packaged multipi-watch.sh");
+		assert.ok(existsSync(resolved!), "the fallback resolves to a real file");
+		assert.equal(path.resolve(path.dirname(path.dirname(resolved!))), ROOT,
+			"the fallback script sits in this repo's scripts/ — not the repo parent's");
+	} finally { rmSync(empty, { recursive: true, force: true }); }
 });
 
 // --- P2: the policy hook, wired end to end for the orchestrator --------------
