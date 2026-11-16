@@ -3354,6 +3354,19 @@ PCOUNT=$(tr -d '\r' <"$work/lv-pty.out" 2>/dev/null | grep -cxF 'hello from inte
 [ "$PCOUNT" = "1" ] && pass "the injected line landed in the captured pty exactly once (the dry-run wrote nothing)" || \
   fail "pty capture: line-count=$PCOUNT typescript=[$(tr '\n' '|' <"$work/lv-pty.out" 2>/dev/null | head -c 300)]"
 expect "interrupts.log: the real injection is logged with dry=0" "1" "$(grep -cF 'dry=0' "$lvstate/interrupts.log" 2>/dev/null)"
+# One line per event: a multiline + oversize message must stay ONE log line
+# (flattened to spaces, capped at 4096 chars — the log's contract, pinned).
+LV_BEFORE_LINES=$(wc -l <"$lvstate/interrupts.log")
+LV_OVERRUN=$(printf 'x%.0s' $(seq 1 6000))
+lvintr 1 "$(printf 'alpha\nbeta\tgamma\r\n%s' "$LV_OVERRUN")" MULTIPI_INTERRUPT_TTY="$PTS"
+LV_AFTER_LINES=$(wc -l <"$lvstate/interrupts.log")
+[ "$LV_AFTER_LINES" = "$((LV_BEFORE_LINES + 1))" ] && pass "interrupts.log: a multiline/oversize message appends exactly ONE line" || \
+  fail "interrupts.log line growth: before=$LV_BEFORE_LINES after=$LV_AFTER_LINES"
+tail -n1 "$lvstate/interrupts.log" | grep -qF "alpha beta gamma" && pass "interrupts.log: the message is flattened to a single line" || \
+  fail "interrupts.log not flattened: $(tail -n1 "$lvstate/interrupts.log" | head -c 120)"
+LV_MSGLEN=$(tail -n1 "$lvstate/interrupts.log" | sed 's/^.*msg=//' | wc -c)
+[ "$LV_MSGLEN" -le 4097 ] && pass "interrupts.log: the message is capped at 4096 chars" || \
+  fail "interrupts.log message too long: ${LV_MSGLEN} bytes"
 bash -c 'sleep 20' </dev/null & BGPID=$!
 sleep 0.2
 mkstate active 1000 0 0 "$BGPID"

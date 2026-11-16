@@ -125,9 +125,13 @@ lv_no_tty_fallback() {
 }
 
 # lv_interrupt_log DRY(0|1) PID MSG: one auditable line in <state>/interrupts.log.
+# ONE LINE PER EVENT is this log's contract (operators and the loop grep it line-wise):
+# the message is flattened to a single line (CR/LF/TAB -> space) and capped at 4096 chars.
 lv_interrupt_log() {
   mkdir -p "$DL_STATE" 2>/dev/null || return 0
-  printf '%s pid=%s dry=%s msg=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "$1" "$3" >>"$DL_STATE/interrupts.log" 2>/dev/null || true
+  local oneline
+  oneline=$(printf '%s' "$3" | tr '\r\n\t' '   ' | cut -c1-4096)
+  printf '%s pid=%s dry=%s msg=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "$1" "$oneline" >>"$DL_STATE/interrupts.log" 2>/dev/null || true
 }
 
 # lv_last_wake_ts LOG: the timestamp (ms) of the last WAKE/WEDGE entry (0 when none).
