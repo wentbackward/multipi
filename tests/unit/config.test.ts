@@ -278,3 +278,28 @@ test("loadConfig: token_ttl_minutes falls back to 10 when missing, non-numeric o
 		} finally { fx.cleanup(); }
 	}
 });
+
+// --- orchestrator block (spec 2026-11-15 §2): the tool-call bound ------------
+
+test("loadConfig: orchestrator.tool_timeout_minutes absent ⇒ 45 (always present after parsing)", () => {
+	const fx = makeFixture('{}');
+	try {
+		assert.equal(loadConfig(fx.repo)?.orchestrator?.toolTimeoutMinutes, 45);
+	} finally { fx.cleanup(); }
+});
+
+test("loadConfig: orchestrator.tool_timeout_minutes honours an explicit positive value", () => {
+	const fx = makeFixture('{"orchestrator": {"tool_timeout_minutes": 12}}');
+	try {
+		assert.equal(loadConfig(fx.repo)?.orchestrator?.toolTimeoutMinutes, 12);
+	} finally { fx.cleanup(); }
+});
+
+test("loadConfig: a non-positive or non-numeric tool_timeout_minutes falls back to 45 (never a bogus bound)", () => {
+	for (const bad of ['{"orchestrator": {}}', '{"orchestrator": {"tool_timeout_minutes": 0}}', '{"orchestrator": {"tool_timeout_minutes": -3}}', '{"orchestrator": {"tool_timeout_minutes": "45"}}', '{"orchestrator": "weird"}']) {
+		const fx = makeFixture(bad);
+		try {
+			assert.equal(loadConfig(fx.repo)?.orchestrator?.toolTimeoutMinutes, 45, bad);
+		} finally { fx.cleanup(); }
+	}
+});

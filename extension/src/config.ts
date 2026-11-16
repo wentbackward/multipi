@@ -18,6 +18,12 @@ export interface HeavyConfig {
 export interface StopGateConfig { requireCleanTree: boolean; maxBlocks: number; }
 export interface MergeConfig { method: string; deleteBranch: boolean; }
 
+/** Orchestrator-side bounds (spec 2026-11-15 §2): the devloop.* tool-call ceiling. */
+export interface OrchestratorConfig {
+	/** Minutes before a devloop.* tool call resolves with a timeout error (default 45). */
+	toolTimeoutMinutes: number;
+}
+
 /** Permission-policy posture (permission-policy spec §3): what an UNMATCHED call does. */
 export type PolicyPosture = "allow" | "ask";
 
@@ -78,6 +84,8 @@ export interface DevloopConfig {
 	merge: MergeConfig;
 	/** Ask-token TTL / repo allowlist / posture (spec §11-P1); always present, defaults when the block is absent. */
 	policy: PolicyConfig;
+	/** Tool-call bound (spec 2026-11-15 §2); always present, defaults when the block is absent. */
+	orchestrator: OrchestratorConfig;
 	deploy?: string;
 }
 
@@ -167,6 +175,10 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): D
 		};
 	}
 	const checksRaw = Array.isArray(raw.checks) ? raw.checks : [];
+	// orchestrator.tool_timeout_minutes (spec 2026-11-15 §2): only a finite POSITIVE number is
+	// honoured — 0/negative/string would become a bogus bound (an instant or imaginary timeout).
+	const oc = (raw.orchestrator ?? {}) as Record<string, unknown>;
+	const toolTimeout = num(oc.tool_timeout_minutes, -1);
 	const checks: CheckSpec[] = checksRaw.map((c, i) => {
 		if (typeof c === "string") return { name: `check-${i + 1}`, command: c, heavy: true };
 		const o = (c ?? {}) as Record<string, unknown>;
@@ -206,6 +218,7 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): D
 		stopGate: { requireCleanTree: bool(sg.require_clean_tree, true), maxBlocks: num(sg.max_blocks, 5) },
 		merge: { method: str(mg.method, "squash"), deleteBranch: bool(mg.delete_branch, true) },
 		policy: parsePolicyBlock(raw.policy),
+		orchestrator: { toolTimeoutMinutes: toolTimeout > 0 ? toolTimeout : 45 },
 		deploy: str(raw.deploy) || undefined,
 	};
 }
