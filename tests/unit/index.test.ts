@@ -5,7 +5,7 @@ import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, mkdirSync
 import { tmpdir } from "node:os";
 import devloopExtension from "../../extension/index.ts";
 import { GUARD_REFUSAL } from "../../extension/src/guard.ts";
-import { loadState } from "../../extension/src/liveness.ts";
+import { loadState, writeState } from "../../extension/src/liveness.ts";
 import { BASE_CONFIG, makeFixture } from "../fixtures.ts";
 
 interface HookRec { name: string; fn: (event: unknown, ctx: unknown) => unknown; }
@@ -446,6 +446,40 @@ test("orchestrator liveness: session_start seeds the sidecar, tool_execution_* d
 
 			await fire("session_shutdown", { reason: "quit" });
 			assert.equal(loadState(stDir)!.state, "ended", "shutdown writes state:ended");
+		});
+	} finally {
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		if (savedRole === undefined) delete process.env.MULTIPI_CHILD_ROLE;
+		else process.env.MULTIPI_CHILD_ROLE = savedRole;
+		fx.cleanup();
+	}
+});
+
+test("orchestrator liveness: an externally raised lastWakeSeq is never regressed by a persist (the watchdog's watermark)", async () => {
+	const fx = makeFixture(BASE_CONFIG);
+	const home = path.join(fx.dir, "home");
+	const stDir = path.join(home, "proj");
+	const savedHome = process.env.MULTIPI_HOME;
+	const savedChild = process.env.MULTIPI_CHILD;
+	const savedRole = process.env.MULTIPI_CHILD_ROLE;
+	process.env.MULTIPI_HOME = home;
+	delete process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD_ROLE;
+	try {
+		await withCwd(fx.repo, async () => {
+			const { hooks } = fakePiLoadOrchestrator();
+			const ctx = { cwd: fx.repo, hasUI: false, mode: "rpc", sessionManager: { getSessionId: () => "sess-wm" } } as never;
+			const fire = (name: string, event: unknown) =>
+				Promise.all(hooks.filter((h) => h.name === name).map((h) => h.fn(event, ctx)));
+
+			await fire("session_start", { reason: "startup" });
+			// The watchdog raised the watermark between two tool calls (it writes the sidecar too).
+			writeState(stDir, { ...loadState(stDir)!, lastWakeSeq: 3 });
+			await fire("tool_execution_start", { toolCallId: "c9", toolName: "devloop.gate", args: {} });
+			assert.equal(loadState(stDir)!.lastWakeSeq, 3, "the persist adopted the higher watermark instead of regressing it");
 		});
 	} finally {
 		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
