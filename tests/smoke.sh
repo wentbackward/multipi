@@ -3386,6 +3386,12 @@ lvwatch() { # lvwatch [ENV_KV ...] — one-shot in the fixture repo; sets LV_RC/
   LV_RC=$rc; LV_LINE=$line
 }
 lvfresh() { rm -f "$wl" "$WK"; : >"$WK"; }
+# Seam-name hygiene (round-3 fold 1): every MULTIPI_* token the script (and its pinned
+# header) cites must be a REAL seam — the header once cited a phantom MULTIPI_TOOL_MS
+# that operators and tests key off.
+expect "watch script: every MULTIPI_* token cited is a real seam (no phantom names)" \
+  "$(printf '%s\n' MULTIPI_APPROVE_NOW_MS MULTIPI_INTERRUPT_TTY MULTIPI_STATUS_STALE_MS MULTIPI_WATCH_NOW_MS MULTIPI_WATCH_TOOL_MS)" \
+  "$(grep -oE 'MULTIPI_[A-Z0-9_]+' "$plugin/scripts/multipi-watch.sh" | sort -u)"
 lvfresh
 mkstate idle 1000 0 0
 lvwatch
@@ -3412,6 +3418,19 @@ mkstate active 1000 2 780000   # a NEW seq, but the last wake is < 3600 s (wall)
 lvwatch
 expect "watch rc 0: a fresh seq inside the 3600 s wall window is still a no-op" "0" "$LV_RC"
 expect "watch dedupe: the wall-clock axis suppresses it with its reason" "1" "$(grep -cF ' SUPPRESSED:recent' "$wl" 2>/dev/null)"
+# Degraded bump (round-3 fold 3): a python3-less box (dead stub first on PATH — the
+# established stub-idiom) must still deliver the wake with rc 0 and log the lost seq
+# axis as BUMP-FAILED instead of dropping it silently. JSON parsing stays on jq.
+LVPNOSTUB="$work/lv-nopy/bin"
+mkdir -p "$LVPNOSTUB"
+printf '#!/bin/sh\nexit 99\n' >"$LVPNOSTUB/python3"; chmod +x "$LVPNOSTUB/python3"
+lvfresh
+mkstate active 1000 4 780000
+lvwatch PATH="$LVPNOSTUB:$PATH"
+expect "watch rc 0: a failed lastWakeSeq bump does not fail the wake" "0" "$LV_RC"
+expect "watch degraded bump: the wake line still landed in the TTY" "1" "$(grep -c '^WAKE ' "$WK")"
+expect "watch log: the failed bump is logged as BUMP-FAILED (the degradation is visible)" "1" "$(grep -c ' BUMP-FAILED' "$wl" 2>/dev/null)"
+expect "watch degraded bump: the watermark stayed put (the wall axis caps the damage)" "-1" "$(lvget lastWakeSeq)"
 lvfresh
 mkstate active 61000 0 0   # heartbeat 61 s old vs a 10 s stale bound (wedge threshold = 5x = 50 s)
 lvwatch MULTIPI_STATUS_STALE_MS=10000
@@ -3450,6 +3469,14 @@ kill -9 "$WD_PID" 2>/dev/null || true
 wait "$WD_PID" 2>/dev/null || true
 [ -f "$lvstate/watch.pid" ] && fail "the daemon left its pidfile behind" || pass "watch daemon: the pidfile is released on exit"
 pkill -f 'multipi-watch.sh --daemon --interval 1' 2>/dev/null || true   # no stragglers may leak past this section
+# Doc agreement (round-3 fold 4): the spec's --daemon sentence and the script header must
+# tell the same story — the script does NOT self-daemonize; the extension's detached spawn
+# IS the detach, manual launches need the operator's setsid.
+LV_SPEC="$plugin/docs/superpowers/specs/2026-11-15-orchestrator-liveness.md"
+grep -qF "does NOT self-daemonize" "$LV_SPEC" && \
+  grep -qF "does NOT self-daemonize" "$plugin/scripts/multipi-watch.sh" && \
+  pass "spec §4 and the watch header agree: the script does NOT self-daemonize" || \
+  fail "spec §4 / the watch header disagree on self-daemonization"
 rm -rf "$lvhome" "$work/lv-pty.out" "$work/lv-wake.out" "$work/lv-meminfo"
 kill "$LVPID" 2>/dev/null || true
 
