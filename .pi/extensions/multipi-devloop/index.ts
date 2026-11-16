@@ -45,17 +45,15 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /**
  * Watchdog script resolution (pinned: index.test.ts "resolveWatchScript"): the repo's
  * VENDORED copy wins (an installed loop versions its scripts with the target); otherwise
- * the module-relative fallback covers both loaded layouts — the source tree
- * (`extension/index.ts` → `../scripts`) and the installed mirror
- * (`.pi/extensions/multipi-devloop/index.ts` → `../../scripts`). Probing both depths (rather
- * than assuming one) is the anchor: a bare `../../` from the source tree resolves to the
- * repo PARENT and must never win.
+ * the module-relative fallback serves the source tree (`extension/index.ts` →
+ * `../scripts`). The repo PARENT is deliberately NOT probed: a bare `../../` from the
+ * source tree resolves to the parent's tree, and a stray `scripts/multipi-watch.sh` out
+ * there must never win over a missing vendored copy.
  */
 export function resolveWatchScript(root: string): string | undefined {
 	return [
 		path.join(root, "scripts", "multipi-watch.sh"),
 		path.join(HERE, "..", "scripts", "multipi-watch.sh"),
-		path.join(HERE, "..", "..", "scripts", "multipi-watch.sh"),
 	].find((c) => existsSync(c));
 }
 
