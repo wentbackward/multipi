@@ -129,9 +129,12 @@ paste, not an RPC — if the session's terminal is detached/dead, rc 6 + printed
 - **`--daemon`**: `setsid nohup` self-loop (sleep `--interval`, default 60 s), pidfile +
   pid-liveness lockfile (single instance), log to `~/.multipi/<repo>/watch.log`.
 - **Auto-start:** the `session_start` hook spawns
-  `bash scripts/multipi-watch.sh --daemon` detached (stdio ignored); the lockfile makes it
-  idempotent across sessions/restarts. `session_shutdown` leaves it running (it serves the
-  *next* session too and self-idles when no sidecar is active).
+  `bash scripts/multipi-watch.sh --daemon` detached (stdio ignored) — **TUI sessions only**:
+  the watchdog's wake path is a write to the session's TTY (`/dev/tty`), and a headless
+  session has no TTY to wake into (part B's 45-min tool bound still covers it, and
+  `--daemon` can be started by hand where needed); the lockfile makes the spawn idempotent
+  across sessions/restarts. `session_shutdown` leaves it running (it serves the *next*
+  session too and self-idles when no sidecar is active).
 
 ## 5. Docs and tests
 

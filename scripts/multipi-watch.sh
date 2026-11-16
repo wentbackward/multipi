@@ -27,6 +27,9 @@
 # --interval (default 60 s), repeat; its output goes to <state>/watch.log. Auto-started
 # detached by the extension's session_start (TUI sessions only); it serves the NEXT session
 # too and self-idles (IDLE:no-sidecar) when nothing is active.
+# Manual --daemon launches need `setsid bash scripts/multipi-watch.sh --daemon &` (or
+# nohup): the script does NOT self-daemonize (left optional on purpose) — the extension's
+# detached spawn is the designed path, and a plain background job dies with its terminal.
 #
 # Documented seams:
 #   MULTIPI_WATCH_TOOL_MS     integer ms; the tool-in-flight wake threshold (default 720000)
