@@ -136,18 +136,40 @@ lv_last_wake_ts() {
 }
 
 # lv_bump_wake_seq FILE SEQ: atomically raise the sidecar's lastWakeSeq watermark
-# (read-modify-write through a tmp + rename, like the extension's own writer).
+# (read-modify-write through a tmp + rename, like the extension's own writer). The two
+# publishers race on the same file, so this closes the SAME lost-update window the
+# extension side does (liveness.publishState): bounded CAS loop (≤ 3) — snapshot the
+# file, merge (max — never a downgrade), re-read, rename ONLY if the file is unchanged.
+# On exhaustion it logs to stderr and gives up WITHOUT writing — a lost bump costs at
+# most one duplicate wake, and the watchdog's 3600 s wall axis caps the damage.
 lv_bump_wake_seq() {
-  python3 - "$1" "$2" <<'PY' 2>/dev/null || return 0
+  python3 - "$1" "$2" <<'PY' || return 1
 import json, os, sys, tempfile
 p, seq = sys.argv[1], int(sys.argv[2])
-with open(p) as f:
-    d = json.load(f)
-d["lastWakeSeq"] = seq
-fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p))
-with os.fdopen(fd, "w") as f:
-    json.dump(d, f, indent=2)
-    f.write("\n")
-os.rename(tmp, p)
+def snap():
+    try:
+        with open(p, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+for _ in range(3):
+    before = snap()
+    try:
+        d = json.loads(before)
+        if not isinstance(d, dict):
+            raise ValueError
+    except Exception:
+        sys.exit(0)  # missing/corrupt doc: the extension's writer owns its shape — leave it
+    d["lastWakeSeq"] = max(d.get("lastWakeSeq", -1), seq)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p) or ".")
+    with os.fdopen(fd, "w") as f:
+        json.dump(d, f, indent=2)
+        f.write("\n")
+    if snap() == before:
+        os.rename(tmp, p)
+        sys.exit(0)
+    os.unlink(tmp)
+sys.stderr.write("multipi-watch: lastWakeSeq bump abandoned after 3 stale reads (bounded; wall axis caps damage)\n")
+sys.exit(1)
 PY
 }
