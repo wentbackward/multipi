@@ -59,7 +59,15 @@ export interface ToolContext {
 /** DEFAULT when no config resolves at all (spec 2026-11-15 §2: absent ⇒ 45). */
 const DEFAULT_TOOL_TIMEOUT_MINUTES = 45;
 
+/**
+ * Test seam for the single-construction pin (tools.test.ts): counts buildContext calls.
+ * The bound probe and the guarded run historically constructed the context TWICE per
+ * bounded tool call (a config read + a git subprocess each); the pin asserts exactly one.
+ */
+export const contextBuilds = { count: 0 };
+
 export function buildContext(cwd: string): ToolContext {
+	contextBuilds.count += 1;
 	const cfg = loadConfig(cwd);
 	if (!cfg) throw new Error(`no .devloop.json found at or above ${cwd}`);
 	const p = resolvePaths(cfg);
@@ -77,10 +85,12 @@ export function buildContext(cwd: string): ToolContext {
 	};
 }
 
-/** Per-invocation context resolution: tools act on the repo the agent is standing in. */
-async function runGuarded<T>(toolCtx: { cwd: string }, fn: (ctx: ToolContext) => Promise<AgentToolResult<T>>): Promise<AgentToolResult<T>> {
+/** Per-invocation context resolution: tools act on the repo the agent is standing in.
+ * `prebuilt` reuses runBounded's single construction (its bound probe already built it).
+ */
+async function runGuarded<T>(toolCtx: { cwd: string }, fn: (ctx: ToolContext) => Promise<AgentToolResult<T>>, prebuilt?: ToolContext): Promise<AgentToolResult<T>> {
 	try {
-		return await fn(buildContext(toolCtx.cwd));
+		return await fn(prebuilt ?? buildContext(toolCtx.cwd));
 	} catch (e) {
 		// Confined cast: the error result intentionally carries no details payload.
 		return { ...text(`devloop unavailable here: ${(e as Error).message}`), details: undefined, isError: true } as AgentToolResult<T>;
