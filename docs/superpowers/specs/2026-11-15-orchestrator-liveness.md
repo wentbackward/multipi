@@ -139,8 +139,12 @@ paste, not an RPC — if the session's terminal is detached/dead, rc 6 + printed
   defaults on a malformed integer — a typo must degrade the safety net to its default,
   not kill it — whereas the ISSUING CLOCK `MULTIPI_WATCH_NOW_MS` is strict (rc 4):
   a wrong clock would silently skew every comparison it feeds.
-- **`--daemon`**: `setsid nohup` self-loop (sleep `--interval`, default 60 s), pidfile +
-  pid-liveness lockfile (single instance), log to `~/.multipi/<repo>/watch.log`.
+- **`--daemon`**: the self-loop (one-shot check, sleep `--interval`, default 60 s, repeat),
+  pidfile + pid-liveness lockfile (single instance), log to `~/.multipi/<repo>/watch.log`.
+  The script does NOT self-daemonize: the extension's `detached:true` spawn (the auto-start
+  below) IS the detach, and a manual launch needs the operator-supplied
+  `setsid bash scripts/multipi-watch.sh --daemon &` — a plain background job dies with its
+  terminal.
 - **Auto-start:** the `session_start` hook spawns
   `bash scripts/multipi-watch.sh --daemon` detached (stdio ignored) — **TUI sessions only**:
   the watchdog's wake path is a write to the session's TTY (`/dev/tty`), and a headless
