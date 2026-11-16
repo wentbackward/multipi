@@ -292,6 +292,14 @@ const LIVENESS_TICK_MS = 15000;
 /** High-frequency event writes are throttled to ≤1 per this window (spec §1). */
 const LIVENESS_EVENT_WRITE_MS = 1000;
 
+/**
+ * Test seam for the write-throttle pin (index.test.ts): counts persist ATTEMPTS — persist is
+ * the extension's only sidecar writer, so one attempt is at most one fs write. The pin
+ * asserts on this count (and the resulting content), not on mtime: sub-second writes alias
+ * under filesystem mtime granularity, the count does not.
+ */
+export const livenessWriteAttempts = { count: 0 };
+
 function registerLiveness(pi: ExtensionAPI): void {
 	let dir: string | undefined;
 	let state: liveness.LivenessState | undefined;
@@ -301,6 +309,7 @@ function registerLiveness(pi: ExtensionAPI): void {
 
 	const persist = (): void => {
 		if (!dir || !state) return;
+		livenessWriteAttempts.count += 1;
 		try {
 			// The watchdog raises lastWakeSeq in the same sidecar (its per-seq dedupe);
 			// a persist adopts a HIGHER watermark and never regresses it — two writers,
