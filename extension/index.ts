@@ -421,6 +421,12 @@ function registerLiveness(pi: ExtensionAPI): void {
 				state.lastTickAt = Date.now();
 				persist();
 			}
+			// TERMINAL: pi delivers a trailing tool_execution_end (and possibly more
+			// events) AFTER session_shutdown — the exact shutdown-mid-tool incident of
+			// this ticket. Nulling the in-memory doc makes every later event a no-op,
+			// so the "ended" tombstone is never rewritten back to idle/active. The
+			// next session_start re-seeds a fresh doc (a new session is a new doc).
+			state = undefined;
 		} catch {
 			// Best-effort: the shutdown path must not throw.
 		}
