@@ -99,12 +99,11 @@ test("extension registers 6 tools, the full orchestrator hook set and the /devlo
 	}
 });
 
-// --- watchdog script anchor (round-2 review item 1) ---------------------------------
-// The auto-start must find the repo's vendored scripts/; when it is missing (a session not
-// rooted in an installed loop) the module-relative fallback covers BOTH loaded layouts:
-// the source tree (extension/index.ts → ../scripts) and the installed mirror
-// (.pi/extensions/multipi-devloop/index.ts → ../../scripts). Neither depth alone is right;
-// the parent-of-the-repo (a bare ../../ from the source tree) must never win.
+// --- watchdog script anchor (round-2 review item 1; candidate 3 deleted round-3) -----
+// The auto-start must find the repo's vendored scripts/ (installed loops version their
+// scripts with the target); when it is missing (a session not rooted in an installed loop,
+// e.g. the source tree) the module-relative fallback serves it (../scripts). The repo
+// PARENT (a bare ../../ from the source tree) must never win.
 
 test("resolveWatchScript: the repo's vendored copy wins, wherever the module was loaded from", () => {
 	const root = mkdtempSync(path.join(tmpdir(), "multipi-watch-root-"));
