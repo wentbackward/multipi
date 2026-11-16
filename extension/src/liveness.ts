@@ -7,7 +7,7 @@
  * the operators' bash scripts talk to the sidecar via scripts/lib/liveness.sh. Both sides are
  * pinned by tests to the same rc table and sidecar shape, so neither can drift silently.
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 export const LIVENESS_FILE = "orchestrator-state.json";
@@ -54,6 +54,43 @@ export function writeState(stateDir: string, state: LivenessState): void {
 	const tmp = `${final}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
 	writeFileSync(tmp, JSON.stringify(state, null, 2));
 	renameSync(tmp, final);
+}
+
+/**
+ * Watermark-safe publisher (review round-1 item 4): publishes `state` while ADOPTING a HIGHER
+ * externally-raised lastWakeSeq — the watchdog bumps the same sidecar between our writes, and
+ * a naive read-merge-write can lose that bump (two writers, one document). Bounded CAS loop:
+ * snapshot the file, merge the watermark, re-read, and rename ONLY if the file is byte-
+ * identical to the snapshot; ≤ 3 attempts total. Returns false — and writes NOTHING — on
+ * exhaustion: the give-up is bounded by design (a lost bump costs at most one duplicate wake,
+ * and the watchdog's 3600 s wall axis caps the damage). The shell twin (lv_bump_wake_seq,
+ * scripts/lib/liveness.sh) closes the same window the same way.
+ */
+export function publishState(stateDir: string, state: LivenessState): boolean {
+	mkdirSync(stateDir, { recursive: true });
+	const final = sidecarPath(stateDir);
+	for (let attempt = 0; attempt < 3; attempt++) {
+		let snapshot: string | null = null;
+		let baseSeq = -1;
+		try {
+			snapshot = readFileSync(final, "utf8");
+			const doc = JSON.parse(snapshot) as LivenessState;
+			if (typeof doc?.lastWakeSeq === "number") baseSeq = doc.lastWakeSeq;
+		} catch { /* missing or corrupt sidecar: publish a fresh doc over it */ }
+		const merged: LivenessState = { ...state, lastWakeSeq: Math.max(state.lastWakeSeq, baseSeq) };
+		const tmp = `${final}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+		writeFileSync(tmp, JSON.stringify(merged, null, 2));
+		let current: string | null = null;
+		try { current = readFileSync(final, "utf8"); } catch { /* still missing */ }
+		if (current === snapshot) {
+			renameSync(tmp, final);
+			return true;
+		}
+		// Stale: a concurrent writer published between the snapshot and the re-read — retry
+		// against the fresh base instead of overwriting its watermark.
+		try { unlinkSync(tmp); } catch { /* best-effort sweep of the abandoned tmp */ }
+	}
+	return false;
 }
 
 /** The heartbeat: the newer of high-frequency event activity and the 15 s tick. */

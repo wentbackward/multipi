@@ -311,12 +311,14 @@ function registerLiveness(pi: ExtensionAPI): void {
 		if (!dir || !state) return;
 		livenessWriteAttempts.count += 1;
 		try {
-			// The watchdog raises lastWakeSeq in the same sidecar (its per-seq dedupe);
-			// a persist adopts a HIGHER watermark and never regresses it — two writers,
-			// one document, one monotonic direction.
-			const cur = liveness.loadState(dir);
-			if (cur && cur.lastWakeSeq > state.lastWakeSeq) state.lastWakeSeq = cur.lastWakeSeq;
-			liveness.writeState(dir, state);
+			// Watermark-safe publish (src/liveness.ts, review round-1 item 4): re-reads the
+			// sidecar, adopts a HIGHER externally-raised lastWakeSeq (the watchdog's bump),
+			// and retries ≤ 3 times on a stale read. On exhaustion it writes nothing —
+			// the give-up is bounded: a lost bump costs one duplicate wake, capped by the
+			// watchdog's 3600 s wall axis.
+			if (!liveness.publishState(dir, state)) {
+				console.error("devloop liveness: sidecar publish abandoned after 3 stale reads (bounded; the watchdog's 3600 s wall axis caps damage)");
+			}
 		} catch {
 			// Liveness is a convenience surface; a write failure is never a session failure.
 		}
