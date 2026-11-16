@@ -40,6 +40,25 @@ const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issu
  * are the documented exceptions: the guard (it must know the store path BEFORE the first tool
  * call) and the policy enforcer (§8: the effective policy is session-frozen and hashed).
  */
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Watchdog script resolution (pinned: index.test.ts "resolveWatchScript"): the repo's
+ * VENDORED copy wins (an installed loop versions its scripts with the target); otherwise
+ * the module-relative fallback covers both loaded layouts — the source tree
+ * (`extension/index.ts` → `../scripts`) and the installed mirror
+ * (`.pi/extensions/multipi-devloop/index.ts` → `../../scripts`). Probing both depths (rather
+ * than assuming one) is the anchor: a bare `../../` from the source tree resolves to the
+ * repo PARENT and must never win.
+ */
+export function resolveWatchScript(root: string): string | undefined {
+	return [
+		path.join(root, "scripts", "multipi-watch.sh"),
+		path.join(HERE, "..", "scripts", "multipi-watch.sh"),
+		path.join(HERE, "..", "..", "scripts", "multipi-watch.sh"),
+	].find((c) => existsSync(c));
+}
+
 export default function devloopExtension(pi: ExtensionAPI): void {
 	// A one-shot role child (spawnPi sets MULTIPI_CHILD) must not load the loop: registering the
 	// tools would let a child drive the loop itself, and the stop-gate hook would keep a child
@@ -292,6 +311,14 @@ const LIVENESS_TICK_MS = 15000;
 /** High-frequency event writes are throttled to ≤1 per this window (spec §1). */
 const LIVENESS_EVENT_WRITE_MS = 1000;
 
+/**
+ * Test seam for the write-throttle pin (index.test.ts): counts persist ATTEMPTS — persist is
+ * the extension's only sidecar writer, so one attempt is at most one fs write. The pin
+ * asserts on this count (and the resulting content), not on mtime: sub-second writes alias
+ * under filesystem mtime granularity, the count does not.
+ */
+export const livenessWriteAttempts = { count: 0 };
+
 function registerLiveness(pi: ExtensionAPI): void {
 	let dir: string | undefined;
 	let state: liveness.LivenessState | undefined;
@@ -301,13 +328,16 @@ function registerLiveness(pi: ExtensionAPI): void {
 
 	const persist = (): void => {
 		if (!dir || !state) return;
+		livenessWriteAttempts.count += 1;
 		try {
-			// The watchdog raises lastWakeSeq in the same sidecar (its per-seq dedupe);
-			// a persist adopts a HIGHER watermark and never regresses it — two writers,
-			// one document, one monotonic direction.
-			const cur = liveness.loadState(dir);
-			if (cur && cur.lastWakeSeq > state.lastWakeSeq) state.lastWakeSeq = cur.lastWakeSeq;
-			liveness.writeState(dir, state);
+			// Watermark-safe publish (src/liveness.ts, review round-1 item 4): re-reads the
+			// sidecar, adopts a HIGHER externally-raised lastWakeSeq (the watchdog's bump),
+			// and retries ≤ 3 times on a stale read. On exhaustion it writes nothing —
+			// the give-up is bounded: a lost bump costs one duplicate wake, capped by the
+			// watchdog's 3600 s wall axis.
+			if (!liveness.publishState(dir, state)) {
+				console.error("devloop liveness: sidecar publish abandoned after 3 stale reads (bounded; the watchdog's 3600 s wall axis caps damage)");
+			}
 		} catch {
 			// Liveness is a convenience surface; a write failure is never a session failure.
 		}
@@ -330,11 +360,8 @@ function registerLiveness(pi: ExtensionAPI): void {
 	const spawnWatchDaemon = (cwd: string): void => {
 		try {
 			const root = mainRoot(cwd) ?? cwd;
-			const script = path.join(root, "scripts", "multipi-watch.sh");
-			const target = existsSync(script)
-				? script
-				: path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "multipi-watch.sh");
-			if (!existsSync(target)) return;
+			const target = resolveWatchScript(root);
+			if (!target) return;
 			const child = spawn("bash", [target, "--daemon"], { detached: true, stdio: "ignore" });
 			child.unref();
 		} catch {
@@ -421,6 +448,12 @@ function registerLiveness(pi: ExtensionAPI): void {
 				state.lastTickAt = Date.now();
 				persist();
 			}
+			// TERMINAL: pi delivers a trailing tool_execution_end (and possibly more
+			// events) AFTER session_shutdown — the exact shutdown-mid-tool incident of
+			// this ticket. Nulling the in-memory doc makes every later event a no-op,
+			// so the "ended" tombstone is never rewritten back to idle/active. The
+			// next session_start re-seeds a fresh doc (a new session is a new doc).
+			state = undefined;
 		} catch {
 			// Best-effort: the shutdown path must not throw.
 		}
