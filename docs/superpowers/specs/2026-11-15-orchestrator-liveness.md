@@ -61,6 +61,20 @@ Renders one line (state, in-flight tool + elapsed, heartbeat age, pid, tty) and 
 `MULTIPI_STATUS_STALE_MS` is a documented test seam (integer ms). Offline: the script only
 reads the sidecar (and `ps` for the pid).
 
+**Addendum (2026-11-15 21:20) — OOM root cause surfaced on the line:** the repeated
+"No result provided" deaths are confirmed OOM-kills (three `tmux-spawn-*.scope … result
+'oom-kill'` journal events matching every transport death; the box's swapfile sits ~100 %
+full permanently). Accordingly:
+
+- The rendered line ALSO shows **available RAM and swap-free**, read from `/proc/meminfo`
+  (`MemAvailable`, `SwapFree`, human-readable) via the documented seam
+  `MULTIPI_STATUS_MEMINFO=/path` (default `/proc/meminfo`) — a wedged or dying session is
+  usually a memory story, and the operator must see the headroom without a second tool.
+- rc 3's dead text (a session whose pid is gone) mentions checking
+  `journalctl --since <start> | grep oom-kill` as the likely cause of a vanished session.
+- One extra smoke assertion: the line contains the meminfo figures read from a FABRICATED
+  `/proc/meminfo` driven through `MULTIPI_STATUS_MEMINFO`.
+
 ## 2. Bounded tool calls — the unwedge (part B)
 
 `tools.ts` wraps **every** `devloop.*` implementation in `withTimeout(name, impl, ms)`
@@ -130,7 +144,8 @@ paste, not an RPC — if the session's terminal is detached/dead, rc 6 + printed
 - **Unit (offline, fake-gh/fake-pi world):** `liveness.ts` (write/read atomicity, render
   decisions, `withTimeout` resolves-with-error on a 5 ms drive via the seam); status rc
   matrix via smoke against fabricated sidecars.
-- **Smoke:** (a) status rc 0/1/2/3/4 matrix; (b) interrupt dry-run + real injection into a
+- **Smoke:** (a) status rc 0/1/2/3/4 matrix (including the fabricated-`/proc/meminfo`
+  figures on the line and the oom-kill hint on rc 3's dead text); (b) interrupt dry-run + real injection into a
   `script -qec`-captured pty asserting the exact line landed; (c) watch one-shot: fabricated
   sidecars + `MULTIPI_WATCH_NOW_MS` → correct wake chosen / dedupe honoured / rc 0 no-op
   when healthy; (d) `--daemon` single-instance (second launch exits 0 without doubling).
