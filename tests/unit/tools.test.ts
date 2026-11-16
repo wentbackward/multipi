@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync, chmodSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket } from "../../extension/src/tools.ts";
+import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket, contextBuilds } from "../../extension/src/tools.ts";
 import { makeFixture } from "../fixtures.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -213,6 +213,19 @@ test("every devloop.* call is bounded: a hung dispatch RESOLVES (never rejects, 
 		delete process.env.MULTIPI_TOOL_TIMEOUT_MS;
 		fx.cleanup();
 	}
+});
+
+test("a bounded devloop.* call builds the tool context exactly ONCE (bound probe and run share one construction)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		createIssue(fx, "Bound budget check");
+		const before = contextBuilds.count;
+		const res = await call(ctx, "devloop.status", {});
+		assert.equal(res.isError ?? false, false, textOf(res));
+		assert.equal(contextBuilds.count - before, 1, "the bound probe must not rebuild the context (a config read + git subprocess each)");
+	} finally { fx.cleanup(); }
 });
 
 test("gate and merge tools drive the trains through the real scripts", async () => {
