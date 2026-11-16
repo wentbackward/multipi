@@ -5,7 +5,7 @@ import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, mkdirSync
 import { tmpdir } from "node:os";
 import devloopExtension from "../../extension/index.ts";
 import { GUARD_REFUSAL } from "../../extension/src/guard.ts";
-import { loadState, writeState } from "../../extension/src/liveness.ts";
+import { loadState, sidecarPath, writeState } from "../../extension/src/liveness.ts";
 import { BASE_CONFIG, makeFixture } from "../fixtures.ts";
 
 interface HookRec { name: string; fn: (event: unknown, ctx: unknown) => unknown; }
@@ -481,17 +481,17 @@ test("orchestrator liveness: shutdown makes the sidecar TERMINAL — the trailin
 			assert.equal(loadState(stDir)!.state, "active");
 			await fire("session_shutdown", { reason: "quit" });
 			assert.equal(loadState(stDir)!.state, "ended", "shutdown writes the tombstone");
-			// pi's docs guarantee the trailing tool_execution_end is delivered AFTER the shutdown:
+			// pi's docs guarantee the trailing tool_execution_end is delivered AFTER the shutdown.
+			// The tombstone (in-flight tool snapshot included) must not be TOUCHED by any
+			// later event — byte-identical is the sharpest pin.
+			const tombstone = readFileSync(sidecarPath(stDir), "utf8");
 			await fire("tool_execution_end", { toolCallId: "c1", toolName: "devloop.gate" });
-			let s = loadState(stDir)!;
-			assert.equal(s.state, "ended", "the trailing end does NOT rewrite the tombstone to idle");
-			assert.equal(s.tool, null, "the in-flight tool record is not revived");
+			assert.equal(loadState(stDir)!.state, "ended", "the trailing end does NOT rewrite the tombstone to idle");
 			// A late start and a late message tick are dead too.
 			await fire("tool_execution_start", { toolCallId: "c2", toolName: "devloop.status", args: {} });
 			await fire("message_update", {});
-			s = loadState(stDir)!;
-			assert.equal(s.state, "ended", "late events never resurrect a shut-down doc");
-			assert.equal(s.tool, null);
+			assert.equal(readFileSync(sidecarPath(stDir), "utf8"), tombstone, "late events never rewrite a shut-down doc");
+			assert.equal(loadState(stDir)!.state, "ended");
 		});
 	} finally {
 		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
