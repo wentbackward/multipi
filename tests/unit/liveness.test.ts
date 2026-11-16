@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { isMainThread, Worker, workerData } from "node:worker_threads";
+import { Worker } from "node:worker_threads";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -63,7 +63,9 @@ test("writeState is atomic: concurrent writers never publish a torn document", a
 		// Two worker threads hammer the sidecar with distinct payloads; after every write
 		// the WRITER re-reads and validates the shape. A torn (mid-write) document is only
 		// possible if the publish is an in-place truncate; a rename publishes complete docs.
-		const here = new URL(import.meta.url).pathname;
+		// The worker body lives in liveness-worker.ts — a Worker on the TEST file re-runs every
+		// top-level test() (and re-spawns workers: fork bomb).
+		const here = new URL("./liveness-worker.ts", import.meta.url);
 		const spawn = (which: string) =>
 			new Worker(here, { workerData: { d, which }, execArgv: ["--experimental-strip-types"] } as ConstructorParameters<typeof Worker>[1]);
 		await Promise.all([waitWorker(spawn("A")), waitWorker(spawn("B"))]);
@@ -74,21 +76,6 @@ test("writeState is atomic: concurrent writers never publish a torn document", a
 		assert.deepEqual(leftovers, [], "no tmp residue after the writes settled");
 	} finally { rmSync(d, { recursive: true, force: true }); }
 });
-
-/** Worker body: 40 write-then-validate rounds; run ONLY when executed as the worker. */
-if (!isMainThread && workerData) {
-	const { d, which } = workerData as { d: string; which: string };
-	const mine = base({ sessionId: which, lastTickAt: 1 });
-	const other = base({ sessionId: which === "A" ? "B" : "A", lastTickAt: 2 });
-	for (let i = 0; i < 40; i++) {
-		writeState(d, i % 2 === 0 ? mine : other);
-		const seen = loadState(d);
-		if (!seen || seen.schema !== 1 || (seen.sessionId !== "A" && seen.sessionId !== "B") || typeof seen.pid !== "number") {
-			throw new Error(`torn or missing document observed: ${JSON.stringify(seen)}`);
-		}
-	}
-	writeFileSync(path.join(d, `.reader-${which}-ok`), "ok");
-}
 
 test("heartbeatOf: the heartbeat is the newer of event activity and the tick", () => {
 	assert.equal(heartbeatOf(base({ lastEventAt: 5, lastTickAt: 9 })), 9);
@@ -119,7 +106,7 @@ test("renderStatus rc 2: heartbeat older than the stale bound ⇒ STALE / suspec
 		const v = render({ state: base({ state, lastEventAt: 0, lastTickAt: 0 }), now: 1_000_000, staleMs: 120_000, pidAlive: true });
 		assert.equal(v.rc, 2, `state=${state}`);
 		assert.match(v.line, /STALE/);
-		assert.match(v.line, /[Ww]edge/);
+		assert.match(v.line, /wedge/i);
 	}
 });
 
