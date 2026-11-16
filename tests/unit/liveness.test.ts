@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import {
 	heartbeatOf,
 	loadState,
+	publishState,
 	renderStatus,
 	resolveToolTimeoutMs,
 	sidecarPath,
@@ -53,6 +54,39 @@ test("loadState: a corrupt sidecar reads as null (fail soft, never a torn read)"
 	try {
 		writeFileSync(sidecarPath(d), '{"schema":1, "sess');
 		assert.equal(loadState(d), null);
+	} finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// --- watermark-safe publish (review round-1 item 4: the two-writer lost-update window) ---
+
+test("publishState: publishes the full document over nothing (missing sidecar ⇒ fresh doc)", () => {
+	const d = mkdtemp();
+	try {
+		const s = base({ lastTickAt: 5_000_000 });
+		assert.equal(publishState(d, s), true, "a publish without an existing file succeeds");
+		assert.deepEqual(loadState(d), s);
+	} finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+
+test("publishState: an externally raised watermark is adopted, never regressed, and the new document still lands", () => {
+	const d = mkdtemp();
+	try {
+		// The watchdog raised the watermark on the sidecar since our last write.
+		writeState(d, base({ lastWakeSeq: 5, lastTickAt: 1_500_000 }));
+		const ours = base({ lastWakeSeq: -1, lastTickAt: 2_000_000 });
+		assert.equal(publishState(d, ours), true);
+		assert.equal(loadState(d)!.lastWakeSeq, 5, "the higher external watermark survived the publish");
+		assert.equal(loadState(d)!.lastTickAt, 2_000_000, "our new document still landed");
+
+		// A lower-watermark publish over a higher file never downgrades either.
+		assert.equal(publishState(d, base({ lastWakeSeq: 1, lastTickAt: 3_000_000 })), true);
+		assert.equal(loadState(d)!.lastWakeSeq, 5, "no regression to our (lower) watermark");
+		assert.equal(loadState(d)!.lastTickAt, 3_000_000);
+
+		// Symmetric: our watermark higher than the file's is kept (max, not min).
+		assert.equal(publishState(d, base({ lastWakeSeq: 9, lastTickAt: 4_000_000 })), true);
+		assert.equal(loadState(d)!.lastWakeSeq, 9);
 	} finally { rmSync(d, { recursive: true, force: true }); }
 });
 
