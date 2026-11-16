@@ -3,7 +3,7 @@ import test from "node:test";
 import path from "node:path";
 import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, mkdirSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import devloopExtension from "../../extension/index.ts";
+import devloopExtension, { livenessWriteAttempts } from "../../extension/index.ts";
 import { GUARD_REFUSAL } from "../../extension/src/guard.ts";
 import { loadState, sidecarPath, writeState } from "../../extension/src/liveness.ts";
 import { BASE_CONFIG, makeFixture } from "../fixtures.ts";
@@ -494,6 +494,62 @@ test("orchestrator liveness: shutdown makes the sidecar TERMINAL — the trailin
 			assert.equal(loadState(stDir)!.state, "ended");
 		});
 	} finally {
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		if (savedRole === undefined) delete process.env.MULTIPI_CHILD_ROLE;
+		else process.env.MULTIPI_CHILD_ROLE = savedRole;
+		fx.cleanup();
+	}
+});
+
+test("orchestrator liveness: two same-millisecond message_update ticks cause at most ONE sidecar write (throttle pinned on count/content, not mtime)", async () => {
+	const fx = makeFixture(BASE_CONFIG);
+	const home = path.join(fx.dir, "home");
+	const stDir = path.join(home, "proj");
+	const savedHome = process.env.MULTIPI_HOME;
+	const savedChild = process.env.MULTIPI_CHILD;
+	const savedRole = process.env.MULTIPI_CHILD_ROLE;
+	process.env.MULTIPI_HOME = home;
+	delete process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD_ROLE;
+	const realNow = Date.now;
+	try {
+		await withCwd(fx.repo, async () => {
+			const { hooks } = fakePiLoadOrchestrator();
+			const ctx = { cwd: fx.repo, hasUI: false, mode: "rpc", sessionManager: { getSessionId: () => "sess-thr" } } as never;
+			const fire = (name: string, event: unknown) =>
+				Promise.all(hooks.filter((h) => h.name === name).map((h) => h.fn(event, ctx)));
+
+			// Frozen clock, two windows: session_start lands 2 s before the tick pair (the
+			// throttle window is already elapsed by the first tick), and both ticks then
+			// land in the SAME millisecond — the worst case for mtime-based assertions,
+			// which is exactly why we pin on the write COUNT and the resulting content.
+			const frozen = realNow() + 60_000;
+			Date.now = () => frozen - 2_000;
+			await fire("session_start", { reason: "startup" });
+			livenessWriteAttempts.count = 0;
+
+			Date.now = () => frozen;
+			await fire("message_update", {});
+			await fire("message_update", {});
+			assert.ok(livenessWriteAttempts.count <= 1, `at most one sidecar write in the window, got ${livenessWriteAttempts.count}`);
+			assert.equal(livenessWriteAttempts.count, 1, "the first tick wrote, the same-millisecond twin was dropped");
+			assert.equal(loadState(stDir)!.lastEventAt, frozen, "the surviving write carried the tick (in-memory update persisted once)");
+
+			// Once the window has elapsed, the next tick writes again — the throttle
+			// drops duplicates, not events.
+			Date.now = () => frozen + 2_000;
+			await fire("message_update", {});
+			assert.equal(livenessWriteAttempts.count, 2, "the next window's tick writes");
+			assert.equal(loadState(stDir)!.lastEventAt, frozen + 2_000, "and its content carries the newer tick");
+			Date.now = realNow;
+			// Housekeeping: end this session so its 15 s tick cannot outlive the test.
+			await fire("session_shutdown", { reason: "quit" });
+		});
+	} finally {
+		Date.now = realNow;
 		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
 		else process.env.MULTIPI_HOME = savedHome;
 		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
