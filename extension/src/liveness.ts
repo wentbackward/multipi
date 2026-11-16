@@ -71,32 +71,51 @@ export interface StatusVerdict {
 	line: string;
 }
 
+/** Optional /proc/meminfo figures for the line (addendum 2026-11-15 21:20): omitted ⇒ no figures. */
+export interface MemFigures {
+	ramKib: number;
+	swapFreeKib: number;
+}
+
+/** Human-readable kibibytes for the meminfo figures: GiB with one decimal, else integral MiB. */
+export function humanMem(kib: number): string {
+	return kib >= 1_048_576 ? `${(kib / 1_048_576).toFixed(1)}G` : `${Math.round(kib / 1024)}M`;
+}
+
 /**
  * Decide the operator's one-line status + rc. `processAlive` is the script's liveness probe:
  * the sidecar's pid running, or (no sidecar) a pi-like process resident in the repo. Judgement
  * order (a dead process is dead no matter what the document claims):
  *   ended ⇒ 3 · process gone ⇒ 3 · heartbeat strictly older than the bound ⇒ 2 · tool ⇒ 0 · else 1.
  * No sidecar: 3 when nothing matches, 1 (ALIVE, no liveness claim) when a process runs.
+ * `mem` rides on EVERY line as ` ram=<..> swapfree=<..>` — a vanishing session is usually an
+ * OOM story (the confirmed root cause, addendum 2026-11-15 21:20), and the vanished-pid dead
+ * text names the oom-kill journal check. The bash twin (scripts/lib/liveness.sh) renders the
+ * same line skeleton and the same rc table (it appends the resolved ` tty=` when the pid is
+ * alive — a kernel fact a pure render cannot know); both are pinned by tests.
  */
-export function renderStatus(opts: { state: LivenessState | null; now: number; staleMs: number; processAlive: boolean }): StatusVerdict {
+export function renderStatus(opts: { state: LivenessState | null; now: number; staleMs: number; processAlive: boolean; mem?: MemFigures }): StatusVerdict {
 	const { state, now, staleMs } = opts;
 	const age = (ms: number): string => humanDur(Math.max(0, ms));
+	const mem = opts.mem ? ` ram=${humanMem(opts.mem.ramKib)} swapfree=${humanMem(opts.mem.swapFreeKib)}` : "";
 	if (state === null) {
 		return opts.processAlive
-			? { rc: 1, line: "ALIVE (no liveness sidecar; a matching process is running)" }
-			: { rc: 3, line: "DEAD (no sidecar, no matching process)" };
+			? { rc: 1, line: `ALIVE (no liveness sidecar; a matching process is running)${mem}` }
+			: { rc: 3, line: `DEAD (no sidecar, no matching process)${mem}` };
 	}
-	if (state.state === "ended") return { rc: 3, line: `ENDED pid=${state.pid} (session ended)` };
-	if (!opts.processAlive) return { rc: 3, line: `DEAD pid=${state.pid} not running (state was ${state.state})` };
+	if (state.state === "ended") return { rc: 3, line: `ENDED pid=${state.pid} (session ended)${mem}` };
+	if (!opts.processAlive) {
+		return { rc: 3, line: `DEAD pid=${state.pid} not running (state was ${state.state}) — likely OOM-killed; check: journalctl --since <start> | grep oom-kill${mem}` };
+	}
 	const hb = heartbeatOf(state);
 	if (now - hb > staleMs) {
 		const tool = state.tool ? ` tool=${state.tool.name} (${age(now - state.tool.startedAt)})` : "";
-		return { rc: 2, line: `STALE (suspected WEDGE) pid=${state.pid} heartbeat ${age(now - hb)} ago${tool}` };
+		return { rc: 2, line: `STALE (suspected WEDGE) pid=${state.pid} heartbeat ${age(now - hb)} ago${tool}${mem}` };
 	}
 	if (state.tool) {
-		return { rc: 0, line: `LIVE pid=${state.pid} tool=${state.tool.name} (${age(now - state.tool.startedAt)}) heartbeat ${age(now - hb)} ago` };
+		return { rc: 0, line: `LIVE pid=${state.pid} tool=${state.tool.name} (${age(now - state.tool.startedAt)}) heartbeat ${age(now - hb)} ago${mem}` };
 	}
-	return { rc: 1, line: `IDLE pid=${state.pid} heartbeat ${age(now - hb)} ago (no tool in flight)` };
+	return { rc: 1, line: `IDLE pid=${state.pid} heartbeat ${age(now - hb)} ago (no tool in flight)${mem}` };
 }
 
 function humanDur(ms: number): string {
