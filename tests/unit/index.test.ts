@@ -458,6 +458,52 @@ test("orchestrator liveness: session_start seeds the sidecar, tool_execution_* d
 	}
 });
 
+test("orchestrator liveness: shutdown makes the sidecar TERMINAL — the trailing tool event (pi's shutdown-mid-tool) never rewrites the ended tombstone", async () => {
+	const fx = makeFixture(BASE_CONFIG);
+	const home = path.join(fx.dir, "home");
+	const stDir = path.join(home, "proj");
+	const savedHome = process.env.MULTIPI_HOME;
+	const savedChild = process.env.MULTIPI_CHILD;
+	const savedRole = process.env.MULTIPI_CHILD_ROLE;
+	process.env.MULTIPI_HOME = home;
+	delete process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD_ROLE;
+	try {
+		await withCwd(fx.repo, async () => {
+			const { hooks } = fakePiLoadOrchestrator();
+			const ctx = { cwd: fx.repo, hasUI: false, mode: "rpc", sessionManager: { getSessionId: () => "sess-term" } } as never;
+			const fire = (name: string, event: unknown) =>
+				Promise.all(hooks.filter((h) => h.name === name).map((h) => h.fn(event, ctx)));
+
+			// The exact incident this ticket exists for: shutdown WHILE a tool is in flight.
+			await fire("session_start", { reason: "startup" });
+			await fire("tool_execution_start", { toolCallId: "c1", toolName: "devloop.gate", args: {} });
+			assert.equal(loadState(stDir)!.state, "active");
+			await fire("session_shutdown", { reason: "quit" });
+			assert.equal(loadState(stDir)!.state, "ended", "shutdown writes the tombstone");
+			// pi's docs guarantee the trailing tool_execution_end is delivered AFTER the shutdown:
+			await fire("tool_execution_end", { toolCallId: "c1", toolName: "devloop.gate" });
+			let s = loadState(stDir)!;
+			assert.equal(s.state, "ended", "the trailing end does NOT rewrite the tombstone to idle");
+			assert.equal(s.tool, null, "the in-flight tool record is not revived");
+			// A late start and a late message tick are dead too.
+			await fire("tool_execution_start", { toolCallId: "c2", toolName: "devloop.status", args: {} });
+			await fire("message_update", {});
+			s = loadState(stDir)!;
+			assert.equal(s.state, "ended", "late events never resurrect a shut-down doc");
+			assert.equal(s.tool, null);
+		});
+	} finally {
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		if (savedRole === undefined) delete process.env.MULTIPI_CHILD_ROLE;
+		else process.env.MULTIPI_CHILD_ROLE = savedRole;
+		fx.cleanup();
+	}
+});
+
 test("orchestrator liveness: an externally raised lastWakeSeq is never regressed by a persist (the watchdog's watermark)", async () => {
 	const fx = makeFixture(BASE_CONFIG);
 	const home = path.join(fx.dir, "home");
