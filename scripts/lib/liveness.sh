@@ -145,7 +145,10 @@ lv_last_wake_ts() {
 # extension side does (liveness.publishState): bounded CAS loop (≤ 3) — snapshot the
 # file, merge (max — never a downgrade), re-read, rename ONLY if the file is unchanged.
 # On exhaustion it logs to stderr and gives up WITHOUT writing — a lost bump costs at
-# most one duplicate wake, and the watchdog's 3600 s wall axis caps the damage.
+# most one duplicate wake, and the watchdog's 3600 s wall axis caps the damage. The CALLER
+# pins the contract: a non-zero return (including a missing python3, rc 127 → 1) is logged
+# as a BUMP-FAILED line in watch.log by multipi-watch.sh — the degradation is visible, not
+# silent (smoke-pinned).
 lv_bump_wake_seq() {
   python3 - "$1" "$2" <<'PY' || return 1
 import json, os, sys, tempfile

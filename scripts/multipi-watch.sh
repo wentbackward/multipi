@@ -5,7 +5,7 @@
 #   scripts/multipi-watch.sh [--daemon] [--interval SECS]
 #
 # ONE-SHOT CHECK (the testable core) reads the sidecar and, against the pinned thresholds:
-#   • a tool in flight longer than MULTIPI_TOOL_MS (default 720000 = 12 min — BEFORE the
+#   • a tool in flight longer than MULTIPI_WATCH_TOOL_MS (default 720000 = 12 min — BEFORE the
 #     45-min bound) → wake:  WAKE (multipi-watch): <tool> has been in flight <N>min. …
 #   • a heartbeat older than 5 × the stale bound (MULTIPI_STATUS_STALE_MS, default 120000,
 #     so the default wedge threshold is 10 min) → the stronger wake:
@@ -14,7 +14,9 @@
 #   DEDUPE: at most one wake per tool.seq (sidecar's lastWakeSeq watermark — raised after a
 #   WAKE) AND at most one wake per 3600 s of wall clock (timestamps in the watch log).
 #   Every check appends one line to <state>/watch.log: "<now-ms> <HEALTHY|WAKE|WEDGE|
-#   SUPPRESSED:<reason>|IDLE:<reason>|NOTTY>".
+#   SUPPRESSED:<reason>|IDLE:<reason>|NOTTY|BUMP-FAILED>". BUMP-FAILED: a WAKE was due and
+#   injected but its lastWakeSeq bump failed (e.g. no python3) — the 3600 s wall axis caps
+#   the damage, the log surfaces the lost seq axis.
 #
 # ONE-SHOT RC (pinned in this header and the smoke):
 #   0  check completed (healthy no-op, dedupe-suppressed, or a wake was injected)
@@ -163,7 +165,10 @@ one_shot() {
   fi
   if [ "$kind" = WAKE ]; then
     wlog "WAKE tool=${toolname}"
-    lv_bump_wake_seq "$sc" "$toolseq"
+    # A failed bump (a python3-less box, CAS exhaustion) does NOT fail the wake: the wall
+    # axis caps the damage at one duplicate wake. Log the degradation — the seq axis is
+    # lost, so the operator must be able to see that it was lost.
+    lv_bump_wake_seq "$sc" "$toolseq" || wlog "BUMP-FAILED tool=${toolname} seq=${toolseq}"
   else
     wlog "WEDGE hb-age=${wedge_age}"
   fi
