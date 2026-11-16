@@ -105,13 +105,14 @@ async function runGuarded<T>(toolCtx: { cwd: string }, fn: (ctx: ToolContext) =>
  * branch) continue, which is exactly what the text tells the operator to reconcile.
  */
 async function runBounded<T>(name: string, toolCtx: { cwd: string }, fn: (ctx: ToolContext) => Promise<AgentToolResult<T>>): Promise<AgentToolResult<T>> {
-	let ms: number | null;
+	let ctx: ToolContext | undefined;
 	try {
-		ms = resolveToolTimeoutMs(buildContext(toolCtx.cwd).cfg.orchestrator.toolTimeoutMinutes);
+		ctx = buildContext(toolCtx.cwd);
 	} catch {
-		ms = resolveToolTimeoutMs(DEFAULT_TOOL_TIMEOUT_MINUTES); // config unreachable: the default bound, never unbounded
+		// config unreachable: the default bound; runGuarded rebuilds once to surface the message
 	}
-	const r = await withTimeout(() => runGuarded(toolCtx, fn), ms);
+	const ms = resolveToolTimeoutMs(ctx?.cfg.orchestrator.toolTimeoutMinutes ?? DEFAULT_TOOL_TIMEOUT_MINUTES);
+	const r = await withTimeout(() => runGuarded(toolCtx, fn, ctx), ms);
 	if (r.status === "ok") return r.value;
 	return { ...text(timeoutText(name, r.ms)), isError: true } as AgentToolResult<T>;
 }
