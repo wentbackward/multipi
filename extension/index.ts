@@ -40,6 +40,25 @@ const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issu
  * are the documented exceptions: the guard (it must know the store path BEFORE the first tool
  * call) and the policy enforcer (§8: the effective policy is session-frozen and hashed).
  */
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Watchdog script resolution (pinned: index.test.ts "resolveWatchScript"): the repo's
+ * VENDORED copy wins (an installed loop versions its scripts with the target); otherwise
+ * the module-relative fallback covers both loaded layouts — the source tree
+ * (`extension/index.ts` → `../scripts`) and the installed mirror
+ * (`.pi/extensions/multipi-devloop/index.ts` → `../../scripts`). Probing both depths (rather
+ * than assuming one) is the anchor: a bare `../../` from the source tree resolves to the
+ * repo PARENT and must never win.
+ */
+export function resolveWatchScript(root: string): string | undefined {
+	return [
+		path.join(root, "scripts", "multipi-watch.sh"),
+		path.join(HERE, "..", "scripts", "multipi-watch.sh"),
+		path.join(HERE, "..", "..", "scripts", "multipi-watch.sh"),
+	].find((c) => existsSync(c));
+}
+
 export default function devloopExtension(pi: ExtensionAPI): void {
 	// A one-shot role child (spawnPi sets MULTIPI_CHILD) must not load the loop: registering the
 	// tools would let a child drive the loop itself, and the stop-gate hook would keep a child
@@ -341,11 +360,8 @@ function registerLiveness(pi: ExtensionAPI): void {
 	const spawnWatchDaemon = (cwd: string): void => {
 		try {
 			const root = mainRoot(cwd) ?? cwd;
-			const script = path.join(root, "scripts", "multipi-watch.sh");
-			const target = existsSync(script)
-				? script
-				: path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "multipi-watch.sh");
-			if (!existsSync(target)) return;
+			const target = resolveWatchScript(root);
+			if (!target) return;
 			const child = spawn("bash", [target, "--daemon"], { detached: true, stdio: "ignore" });
 			child.unref();
 		} catch {
