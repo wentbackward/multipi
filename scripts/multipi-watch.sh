@@ -184,7 +184,10 @@ if [ "$daemon" = 1 ]; then
     esac
   fi
   printf '%s\n' "$$" >"$pidfile"
-  trap 'rm -f "$pidfile"' EXIT INT TERM
+  trap 'rm -f "$pidfile"' EXIT
+  # A trapped TERM must EXIT: bash runs the handler and CONTINUES otherwise (verified),
+  # which would turn every `kill` into a pidfile release with a still-running loop.
+  trap 'rm -f "$pidfile"; exit 0' INT TERM
   # The loop: check, sleep, repeat. A failed check is logged, never fatal — the net must
   # outlive the wedge it watches for.
   while :; do
