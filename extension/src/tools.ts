@@ -978,7 +978,7 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 	const pause = defineTool({
 		name: "devloop.pause",
 		label: "Pause dev-loop",
-			description:
+		description:
 			"Operator pause: terminate every running child (worktrees kept), write HANDOFF.md (per-child positions + board snapshot) in the notes dir, and comment on the interrupted tickets. On resume (fresh session + 'keep going'), step 0 reads the handoff and re-dispatches the interrupted children.",
 		parameters: Type.Object({}),
 		execute: (_id, _params, _s, _u, toolCtx) => runBounded("devloop.pause", toolCtx, (c) => pauseImpl(c)),
