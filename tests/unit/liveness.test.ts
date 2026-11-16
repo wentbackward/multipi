@@ -138,6 +138,23 @@ test("renderStatus rc 1: no sidecar but a matching process runs (alive, no liven
 	assert.match(v.line, /no liveness sidecar/i);
 });
 
+// Addendum 2026-11-15 21:20 — OOM root cause surfaced on the line -----------------------------
+
+test("renderStatus: meminfo figures (from /proc/meminfo via MULTIPI_STATUS_MEMINFO) ride on the line, human-readable", () => {
+	const v = renderStatus({ state: base({ tool: { name: "devloop.gate", startedAt: 999_000, seq: 2 } }), now: 1_000_000, staleMs: 120_000, processAlive: true, mem: { ramKib: 1_048_576, swapFreeKib: 524_288 } });
+	assert.match(v.line, /ram=1\.0G swapfree=512M/, "GiB renders with one decimal, MiB integral");
+	const idle = renderStatus({ state: base({ state: "idle" }), now: 1_000_000, staleMs: 120_000, processAlive: true, mem: { ramKib: 153_600, swapFreeKib: 0 } });
+	assert.match(idle.line, /ram=150M swapfree=0M/, "sub-GiB and zero swap stay in MiB");
+	const noMem = render({ state: base({ state: "idle" }), now: 1_000_000, staleMs: 120_000, pidAlive: true });
+	assert.doesNotMatch(noMem.line, /ram=/, "an unreadable meminfo degrades to no figures, never a failure");
+});
+
+test("renderStatus rc 3: a vanished pid's dead text names the oom-kill journal check (confirmed root cause)", () => {
+	const v = render({ state: base({ tool: { name: "devloop.gate", startedAt: 999_000, seq: 1 } }), now: 1_000_000, staleMs: 120_000, pidAlive: false });
+	assert.equal(v.rc, 3);
+	assert.match(v.line, /journalctl --since <start> \| grep oom-kill/, "the likely cause is named with the exact check");
+});
+
 // --- withTimeout + the tool-timeout seams (spec §2) ---------------------------
 
 test("resolveToolTimeoutMs: absent env ⇒ the config minutes (default 45 ⇒ 2700000 ms)", () => {
