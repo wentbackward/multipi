@@ -59,7 +59,15 @@ export interface ToolContext {
 /** DEFAULT when no config resolves at all (spec 2026-11-15 §2: absent ⇒ 45). */
 const DEFAULT_TOOL_TIMEOUT_MINUTES = 45;
 
+/**
+ * Test seam for the single-construction pin (tools.test.ts): counts buildContext calls.
+ * The bound probe and the guarded run historically constructed the context TWICE per
+ * bounded tool call (a config read + a git subprocess each); the pin asserts exactly one.
+ */
+export const contextBuilds = { count: 0 };
+
 export function buildContext(cwd: string): ToolContext {
+	contextBuilds.count += 1;
 	const cfg = loadConfig(cwd);
 	if (!cfg) throw new Error(`no .devloop.json found at or above ${cwd}`);
 	const p = resolvePaths(cfg);
@@ -77,10 +85,12 @@ export function buildContext(cwd: string): ToolContext {
 	};
 }
 
-/** Per-invocation context resolution: tools act on the repo the agent is standing in. */
-async function runGuarded<T>(toolCtx: { cwd: string }, fn: (ctx: ToolContext) => Promise<AgentToolResult<T>>): Promise<AgentToolResult<T>> {
+/** Per-invocation context resolution: tools act on the repo the agent is standing in.
+ * `prebuilt` reuses runBounded's single construction (its bound probe already built it).
+ */
+async function runGuarded<T>(toolCtx: { cwd: string }, fn: (ctx: ToolContext) => Promise<AgentToolResult<T>>, prebuilt?: ToolContext): Promise<AgentToolResult<T>> {
 	try {
-		return await fn(buildContext(toolCtx.cwd));
+		return await fn(prebuilt ?? buildContext(toolCtx.cwd));
 	} catch (e) {
 		// Confined cast: the error result intentionally carries no details payload.
 		return { ...text(`devloop unavailable here: ${(e as Error).message}`), details: undefined, isError: true } as AgentToolResult<T>;
@@ -95,13 +105,14 @@ async function runGuarded<T>(toolCtx: { cwd: string }, fn: (ctx: ToolContext) =>
  * branch) continue, which is exactly what the text tells the operator to reconcile.
  */
 async function runBounded<T>(name: string, toolCtx: { cwd: string }, fn: (ctx: ToolContext) => Promise<AgentToolResult<T>>): Promise<AgentToolResult<T>> {
-	let ms: number | null;
+	let ctx: ToolContext | undefined;
 	try {
-		ms = resolveToolTimeoutMs(buildContext(toolCtx.cwd).cfg.orchestrator.toolTimeoutMinutes);
+		ctx = buildContext(toolCtx.cwd);
 	} catch {
-		ms = resolveToolTimeoutMs(DEFAULT_TOOL_TIMEOUT_MINUTES); // config unreachable: the default bound, never unbounded
+		// config unreachable: the default bound; runGuarded rebuilds once to surface the message
 	}
-	const r = await withTimeout(() => runGuarded(toolCtx, fn), ms);
+	const ms = resolveToolTimeoutMs(ctx?.cfg.orchestrator.toolTimeoutMinutes ?? DEFAULT_TOOL_TIMEOUT_MINUTES);
+	const r = await withTimeout(() => runGuarded(toolCtx, fn, ctx), ms);
 	if (r.status === "ok") return r.value;
 	return { ...text(timeoutText(name, r.ms)), isError: true } as AgentToolResult<T>;
 }
@@ -903,15 +914,15 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 		execute: (_id, params: Params<typeof branchesSchema>, _s, _u, toolCtx) =>
 			runBounded("devloop.gate", toolCtx, async (ctx) => {
 				const out = await runGateTrain({ scriptsDir: ctx.scriptsDir, repoRoot: ctx.cfg.root, branches: params.branches });
-			const label =
-				out.status === "green"
-					? "GATE GREEN — the train is gated. Record the label dl/gated on the covered tickets, then devloop.merge with the same branches, same order."
-					: out.status === "red"
-					  ? "GATE RED — nothing merges. Read the tail, dispatch the owning implementer to fix, re-push, re-gate."
-					  : out.status === "conflict"
-						? `GATE CONFLICT at ${out.branch ?? "?"} — drop it from the train (gate the rest, or have the implementer rebase), then re-gate.`
-						: "GATE ERROR — inspect the tail; this is usually a usage/config problem.";
-			return { ...text(`${label}\n${out.tail}`), details: out, ...(out.status !== "green" ? { isError: true } : {}) };
+				const label =
+					out.status === "green"
+						? "GATE GREEN — the train is gated. Record the label dl/gated on the covered tickets, then devloop.merge with the same branches, same order."
+						: out.status === "red"
+						  ? "GATE RED — nothing merges. Read the tail, dispatch the owning implementer to fix, re-push, re-gate."
+						  : out.status === "conflict"
+							? `GATE CONFLICT at ${out.branch ?? "?"} — drop it from the train (gate the rest, or have the implementer rebase), then re-gate.`
+							: "GATE ERROR — inspect the tail; this is usually a usage/config problem.";
+				return { ...text(`${label}\n${out.tail}`), details: out, ...(out.status !== "green" ? { isError: true } : {}) };
 		}),
 	});
 
@@ -924,11 +935,11 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 		execute: (_id, params: Params<typeof branchesSchema>, _s, _u, toolCtx) =>
 			runBounded("devloop.merge", toolCtx, async (ctx) => {
 				const out = await runMergeTrain({ scriptsDir: ctx.scriptsDir, repoRoot: ctx.cfg.root, branches: params.branches });
-			const label =
-				out.status === "merged"
-					? `MERGED ${out.merged.join(", ")} — mark the tickets dl/merged and close the issues.`
-					: `MERGE REFUSED (${out.status}) — nothing was merged. ${out.status === "tree-differs" || out.status === "branch-changed" || out.status === "replay-conflict" ? "Re-gate the train first." : ""}`;
-			return { ...text(`${label}\n${out.tail}`), details: out, ...(out.status !== "merged" ? { isError: true } : {}) };
+				const label =
+					out.status === "merged"
+						? `MERGED ${out.merged.join(", ")} — mark the tickets dl/merged and close the issues.`
+						: `MERGE REFUSED (${out.status}) — nothing was merged. ${out.status === "tree-differs" || out.status === "branch-changed" || out.status === "replay-conflict" ? "Re-gate the train first." : ""}`;
+				return { ...text(`${label}\n${out.tail}`), details: out, ...(out.status !== "merged" ? { isError: true } : {}) };
 		}),
 	});
 
@@ -939,35 +950,35 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 		parameters: Type.Object({}),
 		execute: (_id: string, _p: unknown, _s: AbortSignal | undefined, _u: unknown, toolCtx: { cwd: string }): Promise<AgentToolResult<undefined>> =>
 			runBounded("devloop.status", toolCtx, async (ctx) => {
-			const state = pruneDead(readState(ctx.stateDir));
-			const kids = Object.entries(state)
-				.map(([k, e]) => `| #${k} | ${e.role} | ${e.branch ?? "-"} | ${e.status} | ${new Date(e.startedAt).toISOString().slice(0, 16).replace("T", " ")} |`)
-				.join("\n");
-			const issues = listOpenIssues(ctx.repoSlug)
-				.map((i) => {
-					const labels = i.labels.filter((l) => l.startsWith("dl/")).join(", ") || "-";
-					const deps = [...i.body.matchAll(/Depends on #(\d+)/g)].map((m) => `#${m[1]}`).join(" ");
-					return `| #${i.number} | ${i.title} | ${labels} | ${deps || "-"} |`;
-				})
-				.join("\n");
-			const running = Object.values(state).filter((e) => e.status === "running" && e.role === "implementer").length;
-			const trainFile = path.join(ctx.stateDir, "train-green.txt");
-			let train = "(no gated train)";
-			try {
-				train = readFileSync(trainFile, "utf8").trim().replaceAll("\n", " | ");
-			} catch {
-				/* no record */
-			}
-			return text(
-				[`# devloop status`, "", `Implementers in flight: ${running}/${ctx.cfg.heavy.slots}`, "", "## Children", "| ticket | role | branch | status | since |", "|---|---|---|---|---|", kids || "| - | - | - | (none) | - |", "", "## Open tickets", "| # | title | dl/ labels | depends |", "|---|---|---|---|", issues || "| - | (none) | - | - |", "", `## Last green gate`, train, ""].join("\n"),
-			);
+				const state = pruneDead(readState(ctx.stateDir));
+				const kids = Object.entries(state)
+					.map(([k, e]) => `| #${k} | ${e.role} | ${e.branch ?? "-"} | ${e.status} | ${new Date(e.startedAt).toISOString().slice(0, 16).replace("T", " ")} |`)
+					.join("\n");
+				const issues = listOpenIssues(ctx.repoSlug)
+					.map((i) => {
+						const labels = i.labels.filter((l) => l.startsWith("dl/")).join(", ") || "-";
+						const deps = [...i.body.matchAll(/Depends on #(\d+)/g)].map((m) => `#${m[1]}`).join(" ");
+						return `| #${i.number} | ${i.title} | ${labels} | ${deps || "-"} |`;
+					})
+					.join("\n");
+				const running = Object.values(state).filter((e) => e.status === "running" && e.role === "implementer").length;
+				const trainFile = path.join(ctx.stateDir, "train-green.txt");
+				let train = "(no gated train)";
+				try {
+					train = readFileSync(trainFile, "utf8").trim().replaceAll("\n", " | ");
+				} catch {
+					/* no record */
+				}
+				return text(
+					[`# devloop status`, "", `Implementers in flight: ${running}/${ctx.cfg.heavy.slots}`, "", "## Children", "| ticket | role | branch | status | since |", "|---|---|---|---|---|", kids || "| - | - | - | (none) | - |", "", "## Open tickets", "| # | title | dl/ labels | depends |", "|---|---|---|---|", issues || "| - | (none) | - | - |", "", `## Last green gate`, train, ""].join("\n"),
+				);
 		}),
 	});
 
 	const pause = defineTool({
 		name: "devloop.pause",
 		label: "Pause dev-loop",
-			description:
+		description:
 			"Operator pause: terminate every running child (worktrees kept), write HANDOFF.md (per-child positions + board snapshot) in the notes dir, and comment on the interrupted tickets. On resume (fresh session + 'keep going'), step 0 reads the handoff and re-dispatches the interrupted children.",
 		parameters: Type.Object({}),
 		execute: (_id, _params, _s, _u, toolCtx) => runBounded("devloop.pause", toolCtx, (c) => pauseImpl(c)),
