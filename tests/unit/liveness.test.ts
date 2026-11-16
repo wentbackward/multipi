@@ -243,6 +243,13 @@ test("timeoutText: the exact reconciliation text the spec pins", () => {
 	);
 });
 
+test("timeoutText: a sub-minute bound renders <N>s — the agreed sub-minute variant of the spec's exact text (never 0m, whole seconds, minimum 1s)", () => {
+	const tail = " — external state (branch, worktree, child) is UNTOUCHED; check scripts/multipi-status.sh and devloop.status, then retry or devloop.cancel <ticket>.";
+	assert.equal(timeoutText("devloop.status", 30_000), `devloop.status timed out after 30s${tail}`);
+	assert.equal(timeoutText("devloop.status", 1_500), `devloop.status timed out after 2s${tail}`, "rounded to whole seconds");
+	assert.equal(timeoutText("devloop.status", 400), `devloop.status timed out after 1s${tail}`, "minimum 1s — never 0s/0m");
+});
+
 // --- shared helpers -----------------------------------------------------------
 
 function mkdtemp(): string {
