@@ -58,8 +58,11 @@ Renders one line (state, in-flight tool + elapsed, heartbeat age, pid, tty) and 
 | 3 | dead (`state=ended` or no sidecar and no matching pi process) |
 | 4 | bad usage / unreadable sidecar |
 
-`MULTIPI_STATUS_STALE_MS` is a documented test seam (integer ms). Offline: the script only
-reads the sidecar (and `ps` for the pid).
+`MULTIPI_STATUS_STALE_MS` is a documented test seam (integer ms; malformed ⇒ rc 4 —
+see the posture note in §4). The NO-SIDECAR process probe is a `pgrep -f` against the
+documented seam `MULTIPI_STATUS_PI_PAT` (default `pi-coding-agent`; the session's
+argv pattern — with a sidecar the probe is exact, the pid itself). Offline: the script
+only reads the sidecar (and `ps` for the pid).
 
 **Addendum (2026-11-15 21:20) — OOM root cause surfaced on the line:** the repeated
 "No result provided" deaths are confirmed OOM-kills (three `tmux-spawn-*.scope … result
@@ -77,8 +80,9 @@ full permanently). Accordingly:
 
 ## 2. Bounded tool calls — the unwedge (part B)
 
-`tools.ts` wraps **every** `devloop.*` implementation in `withTimeout(name, impl, ms)`
-(extracted as a pure helper in `liveness.ts` so it is unit-testable without pi):
+`tools.ts` wraps **every** `devloop.*` implementation in `withTimeout(impl, ms)`
+(extracted as a pure helper in `liveness.ts` so it is unit-testable without pi);
+the tool name enters the timeout message via `timeoutText(name, ms)`:
 
 - `ms` from new `.devloop.json` key `"orchestrator": { "tool_timeout_minutes": 45 }`
   (absent ⇒ 45; gate trains run 5–15 min, implementers can run long). `MULTIPI_TOOL_TIMEOUT_MS`
@@ -86,8 +90,12 @@ full permanently). Accordingly:
 - On expiry the tool **resolves with an error result** (never rejects, never hangs):
   `devloop.<tool> timed out after <N>m — external state (branch, worktree, child) is
   UNTOUCHED; check scripts/multipi-status.sh and devloop.status, then retry or
-  devloop.cancel <ticket>.` The underlying promise is abandoned (its child, if any,
-  continues — exactly what the timeout text tells the operator to reconcile).
+  devloop.cancel <ticket>.` Bounds are rendered in whole minutes (`45m` for the
+  default). A bound UNDER 60 000 ms (only reachable via the `MULTIPI_TOOL_TIMEOUT_MS`
+  seam) renders `<N>s` instead — whole seconds, minimum `1s` — so the line never
+  claims `0m`; the rest of the text is word-for-word the same. The underlying promise
+  is abandoned (its child, if any, continues — exactly what the timeout text tells
+  the operator to reconcile).
 - The sidecar's `tool` field plus this bound means a wedged tool call can at worst be
   invisible for `tool_timeout_minutes` — never hours.
 
@@ -125,7 +133,12 @@ paste, not an RPC — if the session's terminal is detached/dead, rc 6 + printed
     `lastWakeSeq` + watch log).
 - Clocks/thresholds overridable: `MULTIPI_WATCH_NOW_MS` (integer epoch-ms, same pattern as
   `MULTIPI_APPROVE_NOW_MS`), `MULTIPI_WATCH_TOOL_MS`, `MULTIPI_STATUS_STALE_MS`,
-  `MULTIPI_INTERRUPT_TTY` — all documented seams.
+  `MULTIPI_INTERRUPT_TTY` — all documented seams. **Seam-validation posture (deliberate
+  divergence, see DECISIONS.md):** the runtime THRESHOLD seams of the daemon
+  (`MULTIPI_WATCH_TOOL_MS`, `MULTIPI_STATUS_STALE_MS`) fall back SILENTLY to their safe
+  defaults on a malformed integer — a typo must degrade the safety net to its default,
+  not kill it — whereas the ISSUING CLOCK `MULTIPI_WATCH_NOW_MS` is strict (rc 4):
+a wrong clock would silently skew every comparison it feeds.
 - **`--daemon`**: `setsid nohup` self-loop (sleep `--interval`, default 60 s), pidfile +
   pid-liveness lockfile (single instance), log to `~/.multipi/<repo>/watch.log`.
 - **Auto-start:** the `session_start` hook spawns
