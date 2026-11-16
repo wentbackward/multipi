@@ -131,6 +131,12 @@ is done: mark its issues closed, summarise what shipped and where, and stop ONLY
 
 ## 8. Interruptions, steering and the user
 
+- **The operator's console** (spec 2026-11-15): when the user reports the loop looks wedged, the
+  first move is `scripts/multipi-status.sh` (rc 2 = suspected wedge, rc 3 = dead) and, if the
+  session is alive but silent, `scripts/multipi-interrupt.sh "..."` to force-send a message into
+  it — the watchdog (`multipi-watch.sh --daemon`, auto-started) already does this on its own
+  cadence. Every `devloop.*` call is bounded (default 45 min), so a wedged tool resolves on its
+  own with the reconciliation text.
 - `devloop.cancel {ticket}` kills one child (its worktree and branch are kept; a re-dispatch resumes).
   Ctrl+C kills everything — after it, recover via step 0.
 - **Pausing:** when the user asks to pause, stop, or checkpoint the loop, call `devloop.pause`:

@@ -60,6 +60,22 @@ bootstrap another project, the **`devloop-setup` skill**.
   is behavioural (`have_flock`), so a dead `flock` stub emulates a flock-less system.
 - Label vocabulary: `dl/in-progress` → `dl/in-review` → `dl/approved` → `dl/gated` → `dl/merged`
   (+ `dl/blocked`). The labels ARE the state; keep them truthful.
+- **Operator console** (spec 2026-11-15): `scripts/multipi-status.sh` renders one line
+  (state, in-flight tool + elapsed, heartbeat age, pid, tty, available RAM/swap-free) and
+  exits per its pinned rc table (0 live · 1 idle · 2 STALE/wedge · 3 dead · 4 bad usage/
+  unreadable sidecar; seams `MULTIPI_STATUS_STALE_MS`, `MULTIPI_STATUS_MEMINFO`,
+  `MULTIPI_STATUS_PI_PAT`). `scripts/multipi-interrupt.sh [--dry-run] "message"` force-sends
+  a message into a wedged session (rc 0 injected · 4 usage · 5 no live session · 6 no TTY —
+  prints the kill-and-resume fallback; a TTY paste, not an RPC: a detached terminal is
+  unreachable, that is the honest limit). Every `devloop.*` tool call is bounded by
+  `orchestrator.tool_timeout_minutes` (default 45; `MULTIPI_TOOL_TIMEOUT_MS` overrides,
+  0 = disabled) and resolves with the reconciliation text on expiry. The watchdog
+  (`scripts/multipi-watch.sh --daemon`, auto-started by TUI sessions, single-instance
+  pidfile, `MULTIPI_WATCH_TOOL_MS`/`MULTIPI_WATCH_NOW_MS` seams) wakes a tool in flight > 12 min
+  or a heartbeat silent > 10 min — deduped to one wake per tool-seq and per 3600 s.
+  A session that vanished mid-tool was very likely OOM-killed: the rc 3 line says so and
+  points at `journalctl --since <start> | grep oom-kill` (the confirmed root cause of the
+  "No result provided" deaths).
 - `scripts/doctor.sh` diagnoses; `scripts/install.sh <repo>` installs the loop into a project.
 
 ## Dark factory (seams and guard limits)
