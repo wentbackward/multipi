@@ -138,7 +138,7 @@ paste, not an RPC — if the session's terminal is detached/dead, rc 6 + printed
   (`MULTIPI_WATCH_TOOL_MS`, `MULTIPI_STATUS_STALE_MS`) fall back SILENTLY to their safe
   defaults on a malformed integer — a typo must degrade the safety net to its default,
   not kill it — whereas the ISSUING CLOCK `MULTIPI_WATCH_NOW_MS` is strict (rc 4):
-a wrong clock would silently skew every comparison it feeds.
+  a wrong clock would silently skew every comparison it feeds.
 - **`--daemon`**: `setsid nohup` self-loop (sleep `--interval`, default 60 s), pidfile +
   pid-liveness lockfile (single instance), log to `~/.multipi/<repo>/watch.log`.
 - **Auto-start:** the `session_start` hook spawns
