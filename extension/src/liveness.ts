@@ -151,8 +151,10 @@ export function resolveToolTimeoutMs(configMinutes: number, env: NodeJS.ProcessE
 	return Math.round(configMinutes * 60000);
 }
 
-/** The exact reconciliation text a timed-out devloop.* tool resolves with (spec §2). */
+/** The exact reconciliation text a timed-out devloop.* tool resolves with (spec §2). Minute-scale
+ * bounds render `<N>m` (the spec's pin); sub-minute seam bounds render `<N>s` so the line never
+ * claims "0m". */
 export function timeoutText(name: string, ms: number): string {
-	const minutes = Math.round(ms / 60000);
-	return `${name} timed out after ${minutes}m — external state (branch, worktree, child) is UNTOUCHED; check scripts/multipi-status.sh and devloop.status, then retry or devloop.cancel <ticket>.`;
+	const dur = ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}s` : `${Math.round(ms / 60_000)}m`;
+	return `${name} timed out after ${dur} — external state (branch, worktree, child) is UNTOUCHED; check scripts/multipi-status.sh and devloop.status, then retry or devloop.cancel <ticket>.`;
 }
