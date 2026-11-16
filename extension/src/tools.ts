@@ -903,15 +903,15 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 		execute: (_id, params: Params<typeof branchesSchema>, _s, _u, toolCtx) =>
 			runBounded("devloop.gate", toolCtx, async (ctx) => {
 				const out = await runGateTrain({ scriptsDir: ctx.scriptsDir, repoRoot: ctx.cfg.root, branches: params.branches });
-			const label =
-				out.status === "green"
-					? "GATE GREEN — the train is gated. Record the label dl/gated on the covered tickets, then devloop.merge with the same branches, same order."
-					: out.status === "red"
-					  ? "GATE RED — nothing merges. Read the tail, dispatch the owning implementer to fix, re-push, re-gate."
-					  : out.status === "conflict"
-						? `GATE CONFLICT at ${out.branch ?? "?"} — drop it from the train (gate the rest, or have the implementer rebase), then re-gate.`
-						: "GATE ERROR — inspect the tail; this is usually a usage/config problem.";
-			return { ...text(`${label}\n${out.tail}`), details: out, ...(out.status !== "green" ? { isError: true } : {}) };
+				const label =
+					out.status === "green"
+						? "GATE GREEN — the train is gated. Record the label dl/gated on the covered tickets, then devloop.merge with the same branches, same order."
+						: out.status === "red"
+						  ? "GATE RED — nothing merges. Read the tail, dispatch the owning implementer to fix, re-push, re-gate."
+						  : out.status === "conflict"
+							? `GATE CONFLICT at ${out.branch ?? "?"} — drop it from the train (gate the rest, or have the implementer rebase), then re-gate.`
+							: "GATE ERROR — inspect the tail; this is usually a usage/config problem.";
+				return { ...text(`${label}\n${out.tail}`), details: out, ...(out.status !== "green" ? { isError: true } : {}) };
 		}),
 	});
 
@@ -924,11 +924,11 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 		execute: (_id, params: Params<typeof branchesSchema>, _s, _u, toolCtx) =>
 			runBounded("devloop.merge", toolCtx, async (ctx) => {
 				const out = await runMergeTrain({ scriptsDir: ctx.scriptsDir, repoRoot: ctx.cfg.root, branches: params.branches });
-			const label =
-				out.status === "merged"
-					? `MERGED ${out.merged.join(", ")} — mark the tickets dl/merged and close the issues.`
-					: `MERGE REFUSED (${out.status}) — nothing was merged. ${out.status === "tree-differs" || out.status === "branch-changed" || out.status === "replay-conflict" ? "Re-gate the train first." : ""}`;
-			return { ...text(`${label}\n${out.tail}`), details: out, ...(out.status !== "merged" ? { isError: true } : {}) };
+				const label =
+					out.status === "merged"
+						? `MERGED ${out.merged.join(", ")} — mark the tickets dl/merged and close the issues.`
+						: `MERGE REFUSED (${out.status}) — nothing was merged. ${out.status === "tree-differs" || out.status === "branch-changed" || out.status === "replay-conflict" ? "Re-gate the train first." : ""}`;
+				return { ...text(`${label}\n${out.tail}`), details: out, ...(out.status !== "merged" ? { isError: true } : {}) };
 		}),
 	});
 
@@ -939,28 +939,28 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 		parameters: Type.Object({}),
 		execute: (_id: string, _p: unknown, _s: AbortSignal | undefined, _u: unknown, toolCtx: { cwd: string }): Promise<AgentToolResult<undefined>> =>
 			runBounded("devloop.status", toolCtx, async (ctx) => {
-			const state = pruneDead(readState(ctx.stateDir));
-			const kids = Object.entries(state)
-				.map(([k, e]) => `| #${k} | ${e.role} | ${e.branch ?? "-"} | ${e.status} | ${new Date(e.startedAt).toISOString().slice(0, 16).replace("T", " ")} |`)
-				.join("\n");
-			const issues = listOpenIssues(ctx.repoSlug)
-				.map((i) => {
-					const labels = i.labels.filter((l) => l.startsWith("dl/")).join(", ") || "-";
-					const deps = [...i.body.matchAll(/Depends on #(\d+)/g)].map((m) => `#${m[1]}`).join(" ");
-					return `| #${i.number} | ${i.title} | ${labels} | ${deps || "-"} |`;
-				})
-				.join("\n");
-			const running = Object.values(state).filter((e) => e.status === "running" && e.role === "implementer").length;
-			const trainFile = path.join(ctx.stateDir, "train-green.txt");
-			let train = "(no gated train)";
-			try {
-				train = readFileSync(trainFile, "utf8").trim().replaceAll("\n", " | ");
-			} catch {
-				/* no record */
-			}
-			return text(
-				[`# devloop status`, "", `Implementers in flight: ${running}/${ctx.cfg.heavy.slots}`, "", "## Children", "| ticket | role | branch | status | since |", "|---|---|---|---|---|", kids || "| - | - | - | (none) | - |", "", "## Open tickets", "| # | title | dl/ labels | depends |", "|---|---|---|---|", issues || "| - | (none) | - | - |", "", `## Last green gate`, train, ""].join("\n"),
-			);
+				const state = pruneDead(readState(ctx.stateDir));
+				const kids = Object.entries(state)
+					.map(([k, e]) => `| #${k} | ${e.role} | ${e.branch ?? "-"} | ${e.status} | ${new Date(e.startedAt).toISOString().slice(0, 16).replace("T", " ")} |`)
+					.join("\n");
+				const issues = listOpenIssues(ctx.repoSlug)
+					.map((i) => {
+						const labels = i.labels.filter((l) => l.startsWith("dl/")).join(", ") || "-";
+						const deps = [...i.body.matchAll(/Depends on #(\d+)/g)].map((m) => `#${m[1]}`).join(" ");
+						return `| #${i.number} | ${i.title} | ${labels} | ${deps || "-"} |`;
+					})
+					.join("\n");
+				const running = Object.values(state).filter((e) => e.status === "running" && e.role === "implementer").length;
+				const trainFile = path.join(ctx.stateDir, "train-green.txt");
+				let train = "(no gated train)";
+				try {
+					train = readFileSync(trainFile, "utf8").trim().replaceAll("\n", " | ");
+				} catch {
+					/* no record */
+				}
+				return text(
+					[`# devloop status`, "", `Implementers in flight: ${running}/${ctx.cfg.heavy.slots}`, "", "## Children", "| ticket | role | branch | status | since |", "|---|---|---|---|---|", kids || "| - | - | - | (none) | - |", "", "## Open tickets", "| # | title | dl/ labels | depends |", "|---|---|---|---|", issues || "| - | (none) | - | - |", "", `## Last green gate`, train, ""].join("\n"),
+				);
 		}),
 	});
 
