@@ -63,14 +63,15 @@ clean_stale_temp() {
 }
 
 # slot_holder_dead LOCKDIR: true when a slot-lock directory holds NO live owner: no pid file
-# at all, an unusable one, or a pid that is not running. A SIGKILLed holder skips its EXIT
-# trap, so its lock must ALWAYS read as FREE (ticket #68). Never fall back to `kill -0 0`:
-# pid 0 targets the CALLER'S own process group and would answer "alive" for an ownerless lock.
+# at all, an unusable one (non-numeric, a leading zero, 0), or a pid that is not running.
+# A SIGKILLed holder skips its EXIT trap, so its lock must ALWAYS read as FREE (ticket #68).
+# `0` is rejected by the regex, not by `kill -0`: pid 0 targets the CALLER'S own process
+# group and would answer "alive" for a ghost — the exact fallback the header forbids.
 slot_holder_dead() { # slot_holder_dead LOCKDIR
   local pid=""
   [ -f "$1/pid" ] || return 0
   pid=$(tr -d '[:space:]' <"$1/pid" 2>/dev/null)
-  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
   kill -0 "$pid" 2>/dev/null && return 1
   return 0
 }
