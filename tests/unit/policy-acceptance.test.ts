@@ -171,8 +171,8 @@ test("P5 acceptance: the full train (dispatch -> review -> gate -> merge) runs z
 		const callsLog = path.join(fx.dir, "gh", "calls.log");
 		assert.ok(existsSync(callsLog), "the fake tracker's calls.log exists (its gh calls were served)");
 		const calls = readFileSync(callsLog, "utf8");
-		assert.match(calls, / issue create Train ticket zero deny$/, "the train's issue create reached the fake gh, not the real one");
-		assert.match(calls, / pr merge \S+ --squash --match-head-commit \S+$/, "the merge's pr merge reached the fake gh, not the real one");
+		assert.match(calls, /^gh repo=\S* issue create Train ticket zero deny$/m, "the train's issue create reached the fake gh, not the real one");
+		assert.match(calls, /^gh repo=\S* pr merge \S+ --squash --match-head-commit [0-9a-f]{40}$/m, "the merge's pr merge reached the fake gh, not the real one");
 
 		// THE ACCEPTANCE ASSERTIONS on the audit log: zero unexpected denies (and no asks —
 		// an ask would have blocked the train anyway), and the merge's pass is PROVEN to be
