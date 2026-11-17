@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Smoke test of the multipi scripts on a throwaway project with a local bare origin.
-# No network, no real GitHub: `gh` is tests/fake-gh. Run: bash tests/smoke.sh
+# No network, no real GitHub: `gh` is tests/fake-gh. Exception: the P3 doc-form passthrough pin
+# observes forwarding at the shim boundary and so requires a COMPILED `gh` on PATH (bootstrap-box
+# contract, ticket #68) — its absence is a "broken test environment" (the pin fails loudly), not a
+# vacuous pass. Run: bash tests/smoke.sh
 set -u
 plugin=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/multipi-smoke.XXXXXX")
@@ -18,6 +21,9 @@ export PATH="$work/bin:$PATH"
 # do — never `command -v`. Sourcing the library is side-effect free.
 shim_dir="$plugin/scripts/policy-shims"
 . "$shim_dir/lib/policyshim.sh"
+# Consumed across the file boundary: the sourced shim_find_real reads SIM_SHIM_DIR to anchor
+# its own-dir exclusion (shellcheck cannot see the use, cf. the shims' own suppression).
+# shellcheck disable=SC2034
 SIM_SHIM_DIR="$shim_dir"
 # Resolve ONCE: every git fixture in this smoke execs the SAME real git the shims resolve
 # to (a fixture that captures the wrapper it sits next to is the bug this ticket fixes).
