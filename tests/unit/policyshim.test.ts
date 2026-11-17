@@ -20,7 +20,7 @@ import test from "node:test";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const LIB = path.resolve(HERE, "..", "..", "scripts", "policy-shims", "lib", "policyshim.sh");
-const BASH = ["/usr/bin/bash", "/bin/bash"].find((p) => existsSync(p));
+const BASH = ["/usr/bin/bash", "/bin/bash"].find((p) => existsSync(p)) ?? "/bin/bash";
 assert.ok(BASH, "bash for the snippets");
 
 /** dir with an executable bash `git` (first bytes = `#!` script magic). */
