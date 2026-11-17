@@ -62,6 +62,13 @@ clean_stale_temp() {
   done
 }
 
+# have_flock: a flock that actually WORKS (name resolution alone is not enough — a broken
+# placeholder answers `command -v` but fails at use; the branch point must be behavioural,
+# ticket #68's no-flock test seam rides on this).
+have_flock() {
+  command -v flock >/dev/null 2>&1 && flock --version >/dev/null 2>&1
+}
+
 # have_memory_cap: true when systemd can run a transient user scope with a memory limit.
 have_memory_cap() {
   command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1
@@ -106,7 +113,14 @@ try_slot_flock() {
 try_slot_mkdir() {
   local slot=$1 rc=0
   shift
-  if mkdir "$lock_dir/slot$slot.d" 2>/dev/null; then
+  local d="$lock_dir/slot$slot.d"
+  # A holder SIGKILLed mid-hold (EXIT trap skipped) leaves its dir with a dead pid: the
+  # startup sweep (clean_stale_temp) already ran BEFORE this slot was taken, so a WAITING
+  # instance must re-check at acquisition, or it polls the ghost forever (ticket #68).
+  if [ -d "$d" ] && ! kill -0 "$(cat "$d/pid" 2>/dev/null || echo 0)" 2>/dev/null; then
+    rm -rf -- "$d"
+  fi
+  if mkdir "$d" 2>/dev/null; then
     ran=yes
     echo $$ >"$lock_dir/slot$slot.d/pid"
     trap 'rm -rf -- "$lock_dir/slot$slot.d"' EXIT INT TERM
@@ -123,7 +137,7 @@ waiting_said=""
 while true; do
   for ((slot = 1; slot <= slots; slot++)); do
     ran=""
-    if command -v flock >/dev/null 2>&1; then
+    if have_flock; then
       try_slot_flock "$slot" "$@"
     else
       try_slot_mkdir "$slot" "$@"

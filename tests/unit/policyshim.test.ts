@@ -121,11 +121,14 @@ test("a mutual-exec chain dies at the guard on hop 4 (the pre-fix infinite loop,
 	// refuses — the exact bound where the incident's A→B→A→B spin used to run forever.
 	// (The real two-layer PATH is exercised end to end on the smoke side.)
 	const nested = runShim(`
+	  # The innermost script rides an ENV VAR, not the argv chain: quoting three bash levels
+	  # through argument lists is exactly the footgun this test must not have.
+	  PAYLOAD='echo $_POLICYSHIM_DEPTH'
 	  d=0
 	  for hop in 1 2 3 4; do
-	    out=$(env _POLICYSHIM_DEPTH=$d ${BASH} -c '. "${LIB}" && _shim_exec_real ${BASH} -c "printf %s $_POLICYSHIM_DEPTH"' 2>&1)
+	    out=$(env _POLICYSHIM_DEPTH=$d PAYLOAD="$PAYLOAD" ${BASH} -c '. "${LIB}" && _shim_exec_real "${BASH}" -c "$PAYLOAD"' 2>&1)
 	    rc=$?
-	    if [ $rc -ne 0 ]; then echo "hop${hop}=126"; break; fi
+	    if [ $rc -ne 0 ]; then echo "hop\${hop}=126"; break; fi
 	    d=$out
 	  done
 	  echo "depth=$d"`);

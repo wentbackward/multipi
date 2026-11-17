@@ -10,8 +10,9 @@
 # execs the real git with argv UNTOUCHED.
 #
 # Unresolvable acting repo or unknown push destination ⇒ deny (the oneshot rule, spec
-# §7.2: the fail direction is the 2026-11-09 failure mode itself). Exit: 126 deny or ask
-# (nothing executed), 127 real git unlocatable, else the real git's own code.
+# §7.2: the fail direction is the 2026-11-09 failure mode itself). Every exec of the real
+# binary goes through the `_shim_exec_real` recursion guard (ticket #68). Exit: 126 deny
+# or ask (nothing executed), 127 real git unlocatable, else the real git's own code.
 #
 # Named residual (P3 review round 12, beside the unclassified-verbs list in DECISIONS):
 # `git push <remote> --delete <unprefixed-name>` has a GENUINELY AMBIGUOUS destination —
@@ -75,7 +76,7 @@ while [ "$i" -lt "${#args[@]}" ]; do
   esac
 done
 if [ "$i" -ge "${#args[@]}" ]; then
-  exec "$REAL_GIT" "$@"                    # no subcommand (e.g. bare `git`, `git --version`)
+  _shim_exec_real "$REAL_GIT" "$@"                    # no subcommand (e.g. bare `git`, `git --version`)
 fi
 sub=${args[$i]}
 
@@ -87,7 +88,7 @@ sub=${args[$i]}
 # narrower reading is an over-CONSULT (e.g. `git commit -q --help`), which evaluates like
 # any other mutation — harmless on self, ask-shaped off-self: the fail-safe direction.
 if [ "$((i + 1))" -lt "${#args[@]}" ]; then
-  case "${args[$((i + 1))]}" in -h | --help | --version) exec "$REAL_GIT" "$@" ;; esac
+  case "${args[$((i + 1))]}" in -h | --help | --version) _shim_exec_real "$REAL_GIT" "$@" ;; esac
 fi
 
 force=0; base=0; tags=0; dest_unknown=0
@@ -124,7 +125,7 @@ case "$sub" in
       esac
       j=$((j + 1))
     done
-    [ "${exec_policy_check:-0}" = 1 ] || exec "$REAL_GIT" "$@"
+    [ "${exec_policy_check:-0}" = 1 ] || _shim_exec_real "$REAL_GIT" "$@"
     ;;
   tag)
     # `git tag` alone or `git tag -l|-n|-v|…` LIST (read-only); creating or deleting a tag
@@ -140,7 +141,7 @@ case "$sub" in
       j=$((j + 1))
     done
     [ "$listish" = 0 ] && [ "$has_pos" = 1 ] && exec_policy_check=1
-    [ "${exec_policy_check:-0}" = 1 ] || exec "$REAL_GIT" "$@"
+    [ "${exec_policy_check:-0}" = 1 ] || _shim_exec_real "$REAL_GIT" "$@"
     ;;
   push)
     j=$((i + 1))
@@ -174,7 +175,7 @@ case "$sub" in
           # wildcard destinations; `--no-all`/`--no-branches` are NOT a match and
           # restore the default behaviour via the existing current-branch rule.
           base=1 ;;
-        --dry-run) exec "$REAL_GIT" "$@" ;;   # a dry-run executes nothing: not a mutation
+        --dry-run) _shim_exec_real "$REAL_GIT" "$@" ;;   # a dry-run executes nothing: not a mutation
         --repo=* | --receive-pack=*) dest_unknown=1 ;;
         -o | --push-option)
           # VALUE-CONSUMING in the space form: the next word is push-option data, not a
@@ -259,10 +260,10 @@ case "$sub" in
     exec_policy_check=1
     ;;
   *)
-    exec "$REAL_GIT" "$@"                   # read-only / out-of-ticket-scope: straight through
+    _shim_exec_real "$REAL_GIT" "$@"                   # read-only / out-of-ticket-scope: straight through
     ;;
 esac
-[ "${exec_policy_check:-0}" = 1 ] || exec "$REAL_GIT" "$@"
+[ "${exec_policy_check:-0}" = 1 ] || _shim_exec_real "$REAL_GIT" "$@"
 
 # --- the mutation path: ground truth + shared evaluator ---------------------------------
 SIM_TARGET=$(shim_resolve_repo "$REAL_GIT" "$acting")
@@ -288,10 +289,10 @@ if [ "$rc" -ne 0 ]; then
 fi
 case "$outcome" in
   INACTIVE*)
-    exec "$REAL_GIT" "$@"                   # no effective policy here: not armed, pass through
+    _shim_exec_real "$REAL_GIT" "$@"                   # no effective policy here: not armed, pass through
     ;;
   ALLOW)
-    exec "$REAL_GIT" "$@"
+    _shim_exec_real "$REAL_GIT" "$@"
     ;;
   BLOCK*)
     IFS=$'\t' read -r _ blockline <<<"$outcome"

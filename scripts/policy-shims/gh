@@ -8,8 +8,9 @@
 # matters for the two dangerous verbs precisely because a `sh -c` wrap defeats any Layer-1
 # string pattern, while the shim sees the unwrapped argv (spec §9).
 #
-# Exit: 126 deny or ask (nothing executed), 127 real gh unlocatable, else the real
-# gh's own code.
+# Every exec of the real binary goes through the `_shim_exec_real` recursion guard
+# (ticket #68). Exit: 126 deny or ask (nothing executed), 127 real gh unlocatable, else
+# the real gh's own code.
 #
 # The SIM_* facts set below are read by shim_decide (policyshim.sh) — the consumer crosses
 # a file, so shellcheck cannot see the use (SC2034 is suppressed file-wide on purpose).
@@ -43,7 +44,7 @@ while [ "$i" -lt "${#args[@]}" ]; do
   esac
 done
 if [ "$i" -ge "${#args[@]}" ] || [ "$((i + 1))" -ge "${#args[@]}" ]; then
-  exec "$REAL_GH" "$@"                       # no noun+verb (bare `gh`, `gh --version`, …)
+  _shim_exec_real "$REAL_GH" "$@"                       # no noun+verb (bare `gh`, `gh --version`, …)
 fi
 noun=${args[$i]}
 # Verb derivation must SKIP global flags interleaved between noun and verb (P3 review
@@ -63,7 +64,7 @@ while [ "$vi" -lt "${#args[@]}" ]; do
     *) break ;;   # the verb
   esac
 done
-[ "$vi" -ge "${#args[@]}" ] && exec "$REAL_GH" "$@"   # noun with no verb: not a classified action
+[ "$vi" -ge "${#args[@]}" ] && _shim_exec_real "$REAL_GH" "$@"   # noun with no verb: not a classified action
 verb=${args[$vi]}
 # A `--help`/`--version` immediately following the VERB is documentation, not an action:
 # `gh repo delete --help` must not classify as the delete. Scoped to that ONE token
@@ -71,20 +72,20 @@ verb=${args[$vi]}
 # flag's value (`gh pr merge 12 -m --help`) is data, not a help request, and must never
 # skip the classification.
 if [ "$((vi + 1))" -lt "${#args[@]}" ]; then
-  case "${args[$((vi + 1))]}" in -h | --help | --version) exec "$REAL_GH" "$@" ;; esac
+  case "${args[$((vi + 1))]}" in -h | --help | --version) _shim_exec_real "$REAL_GH" "$@" ;; esac
 fi
 
 case "$noun" in
   repo)
-    [ "$verb" = "delete" ] || exec "$REAL_GH" "$@"
+    [ "$verb" = "delete" ] || _shim_exec_real "$REAL_GH" "$@"
     SIM_GH_ACTION=repo-delete
     ;;
   pr)
-    [ "$verb" = "merge" ] || exec "$REAL_GH" "$@"
+    [ "$verb" = "merge" ] || _shim_exec_real "$REAL_GH" "$@"
     SIM_GH_ACTION=pr-merge
     ;;
   *)
-    exec "$REAL_GH" "$@"                     # everything else: straight through
+    _shim_exec_real "$REAL_GH" "$@"                     # everything else: straight through
     ;;
 esac
 
@@ -102,10 +103,10 @@ if [ "$rc" -ne 0 ]; then
 fi
 case "$outcome" in
   INACTIVE*)
-    exec "$REAL_GH" "$@"                     # no effective policy here: not armed, pass through
+    _shim_exec_real "$REAL_GH" "$@"                     # no effective policy here: not armed, pass through
     ;;
   ALLOW)
-    exec "$REAL_GH" "$@"
+    _shim_exec_real "$REAL_GH" "$@"
     ;;
   BLOCK*)
     IFS=$'\t' read -r _ blockline <<<"$outcome"
