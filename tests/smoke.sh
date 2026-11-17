@@ -1634,11 +1634,14 @@ for d in "${path_dirs[@]}"; do
 done
 mkdir -p "$work/bin-nonode"
 # Re-provide what doctor.sh, common.sh and fake-gh need under the filtered PATH, deriving
-# each location from `command -v` (no hardcoded bin dirs); node itself is left out:
-for tool in env bash sh git jq python3 cut dirname basename realpath mkdir; do
+# each location from `command -v` (no hardcoded bin dirs); node itself is left out.
+# #68: git comes from the shared resolution, NOT `command -v` — under a dogfood-armed PATH
+# the latter is the shim itself, and the symlanted shim loses its lib (broken install).
+for tool in env bash sh jq python3 cut dirname basename realpath mkdir; do
   d=$(command -v "$tool" 2>/dev/null) || continue
   ln -sf "$d" "$work/bin-nonode/$tool"
 done
+ln -sf "$smoke_real_git" "$work/bin-nonode/git"
 ln -sf "$work/bin/gh" "$work/bin-nonode/gh"
 out=$(PATH="$work/bin-nonode:$path_nonode" bash "$plugin/scripts/doctor.sh" 2>&1)
 rc=$?
@@ -3018,12 +3021,15 @@ n1_hv=$(grep -c 'merge 12' "$GH_CALLS" 2>/dev/null); n1_hv=${n1_hv:-0}
 expect "P3 smoke: the real gh never saw the value-spelled merge" "$n0_hv" "$n1_hv"
 # Control: the token immediately after the verb IS still the doc form — the shim is
 # TRANSPARENT (fake-gh does not implement repo delete, so pin the FORWARDING, not its rc).
-n0_hp=$(grep -c 'repo delete --help' "$GH_CALLS" 2>/dev/null); n0_hp=${n0_hp:-0}
 out=$(p3gh repo delete --help 2>&1); rc=$?
 [ "$rc" -ne 126 ] && pass "P3 smoke: 'gh repo delete --help' (immediate token) is not shim-blocked" ||
   fail "P3 smoke: the doc-form delete was blocked at the shim (rc $rc): $out"
-n1_hp=$(grep -c 'repo delete --help' "$GH_CALLS" 2>/dev/null); n1_hp=${n1_hp:-0}
-expect "P3 smoke: the doc-form delete was forwarded to the real gh" "$((n0_hp + 1))" "$n1_hp"
+# #68 re-pin: forwarding is observed at the SHIM BOUNDARY, not in the fake tracker's log —
+# a script can no longer be "the real gh" by contract (compiled-artifact rule), so the
+# passthrough exec lands on the first COMPILED gh (here the system gh), and the honest
+# assertion is: no deny line, and the doc-form help rendered past the shim.
+printf '%s\n' "$out" | grep -q "DENIED" && fail "P3 smoke: the doc-form delete carried a deny line: $out" ||
+  pass "P3 smoke: the doc-form delete reached the real gh (help rendered, no deny)"
 n0_av=$(grep -c 'repo delete' "$GH_CALLS" 2>/dev/null); n0_av=${n0_av:-0}
 out=$(p3gh --api-version v4 repo delete o/r 2>&1); rc=$?
 expect "P3 smoke: 'gh --api-version v4 repo delete o/r' is DENIED (the value does not become the noun)" "126" "$rc"
@@ -3043,9 +3049,11 @@ echo "$out" | grep -qF "DENIED gh:repo-delete:" || fail "P3 smoke: the mid-verb 
 #     commit message (a quote-drop would hand git a pathspec, not a message).
 out=$(GIT_TRACE=1 PATH="$PSH:$PATH" git commit -m "two words" --allow-empty 2>&1)
 expect "P3 smoke: the mutation passes the shims and runs (rc)" "0" "$?"
-printf '%s\n' "$out" | grep -qF "trace: built-in: git commit -m two words --allow-empty" &&
-  pass "P3 smoke: the real git received the argv untouched (order, values, spelling)" ||
-  fail "P3 smoke: the real git saw mangled argv: $(printf '%s\n' "$out" | grep 'built-in: git commit' | tail -1)"
+# git's trace quotes values the way it likes (single quotes for spaced values on 2.53);
+# strip quotes before comparing so the pin asserts ORDER + VALUES, not the printer's style.
+tr_line=$(printf '%s\n' "$out" | grep -F "trace: built-in: git commit" | tail -1 | sed "s/'//g" | sed 's/^.*trace: /trace: /')
+expect "P3 smoke: the real git received the argv untouched (order, values, spelling)" \
+  "trace: built-in: git commit -m two words --allow-empty" "$tr_line"
 expect "P3 smoke: the -m value stayed one token (quoting intact)" "two words" "$(git log -1 --format=%s)"
 out=$(GIT_TRACE=1 PATH="$PSH:$PATH" git status --porcelain 2>&1)
 printf '%s\n' "$out" | grep -qF "trace: built-in: git status --porcelain" &&
