@@ -268,7 +268,7 @@ expect "scrub drops an entry reaching the interpreted git through a symlink" "/u
   "$(scrub "/usr/bin:$scrubbin/linkdir")"
 expect "scrub keeps an entry whose git is compiled" "/usr/bin:$scrubbin/real-bin" \
   "$(scrub "/usr/bin:$scrubbin/real-bin")"
-expect "scrub keeps an entry with neither git nor gh" "/usr/bin" "$(scrub "/usr/bin:$scrubbin")"
+expect "scrub keeps an entry with neither git nor gh" "/usr/bin:$scrubbin" "$(scrub "/usr/bin:$scrubbin")"
 expect "scrub drops every shim entry and keeps the rest in order" "/usr/bin" \
   "$(scrub "$scrubbin/gh-script:/usr/bin:$scrubbin/git-script")"
 expect "scrub tolerates an empty PATH" "" "$(scrub "")"

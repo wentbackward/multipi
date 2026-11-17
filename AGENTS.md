@@ -70,6 +70,12 @@ is a seam; never introduce undocumented ones.
   the issuing-clock override (integer ms epoch) of the operator's
   `scripts/multipi-approve`; tests drive TTL/expiry without sleeping. The
   consumption-side clock is `attemptConsume`'s `now` parameter, not an env var.
+- `MULTIPI_GATE_SCRUB_POLICY_SHIMS` — batch gate (ticket #70), NOT a child seam:
+  `gate-train.sh` rebuilds PATH dropping every entry whose `git` or `gh` is an
+  interpreted script (2-byte `#!` magic), so the gate's own git work and every
+  check run unjudged by the dogfood policy shims (authority separation: the shims
+  protect the loop's sessions, never its own verification). Default `1` (scrub);
+  `0` restores the armed PATH for tests that exercise the armed posture.
 
 **Config keys (`.devloop.json`):** `"factory"` (`"collaborative"` | `"dark"`, default
 `"collaborative"` — a preset that only sets defaults; an explicit option always wins), the
