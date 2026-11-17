@@ -91,6 +91,16 @@ is a seam; never introduce undocumented ones.
   check run unjudged by the dogfood policy shims (authority separation: the shims
   protect the loop's sessions, never its own verification). Default `1` (scrub);
   `0` restores the armed PATH for tests that exercise the armed posture.
+- `MULTIPI_SHIM_REAL_GH` / `MULTIPI_SHIM_REAL_GIT` — policy-shim real-binary
+  resolution (permission-policy spec §4-L2; ticket #72), NOT a child seam:
+  the shims' `shim_find_real` consults the per-binary seam FIRST, then falls back
+  to the compiled-on-PATH scan (the #68 rule, unchanged). A seam target is not
+  required to be a compiled artifact — that is how an offline script stand-in
+  serves a test environment, and its calls.log proves the real binary was never
+  reached. Only processes the loop spawns should carry these; an operator shell
+  must not. A SET-but-unusable target (missing/unreadable/not executable) fails
+  closed with exit 127 and NEVER falls back to the PATH scan; an EMPTY value is
+  unset.
 
 **Config keys (`.devloop.json`):** `"factory"` (`"collaborative"` | `"dark"`, default
 `"collaborative"` — a preset that only sets defaults; an explicit option always wins), the
