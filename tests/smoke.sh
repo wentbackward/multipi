@@ -781,6 +781,16 @@ git -C "$gate" branch -q -D train-feat/10-e
 #      genuinely crosses the layer boundary (stand-in → bdshim → real git, one hop per
 #      layer). The real dogfood layer cannot play this role: its own policy text would
 #      replace the fixture's refusal.
+# Hermeticity (review round 2): no pin hinges on the ambient session's posture. Armed,
+# the dogfood shim dir ships a `gh` shim BESIDE its `git` shim; the runs' PATHs therefore
+# put the fake-gh bin dir ($work/bin) AHEAD of the sim layer, so the merge's `gh` calls
+# resolve to tests/fake-gh no matter how the surrounding session is armed. The git
+# geometry is untouched: the git fixtures still sit first, and $work/bin carries no git
+# (run (2)'s synthetic layers ship `git` only, so the same insulation is explicit, not
+# structural). Trusted-dogfood-ancestor precondition: when armed, run (1)'s lower layer
+# is a REAL installed policy layer inherited from this repo's own dogfood; the pin trusts
+# it to be a benign forwarding-only wrapper under the incident's PATH and does not
+# re-audit it.
 standin_dir="$work/olddogfood"
 dw_log="$work/dw-standin.log"
 rm -f "$dw_log"
@@ -812,7 +822,10 @@ stage_branch feat/10-f f10.txt foxtrot
 bash "$plugin/scripts/gate-train.sh" feat/10-f >/dev/null 2>&1
 expect "feat/10-f gates green (double-wrap pin)" "0" "$?"
 # Bounded: the fix resolves in milliseconds; the pre-fix spin ran 12 h (timeout ⇒ 124).
-out=$(PATH="$bdshim_dir:$shim_layer:$PATH" timeout 60 bash "$plugin/scripts/merge-train.sh" feat/10-f 2>&1)
+# $work/bin (fake-gh, no git) ahead of the sim layer: `gh` stays hermetic (see above).
+expect "run (1) PATH insulates gh to fake-gh ahead of the sim layer" "$work/bin/gh" \
+  "$( ( PATH="$bdshim_dir:$work/bin:$shim_layer:$PATH" type -P gh ) )"
+out=$(PATH="$bdshim_dir:$work/bin:$shim_layer:$PATH" timeout 60 bash "$plugin/scripts/merge-train.sh" feat/10-f 2>&1)
 rc=$?
 if [ "$rc" -ne 0 ]; then pkill -f "$bdshim_dir/git" 2>/dev/null || true; fi   # failure path: reap a spinning wrapper
 echo "$out"
@@ -826,12 +839,15 @@ printf '%s\n' "$out" | grep -qF "KEPT train-feat/10-f (delete refused: error: si
 git -C "$gate" branch -q -D train-feat/10-f
 # Run (2): the stacked geometry with traffic across BOTH layers — the stand-in is primary
 # (first on PATH) and its pre-#68 rule hands every call to the next executable `git`, the
-# fixture wrapper: stand-in → bdshim → real git, one hop per layer.
+# fixture wrapper: stand-in → bdshim → real git, one hop per layer. $work/bin is restated
+# for the same hermeticity as run (1) (explicit insulation, not structural luck).
 rm -f "$dw_log"
+expect "run (2) PATH insulates gh to fake-gh ahead of the sim layers" "$work/bin/gh" \
+  "$( ( PATH="$standin_dir:$bdshim_dir:$work/bin:$PATH" type -P gh ) )"
 stage_branch feat/10-g g10.txt golf
 bash "$plugin/scripts/gate-train.sh" feat/10-g >/dev/null 2>&1
 expect "feat/10-g gates green (stacked-geometry pin)" "0" "$?"
-out=$(PATH="$standin_dir:$bdshim_dir:$PATH" timeout 60 bash "$plugin/scripts/merge-train.sh" feat/10-g 2>&1)
+out=$(PATH="$standin_dir:$bdshim_dir:$work/bin:$PATH" timeout 60 bash "$plugin/scripts/merge-train.sh" feat/10-g 2>&1)
 rc=$?
 if [ "$rc" -ne 0 ]; then
   pkill -f "$bdshim_dir/git" 2>/dev/null || true
