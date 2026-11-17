@@ -19,6 +19,10 @@ export PATH="$work/bin:$PATH"
 shim_dir="$plugin/scripts/policy-shims"
 . "$shim_dir/lib/policyshim.sh"
 SIM_SHIM_DIR="$shim_dir"
+# Resolve ONCE: every git fixture in this smoke execs the SAME real git the shims resolve
+# to (a fixture that captures the wrapper it sits next to is the bug this ticket fixes).
+smoke_real_git=$(shim_find_real git)
+[ -n "$smoke_real_git" ] || { echo "smoke: no compiled git on PATH — broken test environment" >&2; exit 1; }
 
 passed=0
 failed=0
@@ -217,9 +221,9 @@ expect "heavy.sh takes a slot whose residual lock file was left by a dead holder
 sleep 0.1 &
 _reaped_pid=$!
 wait "$_reaped_pid" 2>/dev/null
-# No-flock environment for the mkdir path (round-13 dead-stub idiom: the stub exits 127,
-# so `command -v flock` finds it but the kernel's flock is unavailable — heavy.sh's
-# `command -v` check is the branch point, matching a macOS-shaped system).
+# No-flock environment for the mkdir path: a dead stub that answers `command -v` but
+# fails `flock --version` — heavy.sh's branch point is behavioural (have_flock), so the
+# stub emulates a flock-less (macOS-shaped) system honestly.
 stubbin="$work/bin-noflock"
 mkdir -p "$stubbin"
 printf '#!/usr/bin/env bash\nexit 127\n' >"$stubbin/flock"
@@ -702,8 +706,7 @@ bdshim_dir="$work/git-bdshim"
 # is the policy shim itself — capturing it would route the fixture's simulated refusal
 # through the shim's own policy (different refusal text) and, double-wrapped, mutual-exec
 # itself forever. The helper's compiled-artifact rule skips every wrapper, wherever it is.
-bdshim_real=$(shim_find_real git)
-[ -n "$bdshim_real" ] || { echo "smoke: no compiled git on PATH — broken test environment" >&2; exit 1; }
+bdshim_real=$smoke_real_git
 mkdir -p "$bdshim_dir"
 cat >"$bdshim_dir/git" <<EOF
 #!/usr/bin/env bash
@@ -797,7 +800,7 @@ expect "the dirty-probe branch gates green" "0" "$?"
 mwd="$work/home/project/worktrees/project"
 git worktree add -q "$mwd/issue-16-mp" feat/16-mp
 statusshim_dir="$work/git-status-shim"
-statusshim_real=$(shim_find_real git)   # #68: same shared rule as bdshim_real
+statusshim_real=$smoke_real_git   # #68: same shared resolution as bdshim_real
 mkdir -p "$statusshim_dir"
 cat >"$statusshim_dir/git" <<EOF
 #!/usr/bin/env bash
@@ -2197,7 +2200,7 @@ expect "the pr-query-failure summary lists nothing for removal" \
 # unclassifiable, NEVER "ancient" — a negative signal must not drive deletion,
 # the same rule as the tracker. A git shim makes `log -1 --format=%ct` fail.
 logshim_dir="$work/git-log-shim"
-logshim_real=$(command -v git)
+logshim_real=$smoke_real_git
 mkdir -p "$logshim_dir"
 cat >"$logshim_dir/git" <<EOF
 #!/usr/bin/env bash
@@ -2242,7 +2245,7 @@ expect "the failing-age-probe summary lists nothing for removal" \
 # empty-on-failure as clean would let a negative signal drive deletion). A git shim
 # makes status fail.
 statshim_dir="$work/git-status-shim"
-statshim_real=$(command -v git)
+statshim_real=$smoke_real_git
 mkdir -p "$statshim_dir"
 cat >"$statshim_dir/git" <<EOF
 #!/usr/bin/env bash
@@ -2321,7 +2324,7 @@ expect "a second --apply changes nothing (idempotent)" "cleanup: 0 removed, 0 dr
 
 # Failed local branch delete (review folded 4): the worktree goes, and the
 # SURVIVING BRANCH is reported — never swallowed.
-real_git=$(command -v git)
+real_git=$smoke_real_git
 shim_dir="$work/git-shim"
 mkdir -p "$shim_dir"
 cat >"$shim_dir/git" <<EOF
@@ -3032,26 +3035,20 @@ out=$(p3gh repo --api-version v4 delete o/r 2>&1); rc=$?
 expect "P3 smoke: the mid-verb 'gh repo --api-version v4 delete o/r' is DENIED too" "126" "$rc"
 echo "$out" | grep -qF "DENIED gh:repo-delete:" || fail "P3 smoke: the mid-verb api-version spelling was not caught: $out"
 
-# 10. passthrough: the real git receives the argv UNTOUCHED (a logging stand-in for it,
-#     first non-shim dir on PATH; it still execs the system git so the work happens).
-mkdir -p "$work/p3-gitlog"
-# Round-7 must-fix: the stand-in must exec the git captured on the PRISTINE PATH, as an
-# ABSOLUTE path. Its own runtime PATH has the shim dir FIRST — a bare command lookup there
-# re-resolves to the SHIM, and the shim resolves this stand-in again: an infinite
-# shim→stand-in exec loop that grew argv.log without bound and hung the suite.
-REALGIT=$(command -v git)
-cat >"$work/p3-gitlog/git" <<EOF
-#!/usr/bin/env bash
-{ printf 'ARGV:'; printf ' [%s]' "\$@"; echo; } >>"$work/p3-gitlog/argv.log"
-exec "$REALGIT" "\$@"
-EOF
-chmod +x "$work/p3-gitlog/git"
-out=$(PATH="$PSH:$work/p3-gitlog:$PATH" git commit -m "two words" --allow-empty 2>&1)
-grep -qxF "ARGV: [commit] [-m] [two words] [--allow-empty]" "$work/p3-gitlog/argv.log" &&
+# 10. passthrough: the real git receives the argv UNTOUCHED. #68 re-pin: a script stand-in
+#     can no longer sit in the resolution chain BY CONTRACT (the compiled-artifact rule is
+#     exactly "never hand a shim an interpreted script"), so the argv is observed the only
+#     other way it exists: git's own GIT_TRACE view of the argv it actually ran. Order and
+#     spelling come from the trace line; single-tokenness of the -m value from the resulting
+#     commit message (a quote-drop would hand git a pathspec, not a message).
+out=$(GIT_TRACE=1 PATH="$PSH:$PATH" git commit -m "two words" --allow-empty 2>&1)
+expect "P3 smoke: the mutation passes the shims and runs (rc)" "0" "$?"
+printf '%s\n' "$out" | grep -qF "trace: built-in: git commit -m two words --allow-empty" &&
   pass "P3 smoke: the real git received the argv untouched (order, values, spelling)" ||
-  fail "P3 smoke: the real git saw mangled argv: $(cat "$work/p3-gitlog/argv.log" | tail -1)"
-PATH="$PSH:$work/p3-gitlog:$PATH" git status --porcelain >/dev/null
-grep -qxF "ARGV: [status] [--porcelain]" "$work/p3-gitlog/argv.log" &&
+  fail "P3 smoke: the real git saw mangled argv: $(printf '%s\n' "$out" | grep 'built-in: git commit' | tail -1)"
+expect "P3 smoke: the -m value stayed one token (quoting intact)" "two words" "$(git log -1 --format=%s)"
+out=$(GIT_TRACE=1 PATH="$PSH:$PATH" git status --porcelain 2>&1)
+printf '%s\n' "$out" | grep -qF "trace: built-in: git status --porcelain" &&
   pass "P3 smoke: read-only git passes straight through (zero policy cost)" ||
   fail "P3 smoke: the read-only passthrough argv is wrong"
 
