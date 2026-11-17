@@ -243,6 +243,18 @@ expect "heavy.sh (mkdir path, fresh) takes a slot whose holder left NO pid file"
   "$(PATH="$stubbin:$PATH" bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
 [ ! -d "$lockdir/slot1.d" ] && pass "the ownerless slot dir is swept at acquisition" ||
   fail "ownerless slot dir left in place: $lockdir/slot1.d"
+# A pid file containing 0: the old `^[0-9]+$` check admitted it, and `kill -0 0` answers
+# for the CALLER'S own process group (always "alive") — exactly the fallback the function
+# header forbids; the waiter spun on a ghost. Bounded: a regression must fail this pin
+# fast, not hang the whole smoke on the spin.
+mkdir -p "$lockdir/slot1.d"
+echo 0 >"$lockdir/slot1.d/pid"
+# SLOTS=1: the ghosted slot is the ONLY slot, so acquisition (not a sibling slot) is what
+# proves the pid-0 lock reads as FREE.
+expect "heavy.sh (mkdir path, fresh) takes a slot whose pid file says 0" "0" \
+  "$(MULTIPI_HEAVY_SLOTS=1 PATH="$stubbin:$PATH" timeout 30 bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
+[ ! -d "$lockdir/slot1.d" ] && pass "the pid-0 slot dir is swept at acquisition" ||
+  fail "pid-0 slot dir left in place: $lockdir/slot1.d"
 # WAITING instance: the only slot is held by a process that DIES while the waiter polls.
 # Pre-fix the waiter's startup sweep already ran (holder was alive then) and it polled on
 # the ghost forever; the fix sweeps the dead-owner dir at each acquisition attempt.
