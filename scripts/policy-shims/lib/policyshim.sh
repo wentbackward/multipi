@@ -53,12 +53,14 @@ shim_init() {
 
 # True when FILE (symlinks followed by the open itself) is a COMPILED ARTIFACT: its first
 # two bytes are not the `#!` script magic. A wrapper that is a symlink TO a script fails
-# too. Pure shell, wrapper-agnostic, no path-name knowledge (ticket #68 — the
+# too. FAIL-CLOSED: an empty or unreadable candidate is NOT a compiled artifact (a failed
+# read must reject — accepting on unreadable would admit exactly the wrappers we hunt).
+# Pure shell, wrapper-agnostic, no path-name knowledge (ticket #68 — the
 # path-whitelist alternative is rejected in DECISIONS 2026-11-17).
 shim_is_compiled() { # shim_is_compiled FILE
   local f=$1 magic=''
   [ -f "$f" ] || return 1
-  IFS= read -r -n 2 magic <"$f" 2>/dev/null || true
+  IFS= read -r -n 2 magic <"$f" 2>/dev/null || return 1
   [ "$magic" != '#!' ]
 }
 
