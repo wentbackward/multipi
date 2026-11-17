@@ -746,36 +746,49 @@ git -C "$gate" branch -q -D train-feat/10-e
 
 # --- #68: double-wrap regression (the 12-hour mutual-exec spin that wedged the #65 gate)
 # Rebuild the incident geometry and pin it with a bounded timeout: the fixture wrapper
-# layer (bdshim, on top) over a POLICY-SHIM layer over the real git. The shim layer is the
-# dogfood shim dir this smoke inherits when it runs in an armed loop session (that
-# inheritance IS the incident); unarmed, a synthetic stand-in replicating the pre-fix
-# resolution rule supplies the same geometry. Pre-fix, resolution was "first executable
-# outside my own dir": bdshim exec'd the shim layer, the shim layer exec'd bdshim — one
-# PID mutual-exec'ing at 53 % CPU for 12 h while holding a heavy slot. The fix makes
-# resolution wrapper-agnostic (compiled artifact only) in BOTH layers, the merge
-# terminates, and the refusal stays the fixture's own.
-shim_layer=""
-first_git=$(command -v git || true)
-if [ -n "$first_git" ] && [[ "$(head -c 2 -- "$first_git" 2>/dev/null)" == "#!" ]]; then
-  shim_layer=$(dirname "$first_git")
-else
-  shim_layer="$work/olddogfood"
-  mkdir -p "$shim_layer"
-  cat >"$shim_layer/git" <<'EOF'
+# layer (bdshim, on top) over a SECOND WRAPPER LAYER over the real git. Pre-#68, resolution
+# was "first executable outside my own dir": bdshim exec'd the layer below, the layer
+# below exec'd bdshim — one PID mutual-exec'ing at 53 % CPU for 12 h while holding a heavy
+# slot. The fix makes resolution wrapper-agnostic (compiled artifact only) in BOTH layers,
+# the merge terminates, and the refusal stays the fixture's own.
+# Two runs, because the lower layer plays a different role in each (review round 1):
+#  (1) INCIDENT ORDER (fixture wrapper on top): armed, the lower layer is the real dogfood
+#      shim dir this smoke inherits (that inheritance IS the incident); unarmed, the
+#      synthetic stand-in stands in for it. The fixed upper layer skips the non-compiled
+#      lower layer BY DESIGN, so that layer carries no traffic in this run: it pins that
+#      the incident's PATH terminates (the regression guard), it is not a geometry proof.
+#  (2) STACKED GEOMETRY (stand-in on top): the stand-in is primary, so EVERY git call
+#      enters it; it logs one line per exec (the measurement asserted below), then its
+#      pre-#68 rule execs the next executable `git` on PATH — the fixture wrapper. Traffic
+#      genuinely crosses the layer boundary (stand-in → bdshim → real git, one hop per
+#      layer). The real dogfood layer cannot play this role: its own policy text would
+#      replace the fixture's refusal.
+standin_dir="$work/olddogfood"
+dw_log="$work/dw-standin.log"
+rm -f "$dw_log"
+mkdir -p "$standin_dir"
+cat >"$standin_dir/git" <<EOF
 #!/usr/bin/env bash
 # Synthetic stand-in for an installed dogfood policy shim running the PRE-#68 rule:
-# skip own dir, exec the first other executable `git` on PATH (what the mutual exec rode).
-self=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# skip own dir, exec the first other executable \`git\` on PATH (what the mutual exec
+# rode). Logs one line per exec: the measurement run (2) asserts, proving the stacked
+# geometry carries traffic rather than merely sitting on PATH.
+printf 'standin-exec %s\n' "\$*" >>"$dw_log"
+self=\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd -P)
 IFS=':'
-for d in $PATH; do
-  r=$(cd "$d" 2>/dev/null && pwd -P) || continue
-  [ "$r" = "$self" ] && continue
-  if [ -f "$r/git" ] && [ -x "$r/git" ]; then exec "$r/git" "$@"; fi
+for d in \$PATH; do
+  r=\$(cd "\$d" 2>/dev/null && pwd -P) || continue
+  [ "\$r" = "\$self" ] && continue
+  if [ -f "\$r/git" ] && [ -x "\$r/git" ]; then exec "\$r/git" "\$@"; fi
 done
 echo "olddogfood stand-in: no other git on PATH" >&2
 exit 127
 EOF
-  chmod +x "$shim_layer/git"
+chmod +x "$standin_dir/git"
+shim_layer="$standin_dir"
+first_git=$(command -v git || true)
+if [ -n "$first_git" ] && [[ "$(head -c 2 -- "$first_git" 2>/dev/null)" == "#!" ]]; then
+  shim_layer=$(dirname "$first_git")   # armed: the incident's lower layer is the dogfood shim itself
 fi
 stage_branch feat/10-f f10.txt foxtrot
 bash "$plugin/scripts/gate-train.sh" feat/10-f >/dev/null 2>&1
@@ -793,6 +806,31 @@ printf '%s\n' "$out" | grep -qF "KEPT train-feat/10-f (delete refused: error: si
   pass "the double-wrapped refused ref really survives the merge run" ||
   fail "the double-wrapped sim-refused ref vanished anyway"
 git -C "$gate" branch -q -D train-feat/10-f
+# Run (2): the stacked geometry with traffic across BOTH layers — the stand-in is primary
+# (first on PATH) and its pre-#68 rule hands every call to the next executable `git`, the
+# fixture wrapper: stand-in → bdshim → real git, one hop per layer.
+rm -f "$dw_log"
+stage_branch feat/10-g g10.txt golf
+bash "$plugin/scripts/gate-train.sh" feat/10-g >/dev/null 2>&1
+expect "feat/10-g gates green (stacked-geometry pin)" "0" "$?"
+out=$(PATH="$standin_dir:$bdshim_dir:$PATH" timeout 60 bash "$plugin/scripts/merge-train.sh" feat/10-g 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  pkill -f "$bdshim_dir/git" 2>/dev/null || true
+  pkill -f "$standin_dir/git" 2>/dev/null || true
+fi                                                        # failure path: reap a spinning wrapper
+echo "$out"
+expect "the stacked-geometry merge TERMINATES under the bounded timeout" "0" "$rc"
+printf '%s\n' "$out" | grep -qF "KEPT train-feat/10-g (delete refused: error: simulated refusal to delete a train ref)" &&
+  pass "the refusal survives the two-layer transit (KEPT line, fixture's own text)" ||
+  fail "no KEPT line with the simulated refusal after the two-layer transit"
+grep -qE "^standin-exec .*branch -q -D train-feat/10-g$" "$dw_log" 2>/dev/null &&
+  pass "the lower layer REALLY CARRIED THE TRAFFIC (it logged the train-ref delete it forwarded)" ||
+  fail "stand-in never logged the train-ref delete: the stacked geometry was not exercised"
+[ -n "$(tref feat/10-g)" ] &&
+  pass "the stacked-geometry refused ref really survives the merge run" ||
+  fail "the stacked-geometry sim-refused ref vanished anyway"
+git -C "$gate" branch -q -D train-feat/10-g
 # --- merge-train.sh: fail-closed dirty probe (absorbed from the #32 review) ----
 # A ticket worktree whose `git status` CANNOT RUN must be KEPT with a loud note —
 # empty-on-failure is never read as clean (the merge-time analogue of
@@ -3029,15 +3067,15 @@ n1_hv=$(grep -c 'merge 12' "$GH_CALLS" 2>/dev/null); n1_hv=${n1_hv:-0}
 expect "P3 smoke: the real gh never saw the value-spelled merge" "$n0_hv" "$n1_hv"
 # Control: the token immediately after the verb IS still the doc form — the shim is
 # TRANSPARENT (fake-gh does not implement repo delete, so pin the FORWARDING, not its rc).
-out=$(p3gh repo delete --help 2>&1); rc=$?
-[ "$rc" -ne 126 ] && pass "P3 smoke: 'gh repo delete --help' (immediate token) is not shim-blocked" ||
-  fail "P3 smoke: the doc-form delete was blocked at the shim (rc $rc): $out"
 # #68 re-pin: forwarding is observed at the SHIM BOUNDARY, not in the fake tracker's log —
 # a script can no longer be "the real gh" by contract (compiled-artifact rule), so the
-# passthrough exec lands on the first COMPILED gh (here the system gh), and the honest
-# assertion is: no deny line, and the doc-form help rendered past the shim.
-printf '%s\n' "$out" | grep -q "DENIED" && fail "P3 smoke: the doc-form delete carried a deny line: $out" ||
-  pass "P3 smoke: the doc-form delete reached the real gh (help rendered, no deny)"
+# passthrough exec lands on the first COMPILED gh (here the system gh). A box without one
+# is a BROKEN test environment, not a pass: rc 0 and a help-content token are both
+# asserted, so the pin cannot pass vacuously (review round 1).
+out=$(p3gh repo delete --help 2>&1); rc=$?
+expect "P3 smoke: 'gh repo delete --help' (immediate token) passes the shims to the real gh (rc)" "0" "$rc"
+printf '%s\n' "$out" | grep -qi "usage" && pass "P3 smoke: the doc-form help rendered past the shim (real gh answered)" ||
+  fail "P3 smoke: no help content from the real gh — the passthrough did not land: $out"
 n0_av=$(grep -c 'repo delete' "$GH_CALLS" 2>/dev/null); n0_av=${n0_av:-0}
 out=$(p3gh --api-version v4 repo delete o/r 2>&1); rc=$?
 expect "P3 smoke: 'gh --api-version v4 repo delete o/r' is DENIED (the value does not become the noun)" "126" "$rc"
@@ -3059,7 +3097,9 @@ out=$(GIT_TRACE=1 PATH="$PSH:$PATH" git commit -m "two words" --allow-empty 2>&1
 expect "P3 smoke: the mutation passes the shims and runs (rc)" "0" "$?"
 # git's trace quotes values the way it likes (single quotes for spaced values on 2.53);
 # strip quotes before comparing so the pin asserts ORDER + VALUES, not the printer's style.
-tr_line=$(printf '%s\n' "$out" | grep -F "trace: built-in: git commit" | tail -1 | sed "s/'//g" | sed 's/^.*trace: /trace: /')
+# Review round 1: the grep must match this invocation's argv (the trailing `commit -m`),
+# not any `git commit*` prefix — a commit-graph maintenance line must not hijack tail -1.
+tr_line=$(printf '%s\n' "$out" | grep -F "trace: built-in: git commit -m" | tail -1 | sed "s/'//g" | sed 's/^.*trace: /trace: /')
 expect "P3 smoke: the real git received the argv untouched (order, values, spelling)" \
   "trace: built-in: git commit -m two words --allow-empty" "$tr_line"
 expect "P3 smoke: the -m value stayed one token (quoting intact)" "two words" "$(git log -1 --format=%s)"

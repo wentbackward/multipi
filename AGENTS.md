@@ -53,9 +53,11 @@ bootstrap another project, the **`devloop-setup` skill**.
   is internal plumbing, not a `MULTIPI_*` operator seam.
 - **Heavy-slot locks (ticket #68)**: a killed holder leaves its lock behind, and it is
   always read as FREE: the flock path's release is kernel-managed (a residual `slotN.lock`
-  file occupies nothing), and the mkdir path sweeps a dead-owner `slotN.d` at every
-  acquisition attempt (`try_slot_mkdir`), not only at startup. No-flock detection is
-  behavioural (`have_flock`), so a dead `flock` stub emulates a flock-less system.
+  file occupies nothing), and the mkdir path sweeps a dead-OR-OWNERLESS `slotN.d` at every
+  acquisition attempt (`try_slot_mkdir`, not only at startup) — no pid file, an unusable
+  one, or a dead pid all classify dead, because the old `kill -0 0` fallback targeted the
+  caller's own process group and answered "alive" for an ownerless lock. No-flock detection
+  is behavioural (`have_flock`), so a dead `flock` stub emulates a flock-less system.
 - Label vocabulary: `dl/in-progress` → `dl/in-review` → `dl/approved` → `dl/gated` → `dl/merged`
   (+ `dl/blocked`). The labels ARE the state; keep them truthful.
 - `scripts/doctor.sh` diagnoses; `scripts/install.sh <repo>` installs the loop into a project.
