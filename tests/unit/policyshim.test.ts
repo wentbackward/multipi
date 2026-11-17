@@ -93,6 +93,53 @@ test("shim_find_real skips the shim's OWN dir and fails (rc 1, no output) when o
 	assert.equal(got.stdout, "");
 });
 
+// --- shim_is_compiled: the fail direction ---------------------------------------
+
+/** dir with an executable `git` whose first two bytes are exactly `bytes`. */
+function weirdGit(dir: string, bytes: Buffer): string {
+	mkdirSync(dir, { recursive: true });
+	const p = path.join(dir, "git");
+	writeFileSync(p, bytes);
+	chmodSync(p, 0o755);
+	return p;
+}
+
+test("shim_is_compiled REJECTS an empty file (read failure is not acceptance)", () => {
+	const dir = `${mkdtempSync(path.join(tmpdir(), "policyshim-test."))}/empty`;
+	const p = weirdGit(dir, Buffer.alloc(0));
+	const got = runShim(`shim_is_compiled "${p}" && echo compiled || echo script`);
+	assert.equal(got.status, 0, `stderr: ${got.stderr}`);
+	assert.equal(got.stdout.trim(), "script", "an empty candidate must fail, not pass, the compiled check");
+});
+
+test("shim_is_compiled REJECTS an UNREADABLE file (read failure is not acceptance)", () => {
+	const root = mkdtempSync(path.join(tmpdir(), "policyshim-test."));
+	const p = weirdGit(`${root}/noperm`, Buffer.from("ELF-fake-bytes"));
+	chmodSync(p, 0o000);
+	try {
+		const got = runShim(`shim_is_compiled "${p}" && echo compiled || echo script`);
+		assert.equal(got.status, 0, `stderr: ${got.stderr}`);
+		// The snippets run as the current user; the check must still be decisive, never accept.
+		if (process.getuid?.() === 0) {
+			console.warn("SKIP-ASSERT: running as root, unreadable files are still readable");
+		} else {
+			assert.equal(got.stdout.trim(), "script", "an unreadable candidate must fail, not pass");
+		}
+	} finally {
+		chmodSync(p, 0o755);
+	}
+});
+
+test("shim_is_compiled accepts a compiled candidate (2-byte ELF magic) and rejects the #! magic", () => {
+	const root = mkdtempSync(path.join(tmpdir(), "policyshim-test."));
+	const good = weirdGit(`${root}/good`, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+	const bad = weirdGit(`${root}/bad`, Buffer.from("#!/bin/sh\n"));
+	const got = runShim(`shim_is_compiled "${good}" || echo fail-good
+shim_is_compiled "${bad}" && echo fail-bad || true`);
+	assert.equal(got.status, 0, `stderr: ${got.stderr}`);
+	assert.equal(got.stdout.trim(), "", "ELF magic accepted, script magic rejected");
+});
+
 // --- _shim_exec_real: the recursion depth guard ---------------------------------
 
 test("_shim_exec_real execs at depth 0 with the counter bumped to 1", () => {
