@@ -148,11 +148,15 @@ try_slot_mkdir() {
 }
 
 clean_stale_temp
+# Whether flock WORKS is a property of the system, not of each poll: probe once, reuse
+# the answer inside the loop (review round 2 — no repeated version probes per slot per tick).
+use_flock=no
+have_flock && use_flock=yes
 waiting_said=""
 while true; do
   for ((slot = 1; slot <= slots; slot++)); do
     ran=""
-    if have_flock; then
+    if [ "$use_flock" = yes ]; then
       try_slot_flock "$slot" "$@"
     else
       try_slot_mkdir "$slot" "$@"
