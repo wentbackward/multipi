@@ -235,6 +235,14 @@ expect "heavy.sh (mkdir path, fresh) takes a slot whose owner pid is dead" "0" \
   "$(PATH="$stubbin:$PATH" bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
 [ ! -d "$lockdir/slot1.d" ] && pass "the dead holder's slot dir is swept at acquisition" ||
   fail "dead holder's slot dir left in place: $lockdir/slot1.d"
+# No pid file at all: a lock with no owner record must read as FREE, not alive.
+# (The pre-fix fallback `kill -0 0` targets the CALLER'S own process group — it always
+# answered "alive", so an ownerless dir was a permanent ghost.)
+mkdir -p "$lockdir/slot1.d"
+expect "heavy.sh (mkdir path, fresh) takes a slot whose holder left NO pid file" "0" \
+  "$(PATH="$stubbin:$PATH" bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
+[ ! -d "$lockdir/slot1.d" ] && pass "the ownerless slot dir is swept at acquisition" ||
+  fail "ownerless slot dir left in place: $lockdir/slot1.d"
 # WAITING instance: the only slot is held by a process that DIES while the waiter polls.
 # Pre-fix the waiter's startup sweep already ran (holder was alive then) and it polled on
 # the ghost forever; the fix sweeps the dead-owner dir at each acquisition attempt.

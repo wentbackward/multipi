@@ -58,8 +58,21 @@ clean_stale_temp() {
   fi
   for entry in "$lock_dir"/slot*.d; do
     [ -d "$entry" ] || continue
-    if ! kill -0 "$(cat "$entry/pid" 2>/dev/null || echo 0)" 2>/dev/null; then rm -rf -- "$entry"; fi
+    slot_holder_dead "$entry" && rm -rf -- "$entry"
   done
+}
+
+# slot_holder_dead LOCKDIR: true when a slot-lock directory holds NO live owner: no pid file
+# at all, an unusable one, or a pid that is not running. A SIGKILLed holder skips its EXIT
+# trap, so its lock must ALWAYS read as FREE (ticket #68). Never fall back to `kill -0 0`:
+# pid 0 targets the CALLER'S own process group and would answer "alive" for an ownerless lock.
+slot_holder_dead() { # slot_holder_dead LOCKDIR
+  local pid=""
+  [ -f "$1/pid" ] || return 0
+  pid=$(tr -d '[:space:]' <"$1/pid" 2>/dev/null)
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  kill -0 "$pid" 2>/dev/null && return 1
+  return 0
 }
 
 # have_flock: a flock that actually WORKS (name resolution alone is not enough — a broken
@@ -114,10 +127,11 @@ try_slot_mkdir() {
   local slot=$1 rc=0
   shift
   local d="$lock_dir/slot$slot.d"
-  # A holder SIGKILLed mid-hold (EXIT trap skipped) leaves its dir with a dead pid: the
-  # startup sweep (clean_stale_temp) already ran BEFORE this slot was taken, so a WAITING
-  # instance must re-check at acquisition, or it polls the ghost forever (ticket #68).
-  if [ -d "$d" ] && ! kill -0 "$(cat "$d/pid" 2>/dev/null || echo 0)" 2>/dev/null; then
+  # A holder SIGKILLed mid-hold (EXIT trap skipped) leaves its dir with a dead pid — or no
+  # pid file at all; either way the lock reads as FREE. The startup sweep (clean_stale_temp)
+  # already ran BEFORE this slot was taken, so a WAITING instance must re-check at
+  # acquisition, or it polls the ghost forever (ticket #68).
+  if [ -d "$d" ] && slot_holder_dead "$d"; then
     rm -rf -- "$d"
   fi
   if mkdir "$d" 2>/dev/null; then
