@@ -43,6 +43,19 @@ bootstrap another project, the **`devloop-setup` skill**.
   rely on the plugin source carrying this block: a local per-repo patch of it (as carried
   by the oneshot test repo and the crisis monitor repo) is redundant — drop it on the next
   `install.sh` upgrade.
+- **Shim real-binary resolution (ticket #68)**: the policy shims never accept an
+  INTERPRETED SCRIPT as the real binary — `shim_find_real` requires a compiled artifact
+  (first bytes not `#!`) in addition to being outside the shim dir, and every shim→binary
+  exec goes through `_shim_exec_real` (env counter `_POLICYSHIM_DEPTH`, hard-refused with
+  exit 126 above depth 3). This is what keeps a dogfood-armed session (shims on PATH) from
+  mutual-exec'ing under a double-wrapped fixture; the test fixtures (smoke's `git-bdshim`)
+  must resolve real binaries through the SAME helper, never `command -v`. `_POLICYSHIM_DEPTH`
+  is internal plumbing, not a `MULTIPI_*` operator seam.
+- **Heavy-slot locks (ticket #68)**: a killed holder leaves its lock behind, and it is
+  always read as FREE: the flock path's release is kernel-managed (a residual `slotN.lock`
+  file occupies nothing), and the mkdir path sweeps a dead-owner `slotN.d` at every
+  acquisition attempt (`try_slot_mkdir`), not only at startup. No-flock detection is
+  behavioural (`have_flock`), so a dead `flock` stub emulates a flock-less system.
 - Label vocabulary: `dl/in-progress` → `dl/in-review` → `dl/approved` → `dl/gated` → `dl/merged`
   (+ `dl/blocked`). The labels ARE the state; keep them truthful.
 - `scripts/doctor.sh` diagnoses; `scripts/install.sh <repo>` installs the loop into a project.
