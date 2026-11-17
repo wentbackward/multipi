@@ -33,7 +33,7 @@ shim_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 shim_init
 
 REAL_GIT=$(shim_find_real git) || {
-  echo "multipi policy: cannot locate the real git outside the shim dir ($shim_dir) — broken install, refusing" >&2
+  echo "multipi policy: cannot locate the real git (MULTIPI_SHIM_REAL_GIT unset/unusable; no compiled git outside the shim dir $shim_dir) — broken install, refusing" >&2
   exit 127
 }
 
