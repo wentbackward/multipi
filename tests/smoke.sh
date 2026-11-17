@@ -12,6 +12,14 @@ git config --global init.defaultBranch main
 mkdir -p "$work/bin" && ln -s "$plugin/tests/fake-gh" "$work/bin/gh"
 export PATH="$work/bin:$PATH"
 
+# Shared resolution rule from the policy shims (#68): this smoke runs in the dogfood-ARMED
+# environment (its PATH carries the policy-shims dir, so `command -v git` IS the shim),
+# and its git fixtures must resolve the real git the same wrapper-agnostic way the shims
+# do — never `command -v`. Sourcing the library is side-effect free.
+shim_dir="$plugin/scripts/policy-shims"
+. "$shim_dir/lib/policyshim.sh"
+SIM_SHIM_DIR="$shim_dir"
+
 passed=0
 failed=0
 pass() { echo "PASS $*"; passed=$((passed + 1)); }
@@ -193,6 +201,58 @@ first_end=$(awk '/^end 1/ {print $3}' "$work/heavy-1.out")
   pass "third heavy job starts only after a slot frees" ||
   fail "third heavy job started at ${third_start:-?} before the first ended at ${first_end:-?}"
 echo "heavy: 3x3s jobs on 2 slots took $(($(date +%s) - start))s"
+
+# --- heavy.sh: a dead holder's lock is FREE (ticket #68 secondary hygiene) ----------
+# The incident's spin was killed mid-hold, leaving the slot lock on disk. (a) flock path:
+# the kernel frees the flock when its last fd holder dies — a residual `slotN.lock` file
+# occupies nothing, so a fresh job takes the slot at once. (b) mkdir path (no flock):
+# a SIGKILLed holder skips its EXIT trap and leaves `slotN.d` with a dead pid — a WAITING
+# instance must sweep it at acquisition, not poll forever on a ghost holder.
+lockdir="$work/locks"
+mkdir -p "$lockdir"
+: >"$lockdir/slot1.lock"   # residual lock file of a dead (killed) holder
+expect "heavy.sh takes a slot whose residual lock file was left by a dead holder" "0" \
+  "$(bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
+# Dead pid that is provably dead: spawn a process and reap it.
+sleep 0.1 &
+_reaped_pid=$!
+wait "$_reaped_pid" 2>/dev/null
+# No-flock environment for the mkdir path (round-13 dead-stub idiom: the stub exits 127,
+# so `command -v flock` finds it but the kernel's flock is unavailable — heavy.sh's
+# `command -v` check is the branch point, matching a macOS-shaped system).
+stubbin="$work/bin-noflock"
+mkdir -p "$stubbin"
+printf '#!/usr/bin/env bash\nexit 127\n' >"$stubbin/flock"
+chmod +x "$stubbin/flock"
+# Fresh invocation: a stale slot dir with a dead pid is swept and the slot taken.
+mkdir -p "$lockdir/slot1.d"
+echo "$_reaped_pid" >"$lockdir/slot1.d/pid"
+expect "heavy.sh (mkdir path, fresh) takes a slot whose owner pid is dead" "0" \
+  "$(PATH="$stubbin:$PATH" bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
+[ ! -d "$lockdir/slot1.d" ] && pass "the dead holder's slot dir is swept at acquisition" ||
+  fail "dead holder's slot dir left in place: $lockdir/slot1.d"
+# WAITING instance: the only slot is held by a process that DIES while the waiter polls.
+# Pre-fix the waiter's startup sweep already ran (holder was alive then) and it polled on
+# the ghost forever; the fix sweeps the dead-owner dir at each acquisition attempt.
+sleep 30 & _holder=$!
+mkdir -p "$lockdir/slot1.d"
+echo "$_holder" >"$lockdir/slot1.d/pid"
+rm -f "$work/woke.flag"
+MULTIPI_HEAVY_SLOTS=1 PATH="$stubbin:$PATH" bash "$plugin/scripts/heavy.sh" bash -c "sleep 2; echo woke >\"$work/woke.flag\"" &
+_waiter=$!
+sleep 1                          # the waiter is now polling on the (held) slot
+kill -9 "$_holder" 2>/dev/null
+wait "$_holder" 2>/dev/null      # reap: an unreaped zombie still answers kill -0 (looks alive)
+deadline=$(( $(date +%s) + 15 ))
+while [ ! -f "$work/woke.flag" ]; do
+  [ "$(date +%s)" -ge "$deadline" ] && break
+  sleep 0.5
+done
+[ -f "$work/woke.flag" ] && pass "a WAITING instance takes a slot whose holder dies mid-wait" || {
+  fail "waiter never recovered from the dead holder (ghost slot)"
+  kill "$_waiter" 2>/dev/null || true
+}
+wait "$_waiter" 2>/dev/null
 
 # --- gate-train.sh ------------------------------------------------------------
 git checkout -q -b feat/1-first
@@ -638,7 +698,12 @@ echo "$out" | grep -q "not the gated head" && pass "the refusal names the vanish
 # silently tolerated — the residue must be diagnosable, not a silent permanent leak.
 # A git shim refuses only `branch -q -D train-*` deletions.
 bdshim_dir="$work/git-bdshim"
-bdshim_real=$(command -v git)
+# The #68 rule (shared helper, NOT command-v): under a dogfood-armed PATH `command -v git`
+# is the policy shim itself — capturing it would route the fixture's simulated refusal
+# through the shim's own policy (different refusal text) and, double-wrapped, mutual-exec
+# itself forever. The helper's compiled-artifact rule skips every wrapper, wherever it is.
+bdshim_real=$(shim_find_real git)
+[ -n "$bdshim_real" ] || { echo "smoke: no compiled git on PATH — broken test environment" >&2; exit 1; }
 mkdir -p "$bdshim_dir"
 cat >"$bdshim_dir/git" <<EOF
 #!/usr/bin/env bash
@@ -667,6 +732,56 @@ printf '%s\n' "$out" | grep -qF "KEPT train-feat/10-e (delete refused: error: si
   pass "the refused ref really survives the merge run" ||
   fail "the sim-refused ref vanished anyway"
 git -C "$gate" branch -q -D train-feat/10-e
+
+# --- #68: double-wrap regression (the 12-hour mutual-exec spin that wedged the #65 gate)
+# Rebuild the incident geometry and pin it with a bounded timeout: the fixture wrapper
+# layer (bdshim, on top) over a POLICY-SHIM layer over the real git. The shim layer is the
+# dogfood shim dir this smoke inherits when it runs in an armed loop session (that
+# inheritance IS the incident); unarmed, a synthetic stand-in replicating the pre-fix
+# resolution rule supplies the same geometry. Pre-fix, resolution was "first executable
+# outside my own dir": bdshim exec'd the shim layer, the shim layer exec'd bdshim — one
+# PID mutual-exec'ing at 53 % CPU for 12 h while holding a heavy slot. The fix makes
+# resolution wrapper-agnostic (compiled artifact only) in BOTH layers, the merge
+# terminates, and the refusal stays the fixture's own.
+shim_layer=""
+first_git=$(command -v git || true)
+if [ -n "$first_git" ] && [[ "$(head -c 2 -- "$first_git" 2>/dev/null)" == "#!" ]]; then
+  shim_layer=$(dirname "$first_git")
+else
+  shim_layer="$work/olddogfood"
+  mkdir -p "$shim_layer"
+  cat >"$shim_layer/git" <<'EOF'
+#!/usr/bin/env bash
+# Synthetic stand-in for an installed dogfood policy shim running the PRE-#68 rule:
+# skip own dir, exec the first other executable `git` on PATH (what the mutual exec rode).
+self=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+IFS=':'
+for d in $PATH; do
+  r=$(cd "$d" 2>/dev/null && pwd -P) || continue
+  [ "$r" = "$self" ] && continue
+  if [ -f "$r/git" ] && [ -x "$r/git" ]; then exec "$r/git" "$@"; fi
+done
+echo "olddogfood stand-in: no other git on PATH" >&2
+exit 127
+EOF
+  chmod +x "$shim_layer/git"
+fi
+stage_branch feat/10-f f10.txt foxtrot
+bash "$plugin/scripts/gate-train.sh" feat/10-f >/dev/null 2>&1
+expect "feat/10-f gates green (double-wrap pin)" "0" "$?"
+# Bounded: the fix resolves in milliseconds; the pre-fix spin ran 12 h (timeout ⇒ 124).
+out=$(PATH="$bdshim_dir:$shim_layer:$PATH" timeout 60 bash "$plugin/scripts/merge-train.sh" feat/10-f 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ]; then pkill -f "$bdshim_dir/git" 2>/dev/null || true; fi   # failure path: reap a spinning wrapper
+echo "$out"
+expect "the double-wrapped merge TERMINATES under the bounded timeout (no mutual-exec spin)" "0" "$rc"
+printf '%s\n' "$out" | grep -qF "KEPT train-feat/10-f (delete refused: error: simulated refusal to delete a train ref)" &&
+  pass "the double-wrapped merge keeps the fixture's own refusal text (KEPT line)" ||
+  fail "no KEPT line with the simulated refusal (did the shim layer answer instead?)"
+[ -n "$(tref feat/10-f)" ] &&
+  pass "the double-wrapped refused ref really survives the merge run" ||
+  fail "the double-wrapped sim-refused ref vanished anyway"
+git -C "$gate" branch -q -D train-feat/10-f
 # --- merge-train.sh: fail-closed dirty probe (absorbed from the #32 review) ----
 # A ticket worktree whose `git status` CANNOT RUN must be KEPT with a loud note —
 # empty-on-failure is never read as clean (the merge-time analogue of
@@ -682,7 +797,7 @@ expect "the dirty-probe branch gates green" "0" "$?"
 mwd="$work/home/project/worktrees/project"
 git worktree add -q "$mwd/issue-16-mp" feat/16-mp
 statusshim_dir="$work/git-status-shim"
-statusshim_real=$(command -v git)
+statusshim_real=$(shim_find_real git)   # #68: same shared rule as bdshim_real
 mkdir -p "$statusshim_dir"
 cat >"$statusshim_dir/git" <<EOF
 #!/usr/bin/env bash
