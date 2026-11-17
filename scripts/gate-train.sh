@@ -7,7 +7,11 @@
 # branch's rebased head as train-<branch>. A branch already stacked on the previous one in the train replays
 # only its own commits (rebase --onto), so no branch ever carries foreign commits. Then it runs every check
 # of .devloop.json "checks" once on the top of the stack; heavy checks run through heavy.sh, so the
-# machine-wide slot limit and memory cap apply. When the scenario store is on (dark-factory spec §5), the
+# machine-wide slot limit and memory cap apply. The gate's own git work and every check run with
+# the dogfood policy-shim dirs SCRUBBED from PATH (entries whose git or gh is an interpreted
+# script, 2-byte `#!` magic — ticket #70, authority separation); the seam
+# MULTIPI_GATE_SCRUB_POLICY_SHIMS controls it (default 1 = scrub; 0 restores the armed PATH).
+# When the scenario store is on (dark-factory spec §5), the
 # scenario stage (scenario-stage.sh) then runs on the train top: a red stage is TRAIN RED (no record), the
 # stage's exit 2 propagates as the gate's exit 2, and a failed check prints `scenarios skipped` instead.
 #
@@ -20,6 +24,19 @@ scripts_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$scripts_dir/lib/common.sh"
 
 [ $# -gt 0 ] || dl_die "usage: gate-train.sh <branch> [<branch> ...]"
+
+# --- policy-shim PATH scrub (ticket #70, authority separation) ----------------------
+# The dogfood policy shims protect the loop's SESSIONS; they must never veto the loop's
+# own verification. Rebuild PATH dropping every entry whose git or gh is an INTERPRETED
+# script (2-byte `#!` magic — dl_scrub_policy_shims, lib/common.sh) BEFORE any git work
+# of the gate (config load, worktree setup, stacking, checks, stage). Seam
+# MULTIPI_GATE_SCRUB_POLICY_SHIMS: default 1 (scrub); 0 restores the armed PATH for
+# tests that exercise the armed posture.
+if [ "${MULTIPI_GATE_SCRUB_POLICY_SHIMS:-1}" != 0 ]; then
+  PATH=$(dl_scrub_policy_shims "$PATH")
+  export PATH
+fi
+
 dl_load_config required
 [ "$(cfg_len checks)" -gt 0 ] || dl_die "no \"checks\" in $DL_CONFIG"
 
