@@ -320,9 +320,17 @@ mkdir -p "$lockdir/slot1.d"
 # unbounded wait hang the whole smoke on the very class this pin exists to catch — 124 beats infinity.
 MULTIPI_HEAVY_SLOTS=1 PATH="$stubbin:$PATH" timeout 30 bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1 &
 _hgw=$!
-sleep 0.3
-[ -d "$lockdir/slot1.d" ] && pass "a fresh ownerless slot dir survives one poll tick (sweep grace)" ||
-  fail "the fresh ownerless dir was swept inside its grace tick (the sub-ms double-acquire re-opened)"
+# #84: the old fixed `sleep 0.3` + PRESENCE assert assumed the sweeper's first tick landed
+# WITHIN the grace window — on a loaded box a slow spawn/first-tick delays that look past
+# the 1 s grace and the pin flakes in both directions. Bounded-poll idiom (#82): poll for
+# ABSENCE past the grace deadline instead (spawns + one busy tick + one aged sweep tick ≈ 3 s;
+# 5 s mirrors the #82 bound). Load moves the arrival time, the poll absorbs it; a regression
+# that stops the sweep exhausts the 5 s bound instead of hanging the suite.
+if wait_for 5000 [ ! -d "$lockdir/slot1.d" ]; then
+  pass "the ownerless slot dir is swept once aged past its grace tick (sweep grace)"
+else
+  fail "the ownerless slot dir was neither swept nor freed within 5 s (stalled sweep or grace never lapsed?)"
+fi
 _hgw_rc=0; wait "$_hgw" || _hgw_rc=$?
 expect "the aged ownerless dir is swept and the slot taken (grace, not a new ghost)" "0" "$_hgw_rc"
 [ ! -d "$lockdir/slot1.d" ] && pass "the aged ownerless slot dir was swept" ||
