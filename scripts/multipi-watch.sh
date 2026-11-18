@@ -53,7 +53,12 @@ die_usage() {
   exit 4
 }
 int_or() { # int_or VALUE DEFAULT NAME → prints a non-negative integer
-  case "$1" in '' | *[!0-9]*) printf '%s' "$2" ;; *) printf '%s' "$1" ;; esac
+  # #76 (the #67 round-2 class, one consumer further in): a leading-zero value (08/09)
+  # passes the all-digits gate, then bash arithmetic reads it as INVALID OCTAL and
+  # aborts the check ($((09 * 5)): "value too great for base") — or the test builtin
+  # silently mis-compares it as a tiny number (08 ≈ 8 ms: a healthy 1 min tool wakes).
+  # Non-canonical decimal is GARBAGE → the documented default, never bash's coincidence.
+  case "$1" in '' | *[!0-9]* | 0[0-9]*) printf '%s' "$2" ;; *) printf '%s' "$1" ;; esac
 }
 
 daemon=0

@@ -645,15 +645,24 @@ test("watchdog auto-start is TUI-only: a tui session_start spawns, an rpc sessio
 	try {
 		await withCwd(fx.repo, async () => {
 			testSeams.watchSpawns.length = 0;
-			const fireStart = (mode: string): Promise<unknown> => {
-				const { hooks } = fakePiLoadOrchestrator();
+			// One registration for the whole session — the liveness handler's closure state
+			// (and hence the shutdown's ended-tombstone persist) belongs to the instance
+			// that saw the session_start.
+			const { hooks } = fakePiLoadOrchestrator();
+			const fireHook = (name: string, mode: string, event: unknown = {}): Promise<unknown> => {
 				const ctx = { cwd: fx.repo, hasUI: mode === "tui", mode, sessionManager: { getSessionId: () => "sess-watchgate" } } as never;
-				return Promise.all(hooks.filter((h) => h.name === "session_start").map((h) => h.fn({}, ctx)));
+				return Promise.all(hooks.filter((h) => h.name === name).map((h) => h.fn(event, ctx)));
 			};
-			await fireStart("tui");
+			await fireHook("session_start", "tui");
 			assert.deepEqual(testSeams.watchSpawns, [stub], "the tui session spawned exactly the vendored watch script");
-			await fireStart("rpc");
+			await fireHook("session_start", "rpc");
 			assert.deepEqual(testSeams.watchSpawns, [stub], "the rpc session added NO spawn (headless: no TTY to wake)");
+			// Housekeeping parity with the adjacent liveness tests: CLOSE the session — the
+			// started sidecar becomes the terminal ended tombstone, and the shutdown's
+			// persist lands BEFORE the fixture cleanup (a late persist into a cleaned
+			// fixture was this test's only leak, #76 item 5).
+			await fireHook("session_shutdown", "rpc", { reason: "quit" });
+			assert.equal(loadState(path.join(home, "proj"))!.state, "ended", "the closing shutdown ends the sidecar");
 		});
 	} finally {
 		if (savedHome === undefined) delete process.env.MULTIPI_HOME;

@@ -33,7 +33,15 @@ shim_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 shim_init
 
 REAL_GIT=$(shim_find_real git) || {
-  echo "multipi policy: cannot locate the real git (MULTIPI_SHIM_REAL_GIT unset/unusable; no compiled git outside the shim dir $shim_dir) — broken install, refusing" >&2
+  # The two failure shapes are mutually exclusive, and when the seam is set-but-
+  # unusable the per-seam line already named it — the combined line reflects ONLY
+  # what actually failed (#76 item 3). An unset (or empty) seam means the scan is
+  # the failure that happened.
+  if [ -n "${MULTIPI_SHIM_REAL_GIT:-}" ]; then
+    echo "multipi policy: cannot locate the real git (MULTIPI_SHIM_REAL_GIT set but unusable — the per-seam refusal already printed above) — broken install, refusing" >&2
+  else
+    echo "multipi policy: cannot locate the real git (no compiled git on PATH outside the shim dir $shim_dir) — broken install, refusing" >&2
+  fi
   exit 127
 }
 

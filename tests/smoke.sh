@@ -15,10 +15,12 @@ git config --global init.defaultBranch main
 mkdir -p "$work/bin" && ln -s "$plugin/tests/fake-gh" "$work/bin/gh"
 export PATH="$work/bin:$PATH"
 
-# Shared resolution rule from the policy shims (#68): this smoke runs in the dogfood-ARMED
-# environment (its PATH carries the policy-shims dir, so `command -v git` IS the shim),
-# and its git fixtures must resolve the real git the same wrapper-agnostic way the shims
-# do — never `command -v`. Sourcing the library is side-effect free.
+# Shared resolution rule from the policy shims (#68): its git fixtures must resolve the
+# real git the same wrapper-agnostic way the shims do — never `command -v`. The pin is
+# posture-agnostic: the sanctioned gate-driven run is SCRUBBED of the policy shims
+# (ticket #70, authority separation), while a smoke run inherited from a dogfood loop
+# session is ARMED (its PATH carries the policy-shims dir, so `command -v git` IS the
+# shim). Sourcing the library is side-effect free.
 shim_dir="$plugin/scripts/policy-shims"
 . "$shim_dir/lib/policyshim.sh"
 # Consumed across the file boundary: the sourced shim_find_real reads SIM_SHIM_DIR to anchor
@@ -193,6 +195,16 @@ expect "heavy.sh passes through a zero exit" "0" \
   "$(bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
 expect "heavy.sh passes through a non-zero exit" "1" \
   "$(bash "$plugin/scripts/heavy.sh" false >/dev/null 2>&1; echo $?)"
+# #76 bootstrap parity with gate-train (the #70/#76 pure-builtin form): a PATH that an
+# upstream actor scrubbed or EMPTIED entirely carries no coreutils — the old
+# dirname(1)-era bootstrap 127'd into a command-not-found cascade before the usage
+# check ran. The usage path is builtin-reachable on ANY PATH (named error, rc 2).
+heavy_abs_bash=$(command -v bash)
+hout=$(env PATH= "$heavy_abs_bash" "$plugin/scripts/heavy.sh" 2>&1)
+hrc=$?
+expect "heavy.sh: an emptied PATH still reaches the named usage error (pure-builtin bootstrap)" "2" "$hrc"
+echo "$hout" | grep -qF "usage: heavy.sh" && pass "heavy.sh: the usage line is printed under an empty PATH" ||
+  fail "heavy.sh usage under an empty PATH: $hout"
 
 # Three 3-second jobs on two slots: the third must wait for a slot to free.
 start=$(date +%s)
@@ -3779,6 +3791,28 @@ mkstate active 61000 3 780000   # BOTH conditions true
 lvwatch MULTIPI_STATUS_STALE_MS=10000
 expect "watch: when both fire, the WEDGE (the stronger wake) is chosen" \
   "1" "$(grep -c '^WEDGE SUSPECTED' "$WK" 2>/dev/null)"
+# #76 (the #67 canonical-form class, one consumer further in): a LEADING-ZERO seam value
+# (08/09) passes int_or's all-digits gate but bash reads it as INVALID OCTAL — 09 died
+# mid-check in $((stale * 5)) ("value too great for base"), 08 silently compared as the
+# wrong number in the test builtin. The documented read: non-canonical decimal is
+# GARBAGE → the documented DEFAULT, never bash's coincidental octal (09 as 9 ms would
+# wedge a 61 s heartbeat; 08 read as a small number would wake a 1 min tool).
+lvfresh
+mkstate active 1000 5 60000   # tool in flight 1 min — healthy against the 12 min default
+lvwatch MULTIPI_WATCH_TOOL_MS=08
+expect "watch rc 0: MULTIPI_WATCH_TOOL_MS=08 does not corrupt the check (invalid octal)" "0" "$LV_RC"
+expect "watch: 08 reads as the documented default (720000 ms) — the 1 min tool is HEALTHY" \
+  "1" "$(grep -cF ' HEALTHY' "$wl" 2>/dev/null)"
+[ -s "$WK" ] && fail "a leading-zero tool bound woke anyway (08 was read as a tiny number)" \
+  || pass "watch: a leading-zero tool bound fell back to the default (no wake)"
+lvfresh
+mkstate active 61000 0 0   # heartbeat 61 s old — healthy against the 10 min wedge threshold
+lvwatch MULTIPI_STATUS_STALE_MS=09
+expect "watch rc 0: MULTIPI_STATUS_STALE_MS=09 does not crash bash arithmetic (invalid octal)" "0" "$LV_RC"
+expect "watch: 09 reads as the documented default (120000 ms) — the 61 s heartbeat is HEALTHY" \
+  "1" "$(grep -cF ' HEALTHY' "$wl" 2>/dev/null)"
+[ -s "$WK" ] && fail "a leading-zero stale bound wedged anyway (09 was honoured as octal 9 ms)" \
+  || pass "watch: a leading-zero stale bound fell back to the default (no wedge)"
 rm -f "$LVSC"
 lvwatch
 expect "watch rc 5: no sidecar (the daemon self-idles)" "5" "$LV_RC"

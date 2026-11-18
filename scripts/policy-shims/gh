@@ -23,7 +23,15 @@ shim_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 shim_init
 
 REAL_GH=$(shim_find_real gh) || {
-  echo "multipi policy: cannot locate the real gh (MULTIPI_SHIM_REAL_GH unset/unusable; no compiled gh outside the shim dir $shim_dir) — broken install, refusing" >&2
+  # The two failure shapes are mutually exclusive, and when the seam is set-but-
+  # unusable the per-seam line already named it — the combined line reflects ONLY
+  # what actually failed (#76 item 3). An unset (or empty) seam means the scan is
+  # the failure that happened.
+  if [ -n "${MULTIPI_SHIM_REAL_GH:-}" ]; then
+    echo "multipi policy: cannot locate the real gh (MULTIPI_SHIM_REAL_GH set but unusable — the per-seam refusal already printed above) — broken install, refusing" >&2
+  else
+    echo "multipi policy: cannot locate the real gh (no compiled gh on PATH outside the shim dir $shim_dir) — broken install, refusing" >&2
+  fi
   exit 127
 }
 

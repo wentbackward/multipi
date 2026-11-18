@@ -281,6 +281,57 @@ test("shim_find_real: an EMPTY seam value is unset (the compiled-on-PATH scan ap
 	assert.equal(got.stdout.trim(), compiled, "empty means unset — the #68 rule is unchanged");
 });
 
+// --- the broken-install 127 line: it must reflect ONLY WHAT ACTUALLY FAILED --------
+// #76 item 3: the old combined phrasing "(seam unset/unusable; no compiled … on PATH)"
+// asserted both failures at once — but when the seam is set-but-unusable the dedicated
+// per-seam line already fired and the PATH scan NEVER RAN. The two failure shapes are
+// mutually exclusive (shim_find_real fails only one way or the other), so the combined
+// line names the one that actually happened.
+const GIT_SHIM = path.resolve(HERE, "..", "..", "scripts", "policy-shims", "git");
+
+/** A PATH dir carrying only the shims' bootstrap externals (dirname, jq when the host has it) — NO compiled git or gh anywhere, so the scan fails hermetically. */
+function coreutilsOnlyBin(root: string): string {
+	const dir = `${root}/corebin`;
+	mkdirSync(dir, { recursive: true });
+	for (const tool of ["dirname", "jq"]) {
+		const p = spawnSync(BASH, ["-c", `command -v ${tool}`], { encoding: "utf8" }).stdout.trim();
+		if (p) symlinkSync(p, path.join(dir, tool));
+	}
+	return dir;
+}
+
+function runShimArtifact(shim: string, env: NodeJS.ProcessEnv): { status: number; stderr: string } {
+	const r = spawnSync(BASH, [shim, "--version"], { env, encoding: "utf8", timeout: 10_000 });
+	return { status: r.status ?? -1, stderr: r.stderr ?? "" };
+}
+
+for (const [shim, bin, seamVar] of [
+	[GH_SHIM, "gh", "MULTIPI_SHIM_REAL_GH"],
+	[GIT_SHIM, "git", "MULTIPI_SHIM_REAL_GIT"],
+] as const) {
+	test(`${bin} shim 127: seam UNSET — the line names the scan failure only (no seam clause)`, () => {
+		const root = mkdtempSync(path.join(tmpdir(), "policyshim-test."));
+		const scriptdir = `${root}/scripts-only`;
+		scriptBin(scriptdir, bin, `#!/usr/bin/env bash\necho fake-${bin}\n`);
+		const got = runShimArtifact(shim, { PATH: `${coreutilsOnlyBin(root)}:${scriptdir}` });
+		assert.equal(got.status, 127, `stderr: ${got.stderr}`);
+		assert.match(got.stderr, new RegExp(`cannot locate the real ${bin}`), `the stable named refusal: ${got.stderr}`);
+		assert.match(got.stderr, new RegExp(`no compiled ${bin} on PATH outside the shim dir`), `the scan failure is named: ${got.stderr}`);
+		assert.doesNotMatch(got.stderr, new RegExp(seamVar), "no seam was involved — the line must not cite it");
+	});
+	test(`${bin} shim 127: seam SET-but-unusable — the line names the seam (the scan never ran)`, () => {
+		const root = mkdtempSync(path.join(tmpdir(), "policyshim-test."));
+		const scriptdir = `${root}/scripts-only`;
+		scriptBin(scriptdir, bin, `#!/usr/bin/env bash\necho fake-${bin}\n`);
+		const got = runShimArtifact(shim, { PATH: `${coreutilsOnlyBin(root)}:${scriptdir}`, [seamVar]: `${root}/nowhere/${bin}` });
+		assert.equal(got.status, 127, `stderr: ${got.stderr}`);
+		assert.match(got.stderr, /missing, unreadable or not executable — refusing \(no PATH fallback\)/, `the per-seam line already fired: ${got.stderr}`);
+		assert.match(got.stderr, new RegExp(`cannot locate the real ${bin}`), `the stable named refusal: ${got.stderr}`);
+		assert.match(got.stderr, new RegExp(seamVar), "the combined line names the seam that failed");
+		assert.doesNotMatch(got.stderr, /no compiled/, "the scan never ran — the line must not claim a scan failure either");
+	});
+}
+
 // --- _shim_exec_real: the recursion depth guard ---------------------------------
 
 test("_shim_exec_real execs at depth 0 with the counter bumped to 1", () => {
