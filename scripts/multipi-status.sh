@@ -34,7 +34,7 @@ dl_load_config
 # — a fresh sidecar flips to WEDGE and the typo never surfaces. Spec §1a pins the stance:
 # malformed ⇒ rc 4. A non-canonical decimal is malformed: refuse it, never honour it.
 stale=${MULTIPI_STATUS_STALE_MS:-120000}
-case "$stale" in '' | *[!0-9]* | 0[0-9]*) echo "multipi-status: MULTIPI_STATUS_STALE_MS must be a canonical decimal integer ms (no leading zeros)" >&2; exit 4 ;; esac
+case "$stale" in '' | *[!0-9]* | 0[0-9]*) echo "multipi-status: MULTIPI_STATUS_STALE_MS must be a canonical decimal integer ms" >&2; exit 4 ;; esac
 now=$(date +%s%3N)
 memsuffix=$(lv_mem_suffix "${MULTIPI_STATUS_MEMINFO:-/proc/meminfo}")
 

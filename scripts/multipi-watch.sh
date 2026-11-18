@@ -92,7 +92,7 @@ lv_now() {
   # clock is the STRICT seam (spec §4: a wrong clock silently skews every comparison).
   if [ -n "${MULTIPI_WATCH_NOW_MS:-}" ]; then
     case "${MULTIPI_WATCH_NOW_MS}" in
-      *[!0-9]* | 0[0-9]*) echo "multipi-watch: MULTIPI_WATCH_NOW_MS must be a canonical decimal integer ms (no leading zeros)" >&2; return 4 ;;
+      *[!0-9]* | 0[0-9]*) echo "multipi-watch: MULTIPI_WATCH_NOW_MS must be a canonical decimal integer ms" >&2; return 4 ;;
     esac
     printf '%s' "${MULTIPI_WATCH_NOW_MS}"
   else
@@ -218,7 +218,11 @@ if [ "$daemon" = 1 ]; then
   while :; do
     if ! one_shot >>"$log" 2>&1; then
       # The daemon scopes ITS OWN timestamp: one_shot's `now` is local to the check.
-      wlog "$(lv_now || date +%s%3N)" "CHECK-FAILED"
+      # #80: a malformed clock already parked its refusal in $log (one_shot's stderr
+      # redirect); capturing it a SECOND time here re-emitted the same line onto the
+      # daemon's dropped stderr. Drop that redundant emission; the wall-clock fallback
+      # keeps the CHECK-FAILED line writing.
+      wlog "$(lv_now 2>/dev/null || date +%s%3N)" "CHECK-FAILED"
     fi
     sleep "$interval"
   done
