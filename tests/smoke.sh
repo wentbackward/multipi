@@ -332,8 +332,10 @@ _hgw=$!
 # below does NOT pin it: a deleted grace sweeps the fresh dir early, the job acquires early,
 # rc 0, and all three asserts stay green — a grace regression would pass silently. The raced-
 # window pin alternative is non-discriminating (the regressed window is sub-ms; DECISIONS
-# 2026-11-18 #84, #86), so the one tick of coverage #84 surrendered is named here, not lost:
-# the property's effective pin remains slot_sweepable's mtime contract in scripts/heavy.sh.
+# 2026-11-18 #84, #86), so the one tick of coverage #84 surrendered is pinned directly
+# below instead (ticket #88, the #86 review found NO test exercised the mtime grace at
+# all): the fresh-dir not-sweepable pin drives slot_sweepable's extracted classifier —
+# red against the pre-#67 classification (fresh ownerless read as dead → swept).
 if wait_for 5000 [ ! -d "$lockdir/slot1.d" ]; then
   pass "the ownerless slot dir is swept once aged past its grace tick (sweep grace)"
 else
