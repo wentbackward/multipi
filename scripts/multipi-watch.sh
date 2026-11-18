@@ -85,15 +85,18 @@ lv_now() {
     date +%s%3N
   fi
 }
-wlog() { printf '%s %s\n' "$now" "$*" >>"$log" 2>/dev/null || true; }
+# wlog NOW MESSAGE — takes its timestamp EXPLICITLY (#65 round-4: the global `now`
+# one_shot used to set leaked into the daemon loop's CHECK-FAILED line — the daemon
+# scopes its own). The message is $2, never $*: $* would re-expand the timestamp too.
+wlog() { printf '%s %s\n' "$1" "$2" >>"$log" 2>/dev/null || true; }
 
 one_shot() {
-  local sc state pid tick ev hb toolseq toolname toolstart lastwakeseq
+  local now sc state pid tick ev hb toolseq toolname toolstart lastwakeseq
   local wedge_age tool_age kind min_n msg lw
   now=$(lv_now)
   sc=$(lv_sidecar)
   if [ ! -f "$sc" ]; then
-    wlog "IDLE:no-sidecar"
+    wlog "$now" "IDLE:no-sidecar"
     echo "watch: no sidecar (nothing to wake)"
     return 5
   fi
@@ -104,7 +107,7 @@ one_shot() {
   state=$(lv_field "$sc" state)
   case "$state" in
     active | idle) : ;;
-    *) wlog "IDLE:state-${state}"; echo "watch: state '${state}' — nothing to wake"; return 5 ;;
+    *) wlog "$now" "IDLE:state-${state}"; echo "watch: state '${state}' — nothing to wake"; return 5 ;;
   esac
   pid=$(lv_num "$sc" pid)
   tick=$(lv_num "$sc" lastTickAt)
@@ -123,7 +126,7 @@ one_shot() {
   [ "$wedge_age" -gt $((stale * 5)) ] && wedge_cond=1
   [ "$toolseq" -gt 0 ] && [ "$tool_age" -gt "$tool_bound" ] && tool_cond=1
   if [ "$wedge_cond" = 0 ] && [ "$tool_cond" = 0 ]; then
-    wlog "HEALTHY"
+    wlog "$now" "HEALTHY"
     echo "watch: healthy (pid ${pid})"
     return 0
   fi
@@ -140,37 +143,37 @@ one_shot() {
 
   # Dedupe axis 1: per tool.seq (the sidecar's monotonic watermark).
   if [ "$kind" = WAKE ] && [ "$lastwakeseq" -eq "$toolseq" ]; then
-    wlog "SUPPRESSED:seq"
+    wlog "$now" "SUPPRESSED:seq"
     echo "watch: suppressed (already woken for seq ${toolseq})"
     return 0
   fi
   # Dedupe axis 2: at most one wake per 3600 s of wall clock (the watch log is the ledger).
   lw=$(lv_last_wake_ts "$log")
   if [ "$lw" -gt 0 ] && [ $((now - lw)) -lt "$WAKE_DEDUPE_WALL_MS" ]; then
-    wlog "SUPPRESSED:recent"
+    wlog "$now" "SUPPRESSED:recent"
     echo "watch: suppressed (last wake < 3600 s ago)"
     return 0
   fi
 
   lv_inject_target "$pid"
   if [ -z "$LV_TARGET" ]; then
-    wlog "NOTTY"
+    wlog "$now" "NOTTY"
     lv_no_tty_fallback "$pid" "$LV_TTY_RAW"
     return 6
   fi
   if ! printf '%s\n' "$msg" >"$LV_TARGET" 2>/dev/null; then
-    wlog "NOTTY"
+    wlog "$now" "NOTTY"
     lv_no_tty_fallback "$pid" "$LV_TTY_RAW"
     return 6
   fi
   if [ "$kind" = WAKE ]; then
-    wlog "WAKE tool=${toolname}"
+    wlog "$now" "WAKE tool=${toolname}"
     # A failed bump (a python3-less box, CAS exhaustion) does NOT fail the wake: the wall
     # axis caps the damage at one duplicate wake. Log the degradation — the seq axis is
     # lost, so the operator must be able to see that it was lost.
-    lv_bump_wake_seq "$sc" "$toolseq" || wlog "BUMP-FAILED tool=${toolname} seq=${toolseq}"
+    lv_bump_wake_seq "$sc" "$toolseq" || wlog "$now" "BUMP-FAILED tool=${toolname} seq=${toolseq}"
   else
-    wlog "WEDGE hb-age=${wedge_age}"
+    wlog "$now" "WEDGE hb-age=${wedge_age}"
   fi
   echo "watch: injected ${kind} to ${LV_TARGET} (pid ${pid})"
   return 0
@@ -200,7 +203,8 @@ if [ "$daemon" = 1 ]; then
   # outlive the wedge it watches for.
   while :; do
     if ! one_shot >>"$log" 2>&1; then
-      wlog "CHECK-FAILED"
+      # The daemon scopes ITS OWN timestamp: one_shot's `now` is local to the check.
+      wlog "$(lv_now)" "CHECK-FAILED"
     fi
     sleep "$interval"
   done
