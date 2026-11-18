@@ -4,7 +4,7 @@ import path from "node:path";
 import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, mkdirSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import devloopExtension, { livenessWriteAttempts, resolveWatchScript } from "../../extension/index.ts";
+import devloopExtension, { testSeams, resolveWatchScript } from "../../extension/index.ts";
 import { GUARD_REFUSAL } from "../../extension/src/guard.ts";
 import { loadState, sidecarPath, writeState } from "../../extension/src/liveness.ts";
 import { BASE_CONFIG, makeFixture } from "../fixtures.ts";
@@ -557,20 +557,20 @@ test("orchestrator liveness: two same-millisecond message_update ticks cause at 
 			const frozen = realNow() + 60_000;
 			Date.now = () => frozen - 2_000;
 			await fire("session_start", { reason: "startup" });
-			livenessWriteAttempts.count = 0;
+			testSeams.livenessWriteAttempts = 0;
 
 			Date.now = () => frozen;
 			await fire("message_update", {});
 			await fire("message_update", {});
-			assert.ok(livenessWriteAttempts.count <= 1, `at most one sidecar write in the window, got ${livenessWriteAttempts.count}`);
-			assert.equal(livenessWriteAttempts.count, 1, "the first tick wrote, the same-millisecond twin was dropped");
+			assert.ok(testSeams.livenessWriteAttempts <= 1, `at most one sidecar write in the window, got ${testSeams.livenessWriteAttempts}`);
+			assert.equal(testSeams.livenessWriteAttempts, 1, "the first tick wrote, the same-millisecond twin was dropped");
 			assert.equal(loadState(stDir)!.lastEventAt, frozen, "the surviving write carried the tick (in-memory update persisted once)");
 
 			// Once the window has elapsed, the next tick writes again — the throttle
 			// drops duplicates, not events.
 			Date.now = () => frozen + 2_000;
 			await fire("message_update", {});
-			assert.equal(livenessWriteAttempts.count, 2, "the next window's tick writes");
+			assert.equal(testSeams.livenessWriteAttempts, 2, "the next window's tick writes");
 			assert.equal(loadState(stDir)!.lastEventAt, frozen + 2_000, "and its content carries the newer tick");
 			Date.now = realNow;
 			// Housekeeping: end this session so its 15 s tick cannot outlive the test.
@@ -610,6 +610,50 @@ test("orchestrator liveness: an externally raised lastWakeSeq is never regressed
 			writeState(stDir, { ...loadState(stDir)!, lastWakeSeq: 3 });
 			await fire("tool_execution_start", { toolCallId: "c9", toolName: "devloop.gate", args: {} });
 			assert.equal(loadState(stDir)!.lastWakeSeq, 3, "the persist adopted the higher watermark instead of regressing it");
+		});
+	} finally {
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		if (savedRole === undefined) delete process.env.MULTIPI_CHILD_ROLE;
+		else process.env.MULTIPI_CHILD_ROLE = savedRole;
+		fx.cleanup();
+	}
+});
+
+// --- watchdog auto-start: the TUI-only gate (#65 round-4 review item 4) ------------
+// The gate has no observable effect short of a real daemon, so the pin records the
+// resolved script on every spawn attempt (the explicit testSeams in index.ts) and
+// asserts the BRANCH: a tui session spawns, an rpc session never does (headless
+// sessions have no TTY to wake — spec 2026-11-15 §4).
+
+test("watchdog auto-start is TUI-only: a tui session_start spawns, an rpc session_start never does", async () => {
+	const fx = makeFixture(BASE_CONFIG);
+	const home = path.join(fx.dir, "home");
+	const savedHome = process.env.MULTIPI_HOME;
+	const savedChild = process.env.MULTIPI_CHILD;
+	const savedRole = process.env.MULTIPI_CHILD_ROLE;
+	process.env.MULTIPI_HOME = home;
+	delete process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD_ROLE;
+	// The vendored copy wins resolution (resolveWatchScript): make it a no-op stub so the
+	// tui spawn is harmless — and the recorded target proves the vendored copy was picked.
+	const stub = path.join(fx.repo, "scripts", "multipi-watch.sh");
+	mkdirSync(path.dirname(stub), { recursive: true });
+	writeFileSync(stub, "#!/usr/bin/env bash\nexit 0\n");
+	try {
+		await withCwd(fx.repo, async () => {
+			testSeams.watchSpawns.length = 0;
+			const fireStart = (mode: string): Promise<unknown> => {
+				const { hooks } = fakePiLoadOrchestrator();
+				const ctx = { cwd: fx.repo, hasUI: mode === "tui", mode, sessionManager: { getSessionId: () => "sess-watchgate" } } as never;
+				return Promise.all(hooks.filter((h) => h.name === "session_start").map((h) => h.fn({}, ctx)));
+			};
+			await fireStart("tui");
+			assert.deepEqual(testSeams.watchSpawns, [stub], "the tui session spawned exactly the vendored watch script");
+			await fireStart("rpc");
+			assert.deepEqual(testSeams.watchSpawns, [stub], "the rpc session added NO spawn (headless: no TTY to wake)");
 		});
 	} finally {
 		if (savedHome === undefined) delete process.env.MULTIPI_HOME;

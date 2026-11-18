@@ -223,31 +223,51 @@ mkdir -p "$lockdir"
 : >"$lockdir/slot1.lock"   # residual lock file of a dead (killed) holder
 expect "heavy.sh takes a slot whose residual lock file was left by a dead holder" "0" \
   "$(bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
+# #67 (review of #68 r1): a WORKING flock without --version (busybox-shaped) must take the
+# FLOCK path — the old `flock --version` probe is a NAME check, not a capability check,
+# and silently downgraded such a flock to the mkdir path. Emulate the profile: the
+# fd-form `-n` acquisition works, everything else (`--version`, `-u`) fails.
+rm -rf "$lockdir" && mkdir -p "$lockdir"   # fresh state: only this run's artifacts remain
+bbflock="$work/bin-bbflock"
+mkdir -p "$bbflock"
+printf '#!/usr/bin/env bash\n[ "$1" = "-n" ] && exit 0\nexit 127\n' >"$bbflock/flock"
+chmod +x "$bbflock/flock"
+expect "heavy.sh (busybox-shaped flock: no --version, working -n) takes the FLOCK path" "0" \
+  "$(PATH="$bbflock:$PATH" bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
+[ -f "$lockdir/slot1.lock" ] && pass "the flock path's slot1.lock artifact was created" ||
+  fail "no slot1.lock artifact — a working flock was downgraded to the mkdir path"
+[ ! -d "$lockdir/slot1.d" ] && pass "no slot1.d: the mkdir path was not taken" ||
+  fail "slot1.d exists — a working flock was downgraded to the mkdir path"
 # Dead pid that is provably dead: spawn a process and reap it.
 sleep 0.1 &
 _reaped_pid=$!
 wait "$_reaped_pid" 2>/dev/null
 # No-flock environment for the mkdir path: a dead stub that answers `command -v` but
-# fails `flock --version` — heavy.sh's branch point is behavioural (have_flock), so the
-# stub emulates a flock-less (macOS-shaped) system honestly.
+# fails a REAL non-blocking acquisition — heavy.sh's branch point is behavioural
+# (have_flock performs an fd-form `-n` lock on a scratch file), so the stub emulates a
+# flock-less (macOS-shaped) system honestly.
 stubbin="$work/bin-noflock"
 mkdir -p "$stubbin"
 printf '#!/usr/bin/env bash\nexit 127\n' >"$stubbin/flock"
 chmod +x "$stubbin/flock"
-# Fresh invocation: a stale slot dir with a dead pid is swept and the slot taken.
+# Invocation with an ALREADY-AGED dead-owner dir: the sweep respects one poll tick of
+# grace (#67) — a brand-new dir may belong to a holder between its mkdir and its pid
+# write — so the plant is backdated; the pin stays on the dead-owner fact itself.
 mkdir -p "$lockdir/slot1.d"
 echo "$_reaped_pid" >"$lockdir/slot1.d/pid"
-expect "heavy.sh (mkdir path, fresh) takes a slot whose owner pid is dead" "0" \
+touch -t 202001010000.00 "$lockdir/slot1.d"
+expect "heavy.sh (mkdir path) takes a slot whose owner pid is dead (swept at startup or acquisition)" "0" \
   "$(PATH="$stubbin:$PATH" bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
-[ ! -d "$lockdir/slot1.d" ] && pass "the dead holder's slot dir is swept at acquisition" ||
+[ ! -d "$lockdir/slot1.d" ] && pass "the dead holder's slot dir is swept (startup or acquisition)" ||
   fail "dead holder's slot dir left in place: $lockdir/slot1.d"
 # No pid file at all: a lock with no owner record must read as FREE, not alive.
 # (The pre-fix fallback `kill -0 0` targets the CALLER'S own process group — it always
 # answered "alive", so an ownerless dir was a permanent ghost.)
 mkdir -p "$lockdir/slot1.d"
-expect "heavy.sh (mkdir path, fresh) takes a slot whose holder left NO pid file" "0" \
+touch -t 202001010000.00 "$lockdir/slot1.d"
+expect "heavy.sh (mkdir path) takes a slot whose holder left NO pid file (swept at startup or acquisition)" "0" \
   "$(PATH="$stubbin:$PATH" bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
-[ ! -d "$lockdir/slot1.d" ] && pass "the ownerless slot dir is swept at acquisition" ||
+[ ! -d "$lockdir/slot1.d" ] && pass "the ownerless slot dir is swept (startup or acquisition)" ||
   fail "ownerless slot dir left in place: $lockdir/slot1.d"
 # A pid file containing 0: the old `^[0-9]+$` check admitted it, and `kill -0 0` answers
 # for the CALLER'S own process group (always "alive") — exactly the fallback the function
@@ -255,12 +275,29 @@ expect "heavy.sh (mkdir path, fresh) takes a slot whose holder left NO pid file"
 # fast, not hang the whole smoke on the spin.
 mkdir -p "$lockdir/slot1.d"
 echo 0 >"$lockdir/slot1.d/pid"
+touch -t 202001010000.00 "$lockdir/slot1.d"   # backdated: the sweep grace tick (#67) must not slow the pin
 # SLOTS=1: the ghosted slot is the ONLY slot, so acquisition (not a sibling slot) is what
 # proves the pid-0 lock reads as FREE.
-expect "heavy.sh (mkdir path, fresh) takes a slot whose pid file says 0" "0" \
+expect "heavy.sh (mkdir path) takes a slot whose pid file says 0" "0" \
   "$(MULTIPI_HEAVY_SLOTS=1 PATH="$stubbin:$PATH" timeout 30 bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
 [ ! -d "$lockdir/slot1.d" ] && pass "the pid-0 slot dir is swept at acquisition" ||
   fail "pid-0 slot dir left in place: $lockdir/slot1.d"
+# #67 (review of #68 r3): the ownerless=DEAD flip opened a sub-ms window — between a
+# holder's mkdir and its pid write, a waiter's sweep saw the FRESH dir ownerless and
+# could rm -rf it (two jobs, one slot). The sweep now respects ONE POLL TICK of grace:
+# a fresh ownerless dir must SURVIVE the first tick and be swept once it has aged.
+mkdir -p "$lockdir/slot1.d"
+# BOUNDED (mirrors the pid-0 pin's rationale): an acquisition-regression spin would make the
+# unbounded wait hang the whole smoke on the very class this pin exists to catch — 124 beats infinity.
+MULTIPI_HEAVY_SLOTS=1 PATH="$stubbin:$PATH" timeout 30 bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1 &
+_hgw=$!
+sleep 0.3
+[ -d "$lockdir/slot1.d" ] && pass "a fresh ownerless slot dir survives one poll tick (sweep grace)" ||
+  fail "the fresh ownerless dir was swept inside its grace tick (the sub-ms double-acquire re-opened)"
+_hgw_rc=0; wait "$_hgw" || _hgw_rc=$?
+expect "the aged ownerless dir is swept and the slot taken (grace, not a new ghost)" "0" "$_hgw_rc"
+[ ! -d "$lockdir/slot1.d" ] && pass "the aged ownerless slot dir was swept" ||
+  fail "the ownerless slot dir survived past its grace (a new permanent ghost?)"
 # WAITING instance: the only slot is held by a process that DIES while the waiter polls.
 # Pre-fix the waiter's startup sweep already ran (holder was alive then) and it polled on
 # the ghost forever; the fix sweeps the dead-owner dir at each acquisition attempt.
@@ -364,6 +401,22 @@ expect "scrub drops every shim entry and keeps the rest in order" "/usr/bin" \
 expect "scrub tolerates an empty PATH" "" "$(scrub "")"
 expect "scrub tolerates empty PATH entries" "/usr/bin" "$(scrub ":/usr/bin:")"
 
+# #70 review r1: a PATH the scrub empties ENTIRELY (every entry carries an interpreted
+# git or gh) must be a loud, named error at the scrub point — not an undiagnosable
+# command-not-found cascade one call later.
+emptbin="$work/emptbin"
+mkdir -p "$emptbin/gitshim" "$emptbin/ghshim"
+printf '#!/bin/bash\nexit 1\n' >"$emptbin/gitshim/git"; chmod +x "$emptbin/gitshim/git"
+printf '#!/bin/bash\nexit 1\n' >"$emptbin/ghshim/gh";    chmod +x "$emptbin/ghshim/gh"
+# env resolves the command with the NEW PATH (assignments first), so the interpreter
+# is named by absolute path — the outer PATH is intact here, this line runs before it isn't.
+abs_bash=$(command -v bash)
+out=$(env PATH="$emptbin/gitshim:$emptbin/ghshim" "$abs_bash" "$plugin/scripts/gate-train.sh" feat/1-first 2>&1)
+rc=$?
+expect "gate-train: a PATH the scrub empties entirely is the named error" "2" "$rc"
+echo "$out" | grep -qF "policy-shim scrub emptied PATH" && pass "the named scrub-emptied-PATH error is printed" ||
+  fail "no named scrub-emptied-PATH error: $out"
+
 # End-to-end: the gate-train invoked with the wrapper dir PREPENDED to PATH. The probe
 # check records the CHECK ENVIRONMENT's git (checks run from the gate worktree cwd, so
 # gitprobe.txt lands in the gate dir); the wrapper git marks itself and execs the real
@@ -394,9 +447,6 @@ echo "$out"
 expect "wrapper-shim PATH prepended: the default (scrubbed) gate still gates green" "0" "$rc"
 expect "the check's environment sees the COMPILED git, not the armed wrapper" "$realgit" \
   "$(cat "$gate/gitprobe.txt" 2>/dev/null)"
-[ "$(head -c 2 "$gate/gitprobe.txt" 2>/dev/null)" != "#!" ] &&
-  pass "the check's git is not an interpreted script" ||
-  fail "the check's git carries the #! magic (wrapper not scrubbed)"
 [ ! -e "$work/shim-git-hit" ] && pass "the armed wrapper git was never executed" ||
   fail "the armed wrapper git executed despite the default scrub"
 [ -f "$work/home/project/train-green.txt" ] &&
@@ -814,7 +864,7 @@ exit 127
 EOF
 chmod +x "$standin_dir/git"
 shim_layer="$standin_dir"
-first_git=$(command -v git || true)
+first_git=$(type -P git || true)
 if [ -n "$first_git" ] && [[ "$(head -c 2 -- "$first_git" 2>/dev/null)" == "#!" ]]; then
   shim_layer=$(dirname "$first_git")   # armed: the incident's lower layer is the dogfood shim itself
 fi
@@ -3575,7 +3625,9 @@ kill "$FPID" 2>/dev/null || true
 lvintr() { # lvintr [DRY] MSG [ENV_KV ...] — run in the fixture repo; sets LV_RC/LV_LINE
   local dry=$1 msg=$2; shift 2
   local line rc
-  line=$(cd "$work/project" && env MULTIPI_HOME="$lvhome" "$@" bash "$plugin/scripts/multipi-interrupt.sh" $([ "$dry" = 1 ] && echo "--dry-run") "$msg" 2>&1); rc=$?
+  local -a args=("$msg")
+  [ "$dry" = 1 ] && args=(--dry-run "${args[@]}")
+  line=$(cd "$work/project" && env MULTIPI_HOME="$lvhome" "$@" bash "$plugin/scripts/multipi-interrupt.sh" "${args[@]}" 2>&1); rc=$?
   LV_RC=$rc; LV_LINE=$line
 }
 lvintr_raw() { # lvintr_raw ARGS... — exact argv (no message assembly); sets LV_RC/LV_LINE
@@ -3744,6 +3796,14 @@ echo "$dl_daemon_second" | grep -qF "already running" && pass "watch daemon: the
 expect "watch daemon: exactly ONE loop runs (no doubling)" "1" "$(pgrep -fc 'multipi-watch.sh --daemon --interval 1' 2>/dev/null || echo 0)"
 sleep 1.5
 grep -qF " HEALTHY" "$wl" && pass "watch daemon: the loop actually checks (HEALTHY logged)" || fail "the daemon logged no check: $(tail -2 "$wl" 2>/dev/null)"
+# #65 round-4: wlog must take its timestamp EXPLICITLY — the global `now` one_shot used
+# to set leaked into the daemon loop's CHECK-FAILED line. Under the pinned
+# MULTIPI_WATCH_NOW_MS clock the behaviour is unobservable (the same ms is reused by
+# design), so the shape is pinned structurally — the same idiom as the doc-agreement pin.
+grep -qF "wlog() { printf '%s %s\n' \"\$1\"" "$plugin/scripts/multipi-watch.sh" &&
+  grep -qF "local now" "$plugin/scripts/multipi-watch.sh" &&
+  pass "watch: wlog takes its timestamp explicitly (no leaked one_shot global)" ||
+  fail "watch: wlog still reads the leaked global now"
 kill "$WD_PID" 2>/dev/null || true
 # Bounded wait + KILL fallback: a wedged daemon must never hang the suite (and the
 # daemon's own traps are the primary guarantee — this is the backstop).

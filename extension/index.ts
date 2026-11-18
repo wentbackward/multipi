@@ -310,12 +310,19 @@ const LIVENESS_TICK_MS = 15000;
 const LIVENESS_EVENT_WRITE_MS = 1000;
 
 /**
- * Test seam for the write-throttle pin (index.test.ts): counts persist ATTEMPTS — persist is
- * the extension's only sidecar writer, so one attempt is at most one fs write. The pin
- * asserts on this count (and the resulting content), not on mtime: sub-second writes alias
- * under filesystem mtime granularity, the count does not.
+ * Explicit test seams (index.test.ts, #65 round-4: one named object instead of loose
+ * mutable module-level exports — production reads none of it):
  */
-export const livenessWriteAttempts = { count: 0 };
+export const testSeams = {
+	/** persist() ATTEMPTS — persist is the extension's only sidecar writer, so one attempt
+	 * is at most one fs write. The write-throttle pin asserts on this count (and the
+	 * resulting content), not on mtime: sub-second writes alias under filesystem mtime
+	 * granularity, the count does not. */
+	livenessWriteAttempts: 0,
+	/** Watch-script targets attempted by spawnWatchDaemon — the TUI-only auto-start pin
+	 * asserts the BRANCH (tui spawns, rpc never does) through this list. */
+	watchSpawns: [] as string[],
+};
 
 function registerLiveness(pi: ExtensionAPI): void {
 	let dir: string | undefined;
@@ -326,7 +333,7 @@ function registerLiveness(pi: ExtensionAPI): void {
 
 	const persist = (): void => {
 		if (!dir || !state) return;
-		livenessWriteAttempts.count += 1;
+		testSeams.livenessWriteAttempts += 1;
 		try {
 			// Watermark-safe publish (src/liveness.ts, review round-1 item 4): re-reads the
 			// sidecar, adopts a HIGHER externally-raised lastWakeSeq (the watchdog's bump),
@@ -360,6 +367,7 @@ function registerLiveness(pi: ExtensionAPI): void {
 			const root = mainRoot(cwd) ?? cwd;
 			const target = resolveWatchScript(root);
 			if (!target) return;
+			testSeams.watchSpawns.push(target);
 			const child = spawn("bash", [target, "--daemon"], { detached: true, stdio: "ignore" });
 			child.unref();
 		} catch {

@@ -19,7 +19,14 @@
 # 2 usage/config (includes a stage usage/config error), 3 rebase conflict (the output names the branch:
 # drop it from the train, rebase it after the others merge).
 set -u
-scripts_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# Pure-bash bootstrap (no dirname, no pwd(1)): a PATH the scrub below empties entirely
+# carries no coreutils, and the named dl_die must still be reachable (ticket #67).
+# The cd runs in a SUBSHELL — the script's cwd must stay where the operator called it.
+case "${BASH_SOURCE[0]}" in
+  */*) _sd=${BASH_SOURCE[0]%/*} ;;
+  *) _sd=. ;;
+esac
+scripts_dir=$(cd -- "$_sd" && printf '%s' "$PWD")
 # shellcheck source=lib/common.sh
 . "$scripts_dir/lib/common.sh"
 
@@ -34,6 +41,9 @@ scripts_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # tests that exercise the armed posture.
 if [ "${MULTIPI_GATE_SCRUB_POLICY_SHIMS:-1}" != 0 ]; then
   PATH=$(dl_scrub_policy_shims "$PATH")
+  # Named error, not a downstream command-not-found cascade (review of #70 r1): the
+  # bootstrap and the scrub are pure shell, so this is reachable even with PATH gone.
+  [ -n "$PATH" ] || dl_die "policy-shim scrub emptied PATH (every entry carried an interpreted git or gh — nothing left to run)"
   export PATH
 fi
 

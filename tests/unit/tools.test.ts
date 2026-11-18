@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync, chmodSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket, contextBuilds } from "../../extension/src/tools.ts";
+import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket, testSeams } from "../../extension/src/tools.ts";
 import { makeFixture } from "../fixtures.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -221,10 +221,10 @@ test("a bounded devloop.* call builds the tool context exactly ONCE (bound probe
 	try {
 		const ctx = ctxWithAgents(fx);
 		createIssue(fx, "Bound budget check");
-		const before = contextBuilds.count;
+		const before = testSeams.contextBuilds;
 		const res = await call(ctx, "devloop.status", {});
 		assert.equal(res.isError ?? false, false, textOf(res));
-		assert.equal(contextBuilds.count - before, 1, "the bound probe must not rebuild the context (a config read + git subprocess each)");
+		assert.equal(testSeams.contextBuilds - before, 1, "the bound probe must not rebuild the context (a config read + git subprocess each)");
 	} finally { fx.cleanup(); }
 });
 

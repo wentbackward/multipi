@@ -146,8 +146,11 @@ dl_canonical() {
 # and must never veto the loop's own verification). Compiled binaries (whose first two
 # bytes are not `#!`) are kept; unresolvable and empty entries pass through untouched.
 # The caller owns the seam MULTIPI_GATE_SCRUB_POLICY_SHIMS (default 1; 0 = armed PATH).
+# Pure shell end to end (the `#!` probe is a bash read, not head(1)): a PATH the scrub
+# empties entirely must still reach gate-train's named dl_die, and an empty PATH carries
+# no coreutils (ticket #67, review of #70 r1).
 dl_scrub_policy_shims() {
-  local entry real bin drop out=""
+  local entry real bin drop out="" magic
   local -a parts
   local IFS=':'
   read -r -a parts <<<"$1"
@@ -157,9 +160,10 @@ dl_scrub_policy_shims() {
     if [ -n "$real" ]; then
       drop=0
       for bin in git gh; do
-        if [ -f "$real/$bin" ] && [ "$(head -c 2 -- "$real/$bin" 2>/dev/null)" = "#!" ]; then
-          drop=1
-          break
+        if [ -f "$real/$bin" ]; then
+          magic=""
+          IFS= read -r -n 2 magic <"$real/$bin" 2>/dev/null || true
+          [ "$magic" = "#!" ] && { drop=1; break; }
         fi
       done
       [ "$drop" = 1 ] && continue
