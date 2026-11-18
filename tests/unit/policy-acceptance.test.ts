@@ -43,6 +43,11 @@ function setupEnv(fx: ReturnType<typeof makeFixture>) {
 	process.env.FAKE_GH_DIR = path.join(fx.dir, "gh");
 	process.env.MULTIPI_GH_SETTLE_SECONDS = "0";
 	process.env.MULTIPI_PI_BIN = path.join(ROOT, "tests", "fake-pi");
+	// The seam the loop spawns inherit: the armed gh shim resolves the REAL gh through
+	// MULTIPI_SHIM_REAL_GH (ticket #72) — pointed at the offline stand-in, so a compiled
+	// host gh (the leak direction on this dev box) is never consulted and fake-gh's
+	// calls.log proves the train's gh calls were served by the fake, not the real binary.
+	process.env.MULTIPI_SHIM_REAL_GH = path.join(ROOT, "tests", "fake-gh");
 	const d = path.join(fx.dir, "agents");
 	mkdirSync(d, { recursive: true });
 	for (const [name, prompt] of [
@@ -64,6 +69,7 @@ const ENV_KEYS = [
 	"FAKE_GH_DIR",
 	"MULTIPI_GH_SETTLE_SECONDS",
 	"MULTIPI_PI_BIN",
+	"MULTIPI_SHIM_REAL_GH",
 	"MULTIPI_AGENTS_DIR",
 ] as const;
 
@@ -158,6 +164,15 @@ test("P5 acceptance: the full train (dispatch -> review -> gate -> merge) runs z
 		assert.match(textOf(merge), /MERGED/);
 		const mainAfter = execFileSync("git", ["-C", fx.origin, "rev-parse", "refs/heads/main"], { stdio: "pipe" }).toString().trim();
 		assert.notEqual(mainAfter, mainBefore, "the train landed: origin/main advanced by the squash");
+
+		// ZERO-LEAK PROOF: the fake tracker's calls.log shows the train's own gh traffic was
+		// SERVED by the stand-in — if the real compiled gh had been reached instead, these
+		// calls could not have landed in the fake (it is the only tracker on FAKE_GH_DIR).
+		const callsLog = path.join(fx.dir, "gh", "calls.log");
+		assert.ok(existsSync(callsLog), "the fake tracker's calls.log exists (its gh calls were served)");
+		const calls = readFileSync(callsLog, "utf8");
+		assert.match(calls, /^gh repo=\S* issue create Train ticket zero deny$/m, "the train's issue create reached the fake gh, not the real one");
+		assert.match(calls, /^gh repo=\S* pr merge \S+ --squash --match-head-commit [0-9a-f]{40}$/m, "the merge's pr merge reached the fake gh, not the real one");
 
 		// THE ACCEPTANCE ASSERTIONS on the audit log: zero unexpected denies (and no asks —
 		// an ask would have blocked the train anyway), and the merge's pass is PROVEN to be

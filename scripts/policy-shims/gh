@@ -23,7 +23,7 @@ shim_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 shim_init
 
 REAL_GH=$(shim_find_real gh) || {
-  echo "multipi policy: cannot locate the real gh outside the shim dir ($shim_dir) — broken install, refusing" >&2
+  echo "multipi policy: cannot locate the real gh (MULTIPI_SHIM_REAL_GH unset/unusable; no compiled gh outside the shim dir $shim_dir) — broken install, refusing" >&2
   exit 127
 }
 

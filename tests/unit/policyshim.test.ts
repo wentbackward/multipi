@@ -29,6 +29,21 @@ function scriptGit(dir: string, body: string): void {
 	writeFileSync(path.join(dir, "git"), body, { mode: 0o755 });
 }
 
+/** dir with an executable bash `name` (first bytes = `#!` script magic). */
+function scriptBin(dir: string, name: string, body: string): void {
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(path.join(dir, name), body, { mode: 0o755 });
+}
+
+/** dir with a fake COMPILED `name` (ELF magic bytes; never exec'd — only inspected). */
+function compiledBin(dir: string, name: string): string {
+	mkdirSync(dir, { recursive: true });
+	const p = path.join(dir, name);
+	writeFileSync(p, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]));
+	chmodSync(p, 0o755);
+	return p;
+}
+
 /** dir with a fake COMPILED `git` (ELF magic bytes; never exec'd — only inspected). */
 function compiledGit(dir: string): string {
 	mkdirSync(dir, { recursive: true });
@@ -138,6 +153,132 @@ test("shim_is_compiled accepts a compiled candidate (2-byte ELF magic) and rejec
 shim_is_compiled "${bad}" && echo fail-bad || true`);
 	assert.equal(got.status, 0, `stderr: ${got.stderr}`);
 	assert.equal(got.stdout.trim(), "", "ELF magic accepted, script magic rejected");
+});
+
+// --- _shim_exec_real: the recursion depth guard (continued: the seam's own forwarders) ----
+
+// The REAL gh shim artifact: the forwarder-bound pin runs it, not a copy — the guard must
+// hold on the product, and a self-referencing seam is the seam analogue of the #68 spin.
+const GH_SHIM = path.resolve(HERE, "..", "..", "scripts", "policy-shims", "gh");
+
+test("a MULTIPI_SHIM_REAL_GH seam pointing at the SHIM ITSELF dies at the depth guard (126, nothing runs)", () => {
+	// Each hop: the shim resolves the seam (= itself) and execs through _shim_exec_real —
+	// the counter climbs one per hop and the 4th hop must refuse. Pre-guard, this geometry
+	// would mutual-spin exactly like the #68 incident (whose resolution was PATH-derived);
+	// the seam must not reopen that class with an operator/operator-fixure authority.
+	const r = spawnSync(BASH, [GH_SHIM, "--version"], {
+		env: { PATH: "/usr/bin:/bin", MULTIPI_SHIM_REAL_GH: GH_SHIM },
+		encoding: "utf8",
+		timeout: 10_000,
+	});
+	assert.equal(r.status, 126, `the refusal must land, got ${r.status}; stderr: ${r.stderr}`);
+	assert.match(r.stderr, /recursion/i, `the stderr line names the guard: ${r.stderr}`);
+});
+
+// --- the MULTIPI_SHIM_REAL_* seams (ticket #72): authority order and fail direction --------
+// The seam is the FIRST authority for the shim's real-binary resolution: a process that
+// sets it owns the resolution for its own tree, and a seam target is NOT required to be a
+// compiled artifact (that is how an offline script stand-in serves a test env — and its
+// calls.log then proves the real binary was never reached). A BROKEN seam target fails
+// closed (rc 1) and NEVER falls back to the PATH scan: a typo'd seam leaking onto the
+// first compiled binary is the exact leak the seam exists to prevent.
+
+test("shim_find_real consults MULTIPI_SHIM_REAL_GH first: a script stand-in beats an EARLIER compiled gh", () => {
+	const root = mkdtempSync(path.join(tmpdir(), "policyshim-test."));
+	const standin = `${root}/standin`;
+	const real = `${root}/real`;
+	scriptBin(standin, "gh", "#!/usr/bin/env bash\necho standin\n");
+	compiledBin(real, "gh"); // compiled and AHEAD on PATH: the #68 scan would pick it
+	const got = runShim(`SIM_SHIM_DIR="${root}/no-such-shim-dir"\nshim_find_real gh`, {
+		PATH: `${real}:${root}`,
+		MULTIPI_SHIM_REAL_GH: `${standin}/gh`,
+	});
+	assert.equal(got.status, 0, `stderr: ${got.stderr}`);
+	assert.equal(got.stdout.trim(), `${standin}/gh`, "the valid seam wins over the compiled-on-PATH scan");
+});
+
+test("shim_find_real consults MULTIPI_SHIM_REAL_GIT first (symmetric seam for the git shim)", () => {
+	const root = mkdtempSync(path.join(tmpdir(), "policyshim-test."));
+	const standin = `${root}/standin`;
+	const real = `${root}/real`;
+	scriptBin(standin, "git", "#!/usr/bin/env bash\necho standin\n");
+	compiledBin(real, "git");
+	const got = runShim(`SIM_SHIM_DIR="${root}/no-such-shim-dir"\nshim_find_real git`, {
+		PATH: `${real}:${root}`,
+		MULTIPI_SHIM_REAL_GIT: `${standin}/git`,
+	});
+	assert.equal(got.status, 0, `stderr: ${got.stderr}`);
+	assert.equal(got.stdout.trim(), `${standin}/git`, "the git seam is per-binary, like the gh seam");
+});
+
+test("shim_find_real resolves a seam target with NO compiled binary anywhere on PATH (the gh-less host)", () => {
+	const root = mkdtempSync(path.join(tmpdir(), "policyshim-test."));
+	const standin = `${root}/standin`;
+	const shimdir = `${root}/shimdir`;
+	scriptBin(standin, "gh", "#!/usr/bin/env bash\necho standin\n");
+	scriptBin(shimdir, "gh", "#!/usr/bin/env bash\necho me\n");
+	// The scan alone finds only scripts (rc 1, the pre-#72 fail-closed 127); the seam lifts
+	// the stand-in without consulting PATH at all.
+	const got = runShim(`SIM_SHIM_DIR="${shimdir}"\nshim_find_real gh`, {
+		PATH: `${shimdir}:${root}`,
+		MULTIPI_SHIM_REAL_GH: `${standin}/gh`,
+	});
+	assert.equal(got.status, 0, `stderr: ${got.stderr}`);
+	assert.equal(got.stdout.trim(), `${standin}/gh`);
+});
+
+test("shim_find_real: the GIT seam does NOT authorize the GH shim (seams are per-binary)", () => {
+	const root = mkdtempSync(path.join(tmpdir(), "policyshim-test."));
+	const standin = `${root}/standin`;
+	const real = `${root}/real`;
+	scriptBin(standin, "git", "#!/usr/bin/env bash\necho standin\n");
+	const compiledGh = compiledBin(real, "gh");
+	// Only the GIT seam is set; a `shim_find_real gh` must fall through to the scan.
+	const got = runShim(`SIM_SHIM_DIR="${root}/no-such-shim-dir"\nshim_find_real gh`, {
+		PATH: `${real}:${root}`,
+		MULTIPI_SHIM_REAL_GIT: `${standin}/git`,
+	});
+	assert.equal(got.status, 0, `stderr: ${got.stderr}`);
+	assert.equal(got.stdout.trim(), compiledGh, "a foreign binary's seam must not resolve this shim");
+});
+
+test("shim_find_real FAILS CLOSED on a MISSING seam target — rc 1, and NO fallback to the compiled scan", () => {
+	const root = mkdtempSync(path.join(tmpdir(), "policyshim-test."));
+	const real = `${root}/real`;
+	compiledBin(real, "gh"); // scannable and healthy: the tempting wrong answer
+	const got = runShim(`SIM_SHIM_DIR="${root}/no-such-shim-dir"\nshim_find_real gh`, {
+		PATH: `${real}:${root}`,
+		MULTIPI_SHIM_REAL_GH: `${root}/nowhere/gh`,
+	});
+	assert.equal(got.status, 1, "an unusable seam target fails closed");
+	assert.equal(got.stdout, "", "no path printed — the caller exits 127, nothing exec'd");
+});
+
+test("shim_find_real FAILS CLOSED on a NOT-EXECUTABLE seam target — rc 1, and NO fallback to the compiled scan", () => {
+	const root = mkdtempSync(path.join(tmpdir(), "policyshim-test."));
+	const broken = `${root}/broken`;
+	const real = `${root}/real`;
+	mkdirSync(broken, { recursive: true });
+	writeFileSync(path.join(broken, "gh"), "#!/usr/bin/env bash\necho standin\n"); // readable, mode 644
+	compiledBin(real, "gh");
+	const got = runShim(`SIM_SHIM_DIR="${root}/no-such-shim-dir"\nshim_find_real gh`, {
+		PATH: `${real}:${root}`,
+		MULTIPI_SHIM_REAL_GH: `${broken}/gh`,
+	});
+	assert.equal(got.status, 1, "a non-executable seam target fails closed");
+	assert.equal(got.stdout, "", "no path printed — the caller exits 127, nothing exec'd");
+});
+
+test("shim_find_real: an EMPTY seam value is unset (the compiled-on-PATH scan applies)", () => {
+	const root = mkdtempSync(path.join(tmpdir(), "policyshim-test."));
+	const real = `${root}/real`;
+	const compiled = compiledBin(real, "gh");
+	const got = runShim(`SIM_SHIM_DIR="${root}/no-such-shim-dir"\nshim_find_real gh`, {
+		PATH: `${real}:${root}`,
+		MULTIPI_SHIM_REAL_GH: "",
+	});
+	assert.equal(got.status, 0, `stderr: ${got.stderr}`);
+	assert.equal(got.stdout.trim(), compiled, "empty means unset — the #68 rule is unchanged");
 });
 
 // --- _shim_exec_real: the recursion depth guard ---------------------------------

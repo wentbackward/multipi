@@ -17,7 +17,10 @@
 # Exit codes (pinned; DECISIONS 2026-11-10): 126 = policy deny or ask, or the
 # recursion-depth guard (nothing executed — phase-1 ask is a block; token consumption
 # arrives with P6); 127 = the real binary cannot be located outside the shim dir (broken
-# install). Any other exit is the real binary's own.
+# install) OR a configured MULTIPI_SHIM_REAL_GH / MULTIPI_SHIM_REAL_GIT seam target is
+# unusable — the seam is the FIRST authority and a broken one NEVER falls back to the
+# PATH scan (the fallback would leak onto a real compiled binary — exactly what the seam
+# exists to prevent; ticket #72). Any other exit is the real binary's own.
 #
 # Requires git >= 2.36 (rev-parse --path-format=absolute). On older git the probe errors,
 # resolution stays EMPTY and the shim denies the mutation (fail closed, never misresolves).
@@ -64,14 +67,40 @@ shim_is_compiled() { # shim_is_compiled FILE
   [ "$magic" != '#!' ]
 }
 
-# Print the real binary's path: the FIRST executable on PATH that is (a) NOT inside the
-# shim dir and (b) a COMPILED ARTIFACT (shim_is_compiled). Both conditions are belt and
-# braces against the same accident — a wrapper anywhere on PATH must never be handed back
-# as "the real binary" (ticket #68). rc 1 when no such binary exists (the caller exits 127).
+# Print the real binary's path. Authority order (ticket #72):
+#
+#   1. THE SEAM — the per-binary env var MULTIPI_SHIM_REAL_GH / MULTIPI_SHIM_REAL_GIT.
+#      A process that sets it owns the resolution for its own tree: the target is used
+#      as-is and is NOT required to be a compiled artifact (that is precisely how an
+#      offline script stand-in serves a test environment — its calls.log then proves the
+#      real binary was never reached). Only processes the loop spawns should carry it.
+#      A seam target that is missing, unreadable or not executable FAILS CLOSED (rc 1)
+#      and never falls back to the PATH scan: a typo'd seam leaking onto the first
+#      compiled binary is the exact leak the seam exists to prevent. An EMPTY value is
+#      unset (the scan applies).
+#   2. THE SCAN — the FIRST executable on PATH that is (a) NOT inside the shim dir and
+#      (b) a COMPILED ARTIFACT (shim_is_compiled). Both conditions are belt and braces
+#      against the same accident — a wrapper anywhere on PATH must never be handed back
+#      as "the real binary" (ticket #68).
+#
+# rc 1 when nothing resolves (the caller exits 127).
 shim_find_real() {
-  local want=$1 entry real
+  local want=$1 seam_var="" seam="" entry real
   local -a parts
   local IFS=':'
+  # Bash-native uppercase (bash 4+ project floor): no external `tr` on the resolution
+  # path — a scrubbed test PATH carries no coreutils, and a silent failure here would
+  # degrade the seam to "unset" (the scan would win over the operator's authority).
+  seam_var="MULTIPI_SHIM_REAL_${want^^}"
+  seam=${!seam_var:-}
+  if [ -n "$seam" ]; then
+    if [ -f "$seam" ] && [ -r "$seam" ] && [ -x "$seam" ]; then
+      printf '%s\n' "$seam"
+      return 0
+    fi
+    echo "multipi policy: $seam_var=$seam is missing, unreadable or not executable — refusing (no PATH fallback)" >&2
+    return 1
+  fi
   read -r -a parts <<<"${PATH:-}"
   for entry in "${parts[@]}"; do
     [ -n "$entry" ] || continue
