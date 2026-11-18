@@ -3625,6 +3625,22 @@ echo "$LV_LINE" | grep -qF "MULTIPI_STATUS_STALE_MS" && pass "status rc 4 names 
 mkstate active 200000 0 0
 lvstatus MULTIPI_STATUS_STALE_MS=09
 expect "status rc 4: the stale-sidecar case is a refusal too (never a silent state claim)" "4" "$LV_RC"
+# #80 (the #78 review tail): the refusal OVER-NAMEDED the leading-zero class — a decimal
+# or a negative value gets blamed for a leading-zero typo that isn't there. The line must
+# stay accurate for EVERY refused shape: neutral "canonical decimal integer ms", the seam
+# name kept (the pins above key off it), no leading-zero blame for a non-leading-zero shape.
+mkstate active 1000 0 0
+lvstatus MULTIPI_STATUS_STALE_MS=1.5
+expect "status rc 4: a decimal MULTIPI_STATUS_STALE_MS is refused" "4" "$LV_RC"
+echo "$LV_LINE" | grep -qF "MULTIPI_STATUS_STALE_MS must be a canonical decimal integer ms" && \
+  pass "status rc 4 (1.5): the refusal is shape-neutral (canonical decimal integer ms)" || \
+  fail "status rc 4 (1.5) line: $LV_LINE"
+echo "$LV_LINE" | grep -qF "no leading zeros" && fail "status rc 4 (1.5) blames a leading-zero typo a decimal is not" \
+  || pass "status rc 4 (1.5): no leading-zero blame for a decimal"
+lvstatus MULTIPI_STATUS_STALE_MS=-1
+expect "status rc 4: a negative MULTIPI_STATUS_STALE_MS is refused" "4" "$LV_RC"
+echo "$LV_LINE" | grep -qF "no leading zeros" && fail "status rc 4 (-1) blames a leading-zero typo a negative is not" \
+  || pass "status rc 4 (-1): no leading-zero blame for a negative"
 mkstate active 200000 0 0
 lvstatus MULTIPI_STATUS_STALE_MS=0
 expect "status honours the CANONICAL zero (the arm is 0[0-9]* — bare '0' stays legal)" "2" "$LV_RC"
@@ -3848,6 +3864,19 @@ lvfresh
 mkstate active 200000 0 0
 lvwatch MULTIPI_WATCH_NOW_MS=abc
 expect "watch rc 4: a non-numeric MULTIPI_WATCH_NOW_MS is refused, not silently ignored (the seam's old exit ran inside \$() and never killed the check)" "4" "$LV_RC"
+# #80 (the #78 review tail): the same over-named refusal — a decimal or a negative clock
+# must get the shape-neutral line, seam name kept, no leading-zero blame.
+lvwatch MULTIPI_WATCH_NOW_MS=1.5
+expect "watch rc 4: a decimal MULTIPI_WATCH_NOW_MS is refused" "4" "$LV_RC"
+echo "$LV_LINE" | grep -qF "MULTIPI_WATCH_NOW_MS must be a canonical decimal integer ms" && \
+  pass "watch rc 4 (1.5): the refusal is shape-neutral (canonical decimal integer ms)" || \
+  fail "watch rc 4 (1.5) line: $LV_LINE"
+echo "$LV_LINE" | grep -qF "no leading zeros" && fail "watch rc 4 (1.5) blames a leading-zero typo a decimal is not" \
+  || pass "watch rc 4 (1.5): no leading-zero blame for a decimal"
+lvwatch MULTIPI_WATCH_NOW_MS=-1
+expect "watch rc 4: a negative MULTIPI_WATCH_NOW_MS is refused" "4" "$LV_RC"
+echo "$LV_LINE" | grep -qF "no leading zeros" && fail "watch rc 4 (-1) blames a leading-zero typo a negative is not" \
+  || pass "watch rc 4 (-1): no leading-zero blame for a negative"
 lvfresh
 mkstate active 1000 0 0
 lvwatch
@@ -3886,6 +3915,32 @@ kill -9 "$WD_PID" 2>/dev/null || true
 wait "$WD_PID" 2>/dev/null || true
 [ -f "$lvstate/watch.pid" ] && fail "the daemon left its pidfile behind" || pass "watch daemon: the pidfile is released on exit"
 pkill -f 'multipi-watch.sh --daemon --interval 1' 2>/dev/null || true   # no stragglers may leak past this section
+# (e) watch --daemon + a malformed clock seam (#80, the #78 review tail): the daemon loop's
+# CHECK-FAILED used to re-invoke lv_now, re-emitting the SAME refusal line a second time onto
+# the daemon's (dropped) stderr while one_shot's own stderr redirect had already parked it in
+# watch.log. Post-fix the refusal lands in the log (never onto the daemon's own streams) and
+# the CHECK-FAILED line keeps writing, timestamped by the wall-clock fallback.
+DERR="$work/lv-daemon.err"
+rm -f "$DERR"; : >"$DERR"
+lvfresh
+mkstate active 200000 0 0
+env MULTIPI_HOME="$lvhome" MULTIPI_WATCH_NOW_MS=08 MULTIPI_INTERRUPT_TTY="$WK" \
+  bash "$plugin/scripts/multipi-watch.sh" --daemon --interval 2 >"$DERR" 2>&1 & WD2_PID=$!
+sleep 2.5
+expect "watch daemon (bad clock): the refusal does NOT re-emit onto the daemon's stderr (the log already carries it)" \
+  "0" "$(grep -cF 'must be a canonical decimal integer ms' "$DERR")"
+expect "watch daemon (bad clock): the refusal STILL lands in watch.log (one emission per failed tick, never none)" \
+  "1" "$( [ "$(grep -cF 'MULTIPI_WATCH_NOW_MS must be a canonical decimal integer ms' "$wl" 2>/dev/null)" -gt 0 ] && echo 1 || echo 0)"
+expect "watch daemon (bad clock): every failed tick is still logged as CHECK-FAILED with a wall-clock fallback timestamp" \
+  "1" "$( [ "$(grep -cE '^[0-9]+ CHECK-FAILED$' "$wl" 2>/dev/null)" -gt 0 ] && echo 1 || echo 0)"
+kill "$WD2_PID" 2>/dev/null || true
+_i=0
+while [ "$_i" -lt 25 ] && kill -0 "$WD2_PID" 2>/dev/null; do sleep 0.2; _i=$((_i + 1)); done
+kill -9 "$WD2_PID" 2>/dev/null || true
+wait "$WD2_PID" 2>/dev/null || true
+[ -f "$lvstate/watch.pid" ] && fail "watch daemon (bad clock): the pidfile leaked" || pass "watch daemon (bad clock): the pidfile is released on exit"
+pkill -f 'multipi-watch.sh --daemon --interval 2' 2>/dev/null || true
+rm -f "$DERR"
 # Doc agreement (round-3 fold 4): the spec's --daemon sentence and the script header must
 # tell the same story — the script does NOT self-daemonize; the extension's detached spawn
 # IS the detach, manual launches need the operator's setsid.
