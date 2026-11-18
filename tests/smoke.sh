@@ -3845,6 +3845,10 @@ expect "watch rc 4: MULTIPI_WATCH_NOW_MS=09 (invalid octal) is refused too — n
 echo "$LV_LINE" | grep -qF "value too great for base" && fail "the arithmetic crash noise leaked into the output" \
   || pass "watch rc 4 prints no 'value too great for base' crash noise"
 lvfresh
+mkstate active 200000 0 0
+lvwatch MULTIPI_WATCH_NOW_MS=abc
+expect "watch rc 4: a non-numeric MULTIPI_WATCH_NOW_MS is refused, not silently ignored (the seam's old exit ran inside \$() and never killed the check)" "4" "$LV_RC"
+lvfresh
 mkstate active 1000 0 0
 lvwatch
 expect "watch rc 0: after the refusals, a plain healthy check is a clean no-op (nothing poisoned)" "0" "$LV_RC"
