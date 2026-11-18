@@ -50,6 +50,23 @@ expect() { # expect DESCRIPTION EXPECTED ACTUAL
   if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected '$2', got '$3')"; fi
 }
 
+# #82 — bounded-poll idiom: wait_for BOUND_MS CMD... runs CMD once, then re-runs it every
+# 0.1 s until it returns 0 or BOUND_MS is exhausted; rc 0 = arrived, rc 1 = bound hit.
+# A fixed sleep before an async assertion assumes COMPLETION WITHIN a wall-clock constant
+# — the flake vector on a loaded gate box. The poll is the pin: load-independent (the
+# condition may arrive any time inside the bound) and finite (the bound cannot hang the
+# suite). The command is always tried at least once, even with a tiny bound.
+wait_for() {
+  local bound_ms=$1; shift
+  local steps=$(( (bound_ms + 99) / 100 )) i=0
+  [ "$steps" -lt 1 ] && steps=1
+  while [ "$i" -lt "$steps" ]; do
+    if "$@"; then return 0; fi
+    sleep 0.1; i=$((i + 1))
+  done
+  return 1
+}
+
 # The project: one source file, a check that fails when the source contains BROKEN.
 git init -q --bare "$work/origin.git"
 git clone -q "$work/origin.git" "$work/project" 2>/dev/null
@@ -3908,14 +3925,22 @@ fi
 unset LV_NOW   # wall clock for the daemon (LV_NOW only bound the one-shot runs above)
 mkstate idle 1000 0 0
 env MULTIPI_HOME="$lvhome" MULTIPI_INTERRUPT_TTY="$WK" bash "$plugin/scripts/multipi-watch.sh" --daemon --interval 1 >/dev/null 2>&1 & WD_PID=$!
-sleep 1.2
+# #82: the pidfile appears when the daemon reaches the top of its daemon section — a
+# startup event, not a tick. Poll for it (bounded) instead of assuming process startup
+# completes within a fixed 1.2 s of sleep.
+wait_for 5000 [ -f "$lvstate/watch.pid" ] || fail "watch daemon: the pidfile never appeared within 5 s (box too loaded?)"
 expect "watch daemon: a pidfile is held" "1" "$([ -f "$lvstate/watch.pid" ] && echo 1 || echo 0)"
 dl_daemon_second=$(env MULTIPI_HOME="$lvhome" bash "$plugin/scripts/multipi-watch.sh" --daemon --interval 1 2>&1); dl_daemon_rc=$?
 expect "watch daemon: a second launch exits 0" "0" "$dl_daemon_rc"
 echo "$dl_daemon_second" | grep -qF "already running" && pass "watch daemon: the second launch says so" || fail "second-launch text: $dl_daemon_second"
 expect "watch daemon: exactly ONE loop runs (no doubling)" "1" "$(pgrep -fc 'multipi-watch.sh --daemon --interval 1' 2>/dev/null || echo 0)"
-sleep 1.5
-grep -qF " HEALTHY" "$wl" && pass "watch daemon: the loop actually checks (HEALTHY logged)" || fail "the daemon logged no check: $(tail -2 "$wl" 2>/dev/null)"
+# #82: the tick-completion pin — poll the HEALTHY log line (the first tick runs at
+# startup) instead of assuming it lands within a fixed 1.5 s of sleep.
+if wait_for 5000 grep -qF " HEALTHY" "$wl"; then
+  pass "watch daemon: the loop actually checks (HEALTHY logged)"
+else
+  fail "the daemon logged no check: $(tail -2 "$wl" 2>/dev/null)"
+fi
 # #65 round-4: wlog must take its timestamp EXPLICITLY — the global `now` one_shot used
 # to set leaked into the daemon loop's CHECK-FAILED line. Under the pinned
 # MULTIPI_WATCH_NOW_MS clock the behaviour is unobservable (the same ms is reused by
@@ -3944,7 +3969,12 @@ lvfresh
 mkstate active 200000 0 0
 env MULTIPI_HOME="$lvhome" MULTIPI_WATCH_NOW_MS=08 MULTIPI_INTERRUPT_TTY="$WK" \
   bash "$plugin/scripts/multipi-watch.sh" --daemon --interval 2 >"$DERR" 2>&1 & WD2_PID=$!
-sleep 2.5
+# #82: the tick-completion pin — poll the CHECK-FAILED log line (the first tick runs at
+# startup) instead of assuming a failed tick is logged within a fixed 2.5 s of sleep. It
+# must also precede the stderr ABSENCE assert below: absence is only meaningful once at
+# least one tick has happened and flushed its streams.
+wait_for 5000 grep -qE '^[0-9]+ CHECK-FAILED$' "$wl" \
+  || fail "watch daemon (bad clock): no CHECK-FAILED line within 5 s (box too loaded?)"
 expect "watch daemon (bad clock): the refusal does NOT re-emit onto the daemon's stderr (the log already carries it)" \
   "0" "$(grep -cF 'must be a canonical decimal integer ms' "$DERR")"
 expect "watch daemon (bad clock): the refusal STILL lands in watch.log (one emission per failed tick, never none)" \
