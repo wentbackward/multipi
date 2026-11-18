@@ -343,6 +343,36 @@ _hgw_rc=0; wait "$_hgw" || _hgw_rc=$?
 expect "the aged ownerless dir is swept and the slot taken (grace, not a new ghost)" "0" "$_hgw_rc"
 [ ! -d "$lockdir/slot1.d" ] && pass "the aged ownerless slot dir was swept" ||
   fail "the ownerless slot dir survived past its grace (a new permanent ghost?)"
+# #88 (the #86 review tail): the FRESH direction, pinned directly. The pin above observes
+# only the AGED direction (a deleted grace sweeps the fresh dir early, the job acquires
+# early, rc 0 — still green: the note at the absence pin names this). Here the pin drives
+# scripts/heavy.sh's ACTUAL classifier, extracted from the script rather than
+# reimplemented (it must die if slot_sweepable's mtime contract changes): a FRESH
+# (just-planted, mtime now) ownerless slotN.d is NOT sweepable at the fixture's 1 s poll,
+# and its backdated twin is — the two edges of the one grace tick. Load-independent by
+# construction: direct classification asserts, no tick to race, no fixed sleeps (#82).
+_heavy_fns=$(sed -n -e '/^slot_holder_dead()/,/^}/p' -e '/^slot_sweepable()/,/^}/p' \
+  "$plugin/scripts/heavy.sh")
+_88_out=$(LOCKDIR="$lockdir" HEAVY_FNS="$_heavy_fns" bash -c '
+  eval "$HEAVY_FNS"
+  declare -F slot_holder_dead >/dev/null && declare -F slot_sweepable >/dev/null \
+    || { echo fns-missing; exit 1; }   # an undefined function would return 127 and masquerade as not-sweepable
+  echo declared
+  poll_seconds=1                              # the fixture cadence (.devloop.json heavy.poll_seconds)
+  mkdir -p "$LOCKDIR/slot1.d"                 # fresh ownerless dir, mtime now
+  slot_holder_dead "$LOCKDIR/slot1.d" \
+    || { echo precond-not-dead; exit 1; }     # it is the MTIME gate that must keep it, not the pid logic
+  slot_sweepable "$LOCKDIR/slot1.d" && echo FRESH-SWEEPABLE-BUG || echo fresh-not-sweepable
+  touch -t 202001010000.00 "$LOCKDIR/slot1.d"  # the aged twin the aged-sweep pin plants
+  slot_sweepable "$LOCKDIR/slot1.d" && echo aged-sweepable || echo AGED-NOT-SWEEPABLE-BUG
+  rm -rf -- "$LOCKDIR/slot1.d"
+')
+echo "$_88_out" | grep -qx "fresh-not-sweepable" &&
+  pass "a FRESH ownerless slot dir is NOT sweepable (the #67 survival direction, pinned directly)" ||
+  fail "fresh ownerless slot dir classified sweepable (grace deleted?) or the #88 pin is broken: $_88_out"
+echo "$_88_out" | grep -qx "aged-sweepable" &&
+  pass "a backdated ownerless slot dir IS sweepable (the aged edge of the same grace tick)" ||
+  fail "backdated ownerless slot dir not sweepable (the aged sweep would ghost?): $_88_out"
 # WAITING instance: the only slot is held by a process that DIES while the waiter polls.
 # Pre-fix the waiter's startup sweep already ran (holder was alive then) and it polled on
 # the ghost forever; the fix sweeps the dead-owner dir at each acquisition attempt.
