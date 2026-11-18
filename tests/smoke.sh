@@ -326,10 +326,18 @@ _hgw=$!
 # ABSENCE past the grace deadline instead (spawns + one busy tick + one aged sweep tick ≈ 3 s;
 # 5 s mirrors the #82 bound). Load moves the arrival time, the poll absorbs it; a regression
 # that stops the sweep exhausts the 5 s bound instead of hanging the suite.
+# #86: the retired observation, named. The old presence assert directly observed the #67
+# SURVIVAL property — a FRESH ownerless dir must ride out the first tick (sweeping it in the
+# mkdir→pid-write window is the double-acquire the grace exists to prevent). The absence-poll
+# below does NOT pin it: a deleted grace sweeps the fresh dir early, the job acquires early,
+# rc 0, and all three asserts stay green — a grace regression would pass silently. The raced-
+# window pin alternative is non-discriminating (the regressed window is sub-ms; DECISIONS
+# 2026-11-18 #84, #86), so the one tick of coverage #84 surrendered is named here, not lost:
+# the property's effective pin remains slot_sweepable's mtime contract in scripts/heavy.sh.
 if wait_for 5000 [ ! -d "$lockdir/slot1.d" ]; then
   pass "the ownerless slot dir is swept once aged past its grace tick (sweep grace)"
 else
-  fail "the ownerless slot dir was neither swept nor freed within 5 s (stalled sweep or grace never lapsed?)"
+  fail "the ownerless slot dir was neither swept nor freed within 5 s (stalled sweep or stalled tick loop?)"
 fi
 _hgw_rc=0; wait "$_hgw" || _hgw_rc=$?
 expect "the aged ownerless dir is swept and the slot taken (grace, not a new ghost)" "0" "$_hgw_rc"
