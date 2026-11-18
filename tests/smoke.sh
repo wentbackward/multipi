@@ -3886,6 +3886,24 @@ lvwatch
 expect "watch rc 5: no sidecar (the daemon self-idles)" "5" "$LV_RC"
 lvfresh
 
+# (c2) the bounded-poll idiom (#82): the two daemon pins below replace fixed tick-completion
+# sleeps with bounded polls; the idiom's two load-relevant behaviours are pinned here first.
+# A flake is a test that assumes WHEN something async happens; a bounded poll assumes only
+# THAT it happens, within a finite bound — load moves the arrival time, the poll absorbs it.
+_wf_flag="$work/lv-waitfor.flag"
+rm -f "$_wf_flag"
+( sleep 0.3; touch "$_wf_flag" ) & _wf_spawn=$!
+if wait_for 2000 [ -f "$_wf_flag" ]; then
+  pass "bounded poll: a condition that arrives ~0.3 s succeeds inside its 2 s bound"
+else
+  fail "bounded poll: a condition that arrives ~0.3 s never succeeded inside its 2 s bound"
+fi
+wait "$_wf_spawn" 2>/dev/null || true
+if wait_for 200 [ -f "$work/lv-waitfor-never" ]; then
+  fail "bounded poll: reported success for a condition that never arrived"
+else
+  pass "bounded poll: a condition that never arrives exhausts the 200 ms bound with rc 1 (finite, no hang)"
+fi
 # (d) watch --daemon: single instance, the pidfile, and a loop that actually checks
 unset LV_NOW   # wall clock for the daemon (LV_NOW only bound the one-shot runs above)
 mkstate idle 1000 0 0
