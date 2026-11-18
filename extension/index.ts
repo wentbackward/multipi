@@ -2,12 +2,15 @@ import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-c
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { existsSync, realpathSync } from "node:fs";
+import { spawn } from "node:child_process";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import * as childreg from "./src/childreg.ts";
 import { registerChildProcessGuards } from "./src/child.ts";
 import { GUARDED_ROLES, GUARD_REFUSAL, initGuard, callTouchesStore } from "./src/guard.ts";
 import { createPolicyEnforcer } from "./src/policyhook.ts";
-import { mainRoot } from "./src/config.ts";
+import { loadConfig, mainRoot, resolveState } from "./src/config.ts";
+import * as liveness from "./src/liveness.ts";
 import { makeTools, evaluateSettle, formatEditedFile } from "./src/tools.ts";
 
 const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issue labels: open -> dl/in-progress (a child is working) -> dl/in-review (PR open) -> dl/approved (review VERDICT: APPROVE) -> dl/gated (batch gate green) -> dl/merged (squash-merged; then close the issue). dl/blocked marks tickets needing a human decision. Workflow: dispatch role agents with devloop.dispatch (one ticket per implementer; independent tickets in parallel, up to the slot cap); when reports land, review, then gate ALL dl/approved branches together with devloop.gate (in a deliberate merge order), and merge the green train with devloop.merge (same order). Check progress any time with devloop.status. When the operator asks to pause or stop the loop, call devloop.pause (it interrupts all children, writes HANDOFF.md, and comments the tickets), then settle. On a fresh session, step 0 of the devloop skill reads a HANDOFF.md if present and re-dispatches the interrupted children. Stop only when no open ticket is startable (unblocked with closed or in-flight dependencies) — the stop-gate enforces this for you.`;
@@ -37,6 +40,23 @@ const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issu
  * are the documented exceptions: the guard (it must know the store path BEFORE the first tool
  * call) and the policy enforcer (§8: the effective policy is session-frozen and hashed).
  */
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Watchdog script resolution (pinned: index.test.ts "resolveWatchScript"): the repo's
+ * VENDORED copy wins (an installed loop versions its scripts with the target); otherwise
+ * the module-relative fallback serves the source tree (`extension/index.ts` →
+ * `../scripts`). The repo PARENT is deliberately NOT probed: a bare `../../` from the
+ * source tree resolves to the parent's tree, and a stray `scripts/multipi-watch.sh` out
+ * there must never win over a missing vendored copy.
+ */
+export function resolveWatchScript(root: string): string | undefined {
+	return [
+		path.join(root, "scripts", "multipi-watch.sh"),
+		path.join(HERE, "..", "scripts", "multipi-watch.sh"),
+	].find((c) => existsSync(c));
+}
+
 export default function devloopExtension(pi: ExtensionAPI): void {
 	// A one-shot role child (spawnPi sets MULTIPI_CHILD) must not load the loop: registering the
 	// tools would let a child drive the loop itself, and the stop-gate hook would keep a child
@@ -80,6 +100,7 @@ export default function devloopExtension(pi: ExtensionAPI): void {
 
 	registerAgentVisibility(pi);
 	registerPolicyEnforcer(pi);
+	registerLiveness(pi);
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +295,166 @@ function registerPolicyEnforcer(pi: ExtensionAPI): void {
 		const name = (event as { toolName?: string }).toolName ?? "";
 		const input = ((event as { input?: unknown }).input ?? {}) as Record<string, unknown>;
 		return enforcer.onToolCall({ toolName: name, input, sessionId: sessionIdOf(ctx) }) ?? undefined;
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Orchestrator liveness (spec 2026-11-15 §1): the sidecar at <state dir>/orchestrator-state.json, maintained from extension events. The pure half lives in
+// src/liveness.ts (dependency rule); this seat is the ONLY pi-typed maintainer.
+// Every persistence call is fail-soft: liveness bookkeeping must never break the session.
+// ---------------------------------------------------------------------------
+
+/** The heartbeat tick interval — proof the event loop lives even with zero LLM traffic (spec §1). */
+const LIVENESS_TICK_MS = 15000;
+/** High-frequency event writes are throttled to ≤1 per this window (spec §1). */
+const LIVENESS_EVENT_WRITE_MS = 1000;
+
+/**
+ * Test seam for the write-throttle pin (index.test.ts): counts persist ATTEMPTS — persist is
+ * the extension's only sidecar writer, so one attempt is at most one fs write. The pin
+ * asserts on this count (and the resulting content), not on mtime: sub-second writes alias
+ * under filesystem mtime granularity, the count does not.
+ */
+export const livenessWriteAttempts = { count: 0 };
+
+function registerLiveness(pi: ExtensionAPI): void {
+	let dir: string | undefined;
+	let state: liveness.LivenessState | undefined;
+	let seq = 0;
+	let lastEventWrite = 0;
+	let timer: ReturnType<typeof setInterval> | undefined;
+
+	const persist = (): void => {
+		if (!dir || !state) return;
+		livenessWriteAttempts.count += 1;
+		try {
+			// Watermark-safe publish (src/liveness.ts, review round-1 item 4): re-reads the
+			// sidecar, adopts a HIGHER externally-raised lastWakeSeq (the watchdog's bump),
+			// and retries ≤ 3 times on a stale read. On exhaustion it writes nothing —
+			// the give-up is bounded: a lost bump costs one duplicate wake, capped by the
+			// watchdog's 3600 s wall axis.
+			if (!liveness.publishState(dir, state)) {
+				console.error("devloop liveness: sidecar publish abandoned after 3 stale reads (bounded; the watchdog's 3600 s wall axis caps damage)");
+			}
+		} catch {
+			// Liveness is a convenience surface; a write failure is never a session failure.
+		}
+	};
+
+	const sessionIdOf = (ctx: ExtensionContext): string => {
+		try {
+			return ctx.sessionManager?.getSessionId?.() ?? "";
+		} catch {
+			return "";
+		}
+	};
+
+	/**
+	 * Detached, idempotent watchdog auto-start (spec §4): the pidfile lock inside the script
+	 * makes repeats across sessions a no-op. TUI sessions only — the watchdog's injection
+	 * target is the operator's terminal (headless sessions have no TTY to wake; part B's tool
+	 * bound still covers them, and `multipi-watch.sh --daemon` can be started by hand).
+	 */
+	const spawnWatchDaemon = (cwd: string): void => {
+		try {
+			const root = mainRoot(cwd) ?? cwd;
+			const target = resolveWatchScript(root);
+			if (!target) return;
+			const child = spawn("bash", [target, "--daemon"], { detached: true, stdio: "ignore" });
+			child.unref();
+		} catch {
+			// Spawning the net must never block or break the session start.
+		}
+	};
+
+	pi.on("session_start", (_event, ctx: ExtensionContext) => {
+		try {
+			const cwd = ctx.cwd;
+			// The loop not installed here (no .devloop.json) ⇒ no sidecar, nothing armed.
+			dir = loadConfig(cwd) ? resolveState(cwd) : undefined;
+			if (!dir) return;
+			const prev = liveness.loadState(dir);
+			// Continue the sequence across a restart (lastWakeSeq is the watchdog's persistent watermark).
+			seq = Math.max(prev?.tool?.seq ?? 0, prev?.lastWakeSeq ?? 0);
+			const now = Date.now();
+			state = {
+				schema: 1,
+				sessionId: sessionIdOf(ctx),
+				pid: process.pid,
+				state: "active",
+				tool: null,
+				lastEventAt: now,
+				lastTickAt: now,
+				lastWakeSeq: prev?.lastWakeSeq ?? -1,
+			};
+			lastEventWrite = now;
+			persist();
+			if (!timer) {
+				timer = setInterval(() => {
+					if (state) {
+						state.lastTickAt = Date.now();
+						persist();
+					}
+				}, LIVENESS_TICK_MS);
+				timer.unref?.();
+			}
+			if (ctx.mode === "tui") spawnWatchDaemon(cwd);
+		} catch {
+			// See persist(): never block the session start.
+		}
+	});
+
+	pi.on("tool_execution_start", (event: unknown) => {
+		if (!state) return;
+		const name = (event as { toolName?: unknown }).toolName;
+		const now = Date.now();
+		seq += 1;
+		state.tool = { name: typeof name === "string" ? name : "unknown", startedAt: now, seq };
+		state.state = "active";
+		state.lastEventAt = now;
+		lastEventWrite = now;
+		persist();
+	});
+
+	pi.on("tool_execution_end", () => {
+		if (!state || !state.tool) return;
+		state.tool = null;
+		state.state = "idle";
+		state.lastEventAt = Date.now();
+		lastEventWrite = Date.now();
+		persist();
+	});
+
+	pi.on("message_update", () => {
+		if (!state) return;
+		const now = Date.now();
+		state.lastEventAt = now; // in-memory always; the WRITE is throttled to ≤1/s
+		if (now - lastEventWrite >= LIVENESS_EVENT_WRITE_MS) {
+			lastEventWrite = now;
+			persist();
+		}
+	});
+
+	pi.on("session_shutdown", () => {
+		try {
+			if (timer) {
+				clearInterval(timer);
+				timer = undefined;
+			}
+			if (state) {
+				state.state = "ended";
+				state.lastTickAt = Date.now();
+				persist();
+			}
+			// TERMINAL: pi delivers a trailing tool_execution_end (and possibly more
+			// events) AFTER session_shutdown — the exact shutdown-mid-tool incident of
+			// this ticket. Nulling the in-memory doc makes every later event a no-op,
+			// so the "ended" tombstone is never rewritten back to idle/active. The
+			// next session_start re-seeds a fresh doc (a new session is a new doc).
+			state = undefined;
+		} catch {
+			// Best-effort: the shutdown path must not throw.
+		}
 	});
 }
 

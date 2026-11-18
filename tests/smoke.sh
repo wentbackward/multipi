@@ -3498,6 +3498,272 @@ rm -f permissions.json
 rm -rf "$work/p5-foreign" "$work/p5-sec" "$work/p5-nogit"
 git reset -q --hard HEAD 2>/dev/null || true
 
+# --- liveness operator scripts (spec 2026-11-15: status / interrupt / watch) -------
+lvhome="$work/lv/home"
+lvstate="$lvhome/project"
+LVSC="$lvstate/orchestrator-state.json"
+sleep 300 & LVPID=$!
+sleep 0.2 & DPID=$!; wait "$DPID" 2>/dev/null || true   # a known-DEAD pid
+printf 'MemTotal:       16777216 kB\nMemAvailable:     1048576 kB\nBuffers:               0 kB\nSwapTotal:        2097152 kB\nSwapFree:          524288 kB\n' >"$work/lv-meminfo"
+# mkstate STATE HB_AGO_MS SEQ STARTED_AGO_MS [PID] — a fabricated sidecar (LV_NOW pins the clock, else wall)
+mkstate() {
+  local state=$1 hbag=$2 seq=$3 sag=$4 pid=${5:-$LVPID} now tool=null
+  now=$(if [ -n "${LV_NOW:-}" ]; then printf '%s' "$LV_NOW"; else date +%s%3N; fi)
+  mkdir -p "$lvstate"
+  [ "$seq" -gt 0 ] && tool="{\"name\":\"devloop.gate\",\"startedAt\":$((now - sag)),\"seq\":$seq}"
+  printf '{"schema":1,"sessionId":"smoke","pid":%s,"state":"%s","tool":%s,"lastEventAt":%s,"lastTickAt":%s,"lastWakeSeq":-1}\n' \
+    "$pid" "$state" "$tool" "$((now - hbag))" "$((now - hbag))" >"$LVSC"
+}
+lvget() { # lvget FIELD — one dotted field of the sidecar
+  if [ -z "${MULTIPI_NO_JQ:-}" ] && command -v jq >/dev/null 2>&1; then jq -r ".$1" "$LVSC" 2>/dev/null
+  else python3 -I -c 'import json,sys
+v=json.load(open(sys.argv[2]))
+for k in sys.argv[1].split("."):
+    v=v[int(k)] if isinstance(v,list) else v[k]
+print(v if isinstance(v,str) else json.dumps(v))' "$1" "$LVSC" 2>/dev/null; fi
+}
+lvstatus() { # lvstatus [ENV_KV ...] — run in the fixture repo; sets LV_RC and LV_LINE
+  local line rc
+  line=$(cd "$work/project" && env MULTIPI_HOME="$lvhome" "$@" bash "$plugin/scripts/multipi-status.sh" 2>&1); rc=$?
+  LV_RC=$rc; LV_LINE=$line
+}
+
+# (a) status: the pinned rc matrix + the OOM addendum (meminfo figures, the journalctl hint)
+LV_LINE=$(cd "$work/project" && env MULTIPI_HOME="$lvhome" bash "$plugin/scripts/multipi-status.sh" --bogus 2>&1); LV_RC=$?
+expect "status rc 4: bad usage (an argument)" "4" "$LV_RC"
+mkdir -p "$lvstate"; printf 'not-json{' >"$LVSC"
+lvstatus
+expect "status rc 4: a present-but-unreadable sidecar" "4" "$LV_RC"
+mkstate active 1000 1 30000
+lvstatus MULTIPI_STATUS_MEMINFO="$work/lv-meminfo"
+expect "status rc 0: live (tool in flight, fresh heartbeat, pid alive)" "0" "$LV_RC"
+echo "$LV_LINE" | grep -qF "LIVE" && pass "status rc 0 line says LIVE" || fail "status rc 0 line: $LV_LINE"
+echo "$LV_LINE" | grep -qF "ram=1.0G swapfree=512M" && \
+  pass "status line carries the fabricated meminfo figures (MULTIPI_STATUS_MEMINFO)" || \
+  fail "status line lacks the meminfo figures: $LV_LINE"
+mkstate idle 1000 0 0
+lvstatus MULTIPI_STATUS_MEMINFO="$work/lv-meminfo"
+expect "status rc 1: alive but idle" "1" "$LV_RC"
+echo "$LV_LINE" | grep -qF "IDLE" && pass "status rc 1 line says IDLE" || fail "status rc 1 line: $LV_LINE"
+mkstate active 200000 0 0
+lvstatus
+expect "status rc 2: a 200 s-old heartbeat (default bound 120 s) is a suspected WEDGE" "2" "$LV_RC"
+echo "$LV_LINE" | grep -qiF "wedge" && pass "status rc 2 line names the WEDGE" || fail "status rc 2 line: $LV_LINE"
+mkstate idle 200000 0 0
+lvstatus MULTIPI_STATUS_STALE_MS=999999
+expect "status honours MULTIPI_STATUS_STALE_MS (200 s heartbeat under a 1000 s bound is not stale)" "1" "$LV_RC"
+mkstate ended 1000 0 0
+lvstatus
+expect "status rc 3: state ended is dead" "3" "$LV_RC"
+mkstate active 1000 1 1000 "$DPID"
+lvstatus
+expect "status rc 3: the sidecar pid is gone" "3" "$LV_RC"
+echo "$LV_LINE" | grep -qF 'journalctl --since <start> | grep oom-kill' && \
+  pass "status rc 3 (vanished pid) names the oom-kill journal check (the confirmed root cause)" || \
+  fail "status rc 3 line lacks the oom hint: $LV_LINE"
+rm -f "$LVSC"
+lvstatus MULTIPI_STATUS_PI_PAT='zz-zzygote-no-such-process'
+expect "status rc 3: no sidecar and no matching process" "3" "$LV_RC"
+bash -c 'exec -a fake-pi-coding-agent sleep 20' & FPID=$!
+sleep 0.3
+lvstatus
+expect "status rc 1: no sidecar but a matching pi process runs" "1" "$LV_RC"
+echo "$LV_LINE" | grep -qiF "no liveness sidecar" && pass "status rc 1 (no sidecar) makes no liveness claim" || fail "status no-sidecar line: $LV_LINE"
+kill "$FPID" 2>/dev/null || true
+
+# (b) interrupt: the pinned rc table + the real pty injection (script -qec capture)
+lvintr() { # lvintr [DRY] MSG [ENV_KV ...] — run in the fixture repo; sets LV_RC/LV_LINE
+  local dry=$1 msg=$2; shift 2
+  local line rc
+  line=$(cd "$work/project" && env MULTIPI_HOME="$lvhome" "$@" bash "$plugin/scripts/multipi-interrupt.sh" $([ "$dry" = 1 ] && echo "--dry-run") "$msg" 2>&1); rc=$?
+  LV_RC=$rc; LV_LINE=$line
+}
+lvintr_raw() { # lvintr_raw ARGS... — exact argv (no message assembly); sets LV_RC/LV_LINE
+  local line rc
+  line=$(cd "$work/project" && env MULTIPI_HOME="$lvhome" bash "$plugin/scripts/multipi-interrupt.sh" "$@" 2>&1); rc=$?
+  LV_RC=$rc; LV_LINE=$line
+}
+rm -f "$lvstate/interrupts.log"
+lvintr_raw ""
+expect "interrupt rc 4: an empty message is refused" "4" "$LV_RC"
+lvintr_raw
+expect "interrupt rc 4: no message at all" "4" "$LV_RC"
+lvintr_raw "a" "b"
+expect "interrupt rc 4: two messages" "4" "$LV_RC"
+rm -f "$LVSC"
+lvintr 0 "msg"
+expect "interrupt rc 5: no sidecar" "5" "$LV_RC"
+mkstate ended 1000 0 0
+lvintr 0 "msg"
+expect "interrupt rc 5: state ended (nothing to inject into)" "5" "$LV_RC"
+# Captured-pty delivery proof. Two environment facts (verified 2026-11-16) shape the design:
+#  1. A write to the pty SLAVE from an outside process is routed by the line discipline to the
+#     MASTER (terminal output), so the injected line is captured by script(1) even though the
+#     listener never consumes it — the listener only keeps the pty alive.
+#  2. This script(1) (util-linux 2.41) BUFFERS the typescript and flushes it on exit — so the
+#     capture is asserted AFTER a graceful TERM of the listener (the flush), never mid-session.
+script -qec 'sleep 25' "$work/lv-pty.out" >/dev/null 2>&1 & SPID=$!
+# Find OUR listener's pty: a child/grandchild of this script instance with a pts stdin.
+# (Never `pgrep -f "sleep 25"`: that also matches the searching subshell's own cmdline,
+# whose fd0 is whatever stdin the suite was given — the wrong-pty flake of 2026-11-16.)
+listener_child_pts() { # $1=pid — prints "<pts>\n<pid>" for a descendant holding a pts stdin
+  local p t out
+  for p in $(pgrep -P "$1" 2>/dev/null); do
+    t=$(readlink "/proc/$p/fd/0" 2>/dev/null)
+    case "$t" in /dev/pts/*) printf '%s\n%s\n' "$t" "$p"; return 0 ;; esac
+    out=$(listener_child_pts "$p") && { printf '%s' "$out"; return 0; }
+  done
+  return 1
+}
+LVP=""
+for _ in $(seq 1 50); do
+  LVP=$(listener_child_pts "$SPID") || LVP=""
+  [ -n "$LVP" ] && break; sleep 0.2
+done
+PTS=$(printf '%s\n' "$LVP" | sed -n 1p)
+LSLEEP=$(printf '%s\n' "$LVP" | sed -n 2p)
+[ -n "$PTS" ] && pass "smoke found the pty of the captured listener" || fail "could not find the pty of the captured listener"
+mkstate active 1000 0 0
+lvintr 1 "hello from interrupt" MULTIPI_INTERRUPT_TTY="$PTS"
+expect "interrupt rc 0: a dry-run verifies it would inject" "0" "$LV_RC"
+expect "interrupts.log: the dry-run is logged with dry=1" "1" "$(grep -cF 'dry=1' "$lvstate/interrupts.log" 2>/dev/null)"
+lvintr 0 "hello from interrupt" MULTIPI_INTERRUPT_TTY="$PTS"
+expect "interrupt rc 0: a real injection" "0" "$LV_RC"
+sleep 1
+kill "$SPID" 2>/dev/null || true; wait "$SPID" 2>/dev/null || true   # graceful TERM flushes the buffered typescript
+[ -n "$LSLEEP" ] && kill "$LSLEEP" 2>/dev/null || true               # the orphaned listener
+# Count is EXACTLY ONE: the real injection's line — and no ghost line from the dry-run.
+# (the pty renders the injected newline as \r\n — strip the CR before the exact-line count)
+PCOUNT=$(tr -d '\r' <"$work/lv-pty.out" 2>/dev/null | grep -cxF 'hello from interrupt')
+[ "$PCOUNT" = "1" ] && pass "the injected line landed in the captured pty exactly once (the dry-run wrote nothing)" || \
+  fail "pty capture: line-count=$PCOUNT typescript=[$(tr '\n' '|' <"$work/lv-pty.out" 2>/dev/null | head -c 300)]"
+expect "interrupts.log: the real injection is logged with dry=0" "1" "$(grep -cF 'dry=0' "$lvstate/interrupts.log" 2>/dev/null)"
+# One line per event: a multiline + oversize message must stay ONE log line
+# (flattened to spaces, capped at 4096 chars — the log's contract, pinned).
+LV_BEFORE_LINES=$(wc -l <"$lvstate/interrupts.log")
+LV_OVERRUN=$(printf 'x%.0s' $(seq 1 6000))
+lvintr 1 "$(printf 'alpha\nbeta\tgamma\r\n%s' "$LV_OVERRUN")" MULTIPI_INTERRUPT_TTY="$PTS"
+LV_AFTER_LINES=$(wc -l <"$lvstate/interrupts.log")
+[ "$LV_AFTER_LINES" = "$((LV_BEFORE_LINES + 1))" ] && pass "interrupts.log: a multiline/oversize message appends exactly ONE line" || \
+  fail "interrupts.log line growth: before=$LV_BEFORE_LINES after=$LV_AFTER_LINES"
+tail -n1 "$lvstate/interrupts.log" | grep -qF "alpha beta gamma" && pass "interrupts.log: the message is flattened to a single line" || \
+  fail "interrupts.log not flattened: $(tail -n1 "$lvstate/interrupts.log" | head -c 120)"
+LV_MSGLEN=$(tail -n1 "$lvstate/interrupts.log" | sed 's/^.*msg=//' | wc -c)
+[ "$LV_MSGLEN" -le 4097 ] && pass "interrupts.log: the message is capped at 4096 chars" || \
+  fail "interrupts.log message too long: ${LV_MSGLEN} bytes"
+bash -c 'sleep 20' </dev/null & BGPID=$!
+sleep 0.2
+mkstate active 1000 0 0 "$BGPID"
+lvintr 0 "msg"
+expect "interrupt rc 6: the resolved fd 0 is not a tty" "6" "$LV_RC"
+echo "$LV_LINE" | grep -qF "kill $BGPID" && pass "interrupt rc 6 prints the kill-and-resume fallback (the pid named)" || fail "rc 6 fallback text: $LV_LINE"
+kill "$BGPID" 2>/dev/null || true
+
+# (c) watch one-shot: wake choice, BOTH dedupe axes, the wedge, the healthy no-op
+# (all driven by the documented clock seam MULTIPI_WATCH_NOW_MS)
+LV_NOW=1000000000000
+WK="$work/lv-wake.out"
+wl="$lvstate/watch.log"
+lvwatch() { # lvwatch [ENV_KV ...] — one-shot in the fixture repo; sets LV_RC/LV_LINE
+  local line rc
+  line=$(cd "$work/project" && env MULTIPI_HOME="$lvhome" MULTIPI_WATCH_NOW_MS="$LV_NOW" MULTIPI_INTERRUPT_TTY="$WK" "$@" bash "$plugin/scripts/multipi-watch.sh" 2>&1); rc=$?
+  LV_RC=$rc; LV_LINE=$line
+}
+lvfresh() { rm -f "$wl" "$WK"; : >"$WK"; }
+# Seam-name hygiene (round-3 fold 1): every MULTIPI_* token the script (and its pinned
+# header) cites must be a REAL seam — the header once cited a phantom MULTIPI_TOOL_MS
+# that operators and tests key off.
+expect "watch script: every MULTIPI_* token cited is a real seam (no phantom names)" \
+  "$(printf '%s\n' MULTIPI_APPROVE_NOW_MS MULTIPI_INTERRUPT_TTY MULTIPI_STATUS_STALE_MS MULTIPI_WATCH_NOW_MS MULTIPI_WATCH_TOOL_MS)" \
+  "$(grep -oE 'MULTIPI_[A-Z0-9_]+' "$plugin/scripts/multipi-watch.sh" | sort -u)"
+lvfresh
+mkstate idle 1000 0 0
+lvwatch
+expect "watch rc 0: a healthy sidecar is a no-op" "0" "$LV_RC"
+expect "watch log: the healthy no-op is recorded" "1" "$(grep -cF ' HEALTHY' "$wl" 2>/dev/null)"
+[ -s "$WK" ] && fail "a healthy watch wrote a wake" || pass "a healthy watch wrote no wake"
+lvfresh
+mkstate active 1000 1 780000   # tool in flight 13 min — BEFORE the 45-min bound
+LV_WAKE_OUT=$(lvwatch); rc=$LV_RC
+expect "watch rc 0: a 13-min tool is woken (not left to the 45-min bound)" "0" "$LV_RC"
+expect "watch: the exact WAKE line (the tool named, 13 min)" \
+  "WAKE (multipi-watch): devloop.gate has been in flight 13min. If it is wedged, say so and abort/retry; otherwise continue." \
+  "$(head -1 "$WK" 2>/dev/null)"
+expect "watch log: the WAKE is recorded at the seam's clock" "1" "$(grep -c '^1000000000000 WAKE' "$wl" 2>/dev/null)"
+expect "watch: the sidecar's lastWakeSeq watermark moved to the woken seq" "1" "$(lvget lastWakeSeq)"
+if [ "$(grep -c '^1000000000000 WAKE' "$wl" 2>/dev/null)" != "1" ] || [ "$(lvget lastWakeSeq)" != "1" ]; then
+  ( echo "DIAG lvwatch-rc=$LV_RC out=$LV_WAKE_OUT"; echo "DIAG dir:"; ls -la "$lvstate" 2>&1; echo "DIAG wl-content:"; head -5 "$wl" 2>&1; echo "DIAG sidecar:"; cat "$LVSC" 2>&1; echo "DIAG DL_STATE probe:"; cd "$work/project" && env MULTIPI_HOME="$lvhome" bash -c ". '$plugin/scripts/lib/common.sh' && dl_load_config && echo DL_STATE=\$DL_STATE" 2>&1; ) >"$work/lv-diag.txt" 2>&1 || true
+fi
+lvwatch
+expect "watch rc 0: re-checking the same tool.seq is a no-op" "0" "$LV_RC"
+expect "watch dedupe: no second wake for the same seq" "1" "$(wc -l <"$WK")"
+expect "watch dedupe: the per-seq suppression is recorded with its reason" "1" "$(grep -cF ' SUPPRESSED:seq' "$wl" 2>/dev/null)"
+mkstate active 1000 2 780000   # a NEW seq, but the last wake is < 3600 s (wall) old
+lvwatch
+expect "watch rc 0: a fresh seq inside the 3600 s wall window is still a no-op" "0" "$LV_RC"
+expect "watch dedupe: the wall-clock axis suppresses it with its reason" "1" "$(grep -cF ' SUPPRESSED:recent' "$wl" 2>/dev/null)"
+# Degraded bump (round-3 fold 3): a python3-less box (dead stub first on PATH — the
+# established stub-idiom) must still deliver the wake with rc 0 and log the lost seq
+# axis as BUMP-FAILED instead of dropping it silently. JSON parsing stays on jq.
+LVPNOSTUB="$work/lv-nopy/bin"
+mkdir -p "$LVPNOSTUB"
+printf '#!/bin/sh\nexit 99\n' >"$LVPNOSTUB/python3"; chmod +x "$LVPNOSTUB/python3"
+lvfresh
+mkstate active 1000 4 780000
+lvwatch PATH="$LVPNOSTUB:$PATH"
+expect "watch rc 0: a failed lastWakeSeq bump does not fail the wake" "0" "$LV_RC"
+expect "watch degraded bump: the wake line still landed in the TTY" "1" "$(grep -c '^WAKE ' "$WK")"
+expect "watch log: the failed bump is logged as BUMP-FAILED (the degradation is visible)" "1" "$(grep -c ' BUMP-FAILED' "$wl" 2>/dev/null)"
+expect "watch degraded bump: the watermark stayed put (the wall axis caps the damage)" "-1" "$(lvget lastWakeSeq)"
+lvfresh
+mkstate active 61000 0 0   # heartbeat 61 s old vs a 10 s stale bound (wedge threshold = 5x = 50 s)
+lvwatch MULTIPI_STATUS_STALE_MS=10000
+expect "watch rc 0: a 61 s-silent orchestrator (bound 10 s) gets the WEDGE wake" "0" "$LV_RC"
+expect "watch: the exact WEDGE line (1 min, the recovery steps, the pid)" \
+  "WEDGE SUSPECTED (multipi-watch): no orchestrator heartbeat for 1min. Check scripts/multipi-status.sh; if dead, kill $LVPID and resume in a fresh session (step 0)." \
+  "$(head -1 "$WK" 2>/dev/null)"
+lvfresh
+mkstate active 61000 3 780000   # BOTH conditions true
+lvwatch MULTIPI_STATUS_STALE_MS=10000
+expect "watch: when both fire, the WEDGE (the stronger wake) is chosen" \
+  "1" "$(grep -c '^WEDGE SUSPECTED' "$WK" 2>/dev/null)"
+rm -f "$LVSC"
+lvwatch
+expect "watch rc 5: no sidecar (the daemon self-idles)" "5" "$LV_RC"
+lvfresh
+
+# (d) watch --daemon: single instance, the pidfile, and a loop that actually checks
+unset LV_NOW   # wall clock for the daemon (LV_NOW only bound the one-shot runs above)
+mkstate idle 1000 0 0
+env MULTIPI_HOME="$lvhome" MULTIPI_INTERRUPT_TTY="$WK" bash "$plugin/scripts/multipi-watch.sh" --daemon --interval 1 >/dev/null 2>&1 & WD_PID=$!
+sleep 1.2
+expect "watch daemon: a pidfile is held" "1" "$([ -f "$lvstate/watch.pid" ] && echo 1 || echo 0)"
+dl_daemon_second=$(env MULTIPI_HOME="$lvhome" bash "$plugin/scripts/multipi-watch.sh" --daemon --interval 1 2>&1); dl_daemon_rc=$?
+expect "watch daemon: a second launch exits 0" "0" "$dl_daemon_rc"
+echo "$dl_daemon_second" | grep -qF "already running" && pass "watch daemon: the second launch says so" || fail "second-launch text: $dl_daemon_second"
+expect "watch daemon: exactly ONE loop runs (no doubling)" "1" "$(pgrep -fc 'multipi-watch.sh --daemon --interval 1' 2>/dev/null || echo 0)"
+sleep 1.5
+grep -qF " HEALTHY" "$wl" && pass "watch daemon: the loop actually checks (HEALTHY logged)" || fail "the daemon logged no check: $(tail -2 "$wl" 2>/dev/null)"
+kill "$WD_PID" 2>/dev/null || true
+# Bounded wait + KILL fallback: a wedged daemon must never hang the suite (and the
+# daemon's own traps are the primary guarantee — this is the backstop).
+_i=0
+while [ "$_i" -lt 25 ] && kill -0 "$WD_PID" 2>/dev/null; do sleep 0.2; _i=$((_i + 1)); done
+kill -9 "$WD_PID" 2>/dev/null || true
+wait "$WD_PID" 2>/dev/null || true
+[ -f "$lvstate/watch.pid" ] && fail "the daemon left its pidfile behind" || pass "watch daemon: the pidfile is released on exit"
+pkill -f 'multipi-watch.sh --daemon --interval 1' 2>/dev/null || true   # no stragglers may leak past this section
+# Doc agreement (round-3 fold 4): the spec's --daemon sentence and the script header must
+# tell the same story — the script does NOT self-daemonize; the extension's detached spawn
+# IS the detach, manual launches need the operator's setsid.
+LV_SPEC="$plugin/docs/superpowers/specs/2026-11-15-orchestrator-liveness.md"
+grep -qF "does NOT self-daemonize" "$LV_SPEC" && \
+  grep -qF "does NOT self-daemonize" "$plugin/scripts/multipi-watch.sh" && \
+  pass "spec §4 and the watch header agree: the script does NOT self-daemonize" || \
+  fail "spec §4 / the watch header disagree on self-daemonization"
+rm -rf "$lvhome" "$work/lv-pty.out" "$work/lv-wake.out" "$work/lv-meminfo"
+kill "$LVPID" 2>/dev/null || true
+
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
 MULTIPI_PLUGIN_DIR="$plugin" env -u MULTIPI_CHILD node --input-type=module -e '
 const pi = { registered: [], handlers: {}, commands: [], registerTool(t) { this.registered.push(t.name); }, registerCommand(n) { this.commands.push(n); }, on(ev, h) { this.handlers[ev] = h; } };

@@ -3,8 +3,10 @@ import test from "node:test";
 import path from "node:path";
 import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, mkdirSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import devloopExtension from "../../extension/index.ts";
+import { fileURLToPath } from "node:url";
+import devloopExtension, { livenessWriteAttempts, resolveWatchScript } from "../../extension/index.ts";
 import { GUARD_REFUSAL } from "../../extension/src/guard.ts";
+import { loadState, sidecarPath, writeState } from "../../extension/src/liveness.ts";
 import { BASE_CONFIG, makeFixture } from "../fixtures.ts";
 
 interface HookRec { name: string; fn: (event: unknown, ctx: unknown) => unknown; }
@@ -84,7 +86,7 @@ test("extension registers 6 tools, the full orchestrator hook set and the /devlo
 		// P2: the orchestrator gains the policy tool_call hook and a policy session_start seat
 		// on top of the pre-existing four (the UI session_start remains); P3's shim-PATH arm
 		// is a third session_start seat (the hook set otherwise stays put).
-		assert.deepEqual(hookNames(hooks).sort(), ["agent_before_settle", "session_start", "session_start", "session_start", "session_tree", "tool_call", "tool_result"]);
+		assert.deepEqual(hookNames(hooks).sort(), ["agent_before_settle", "message_update", "session_shutdown", "session_start", "session_start", "session_start", "session_start", "session_tree", "tool_call", "tool_execution_end", "tool_execution_start", "tool_result"]);
 		assert.deepEqual(commands, ["devloop-agents"]);
 	} finally {
 		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
@@ -95,6 +97,33 @@ test("extension registers 6 tools, the full orchestrator hook set and the /devlo
 		else process.env.MULTIPI_HOME = savedHome;
 		rmSync(home, { recursive: true, force: true });
 	}
+});
+
+// --- watchdog script anchor (round-2 review item 1; candidate 3 deleted round-3) -----
+// The auto-start must find the repo's vendored scripts/ (installed loops version their
+// scripts with the target); when it is missing (a session not rooted in an installed loop,
+// e.g. the source tree) the module-relative fallback serves it (../scripts). The repo
+// PARENT (a bare ../../ from the source tree) must never win.
+
+test("resolveWatchScript: the repo's vendored copy wins, wherever the module was loaded from", () => {
+	const root = mkdtempSync(path.join(tmpdir(), "multipi-watch-root-"));
+	try {
+		mkdirSync(path.join(root, "scripts"));
+		writeFileSync(path.join(root, "scripts", "multipi-watch.sh"), "#!/usr/bin/env bash\n");
+		assert.equal(resolveWatchScript(root), path.join(root, "scripts", "multipi-watch.sh"));
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("resolveWatchScript: the module-relative fallback lands in the REPO's scripts dir, never the repo parent's", () => {
+	const empty = mkdtempSync(path.join(tmpdir(), "multipi-watch-empty-"));
+	const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+	try {
+		const resolved = resolveWatchScript(empty);
+		assert.ok(resolved, "the fallback found a packaged multipi-watch.sh");
+		assert.ok(existsSync(resolved!), "the fallback resolves to a real file");
+		assert.equal(path.resolve(path.dirname(path.dirname(resolved!))), ROOT,
+			"the fallback script sits in this repo's scripts/ — not the repo parent's");
+	} finally { rmSync(empty, { recursive: true, force: true }); }
 });
 
 // --- P2: the policy hook, wired end to end for the orchestrator --------------
@@ -277,6 +306,8 @@ test("orchestrator session_start prepends the installed policy shims to PATH (id
 	const saved = process.env.PATH;
 	const savedChild = process.env.MULTIPI_CHILD;
 	delete process.env.MULTIPI_CHILD;
+	const savedHome = process.env.MULTIPI_HOME; // liveness must not write a sidecar into the real home
+	process.env.MULTIPI_HOME = path.join(fx.dir, "home");
 	const shims = path.join(fx.repo, "scripts", "policy-shims");
 	mkdirSync(shims, { recursive: true });
 	try {
@@ -293,6 +324,8 @@ test("orchestrator session_start prepends the installed policy shims to PATH (id
 		assert.equal(count(), 1, "a restarted session never prepends twice");
 	} finally {
 		process.env.PATH = saved;
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
 		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
 		else process.env.MULTIPI_CHILD = savedChild;
 		fx.cleanup();
@@ -304,6 +337,8 @@ test("session_start shim PATH idempotency is CANONICAL (round-13 should-fix): an
 	const saved = process.env.PATH;
 	const savedChild = process.env.MULTIPI_CHILD;
 	delete process.env.MULTIPI_CHILD;
+	const savedHome = process.env.MULTIPI_HOME;
+	process.env.MULTIPI_HOME = path.join(fx.dir, "home");
 	const shims = path.join(fx.repo, "scripts", "policy-shims");
 	mkdirSync(shims, { recursive: true });
 	const real = realpathSync(shims);
@@ -345,6 +380,8 @@ test("session_start shim PATH idempotency is CANONICAL (round-13 should-fix): an
 		assert.equal(process.env.PATH, `scripts/policy-shims:${saved}`, "the relative entry was recognised — PATH untouched, nothing prepended");
 	} finally {
 		process.env.PATH = saved;
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
 		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
 		else process.env.MULTIPI_CHILD = savedChild;
 		fx.cleanup();
@@ -357,6 +394,8 @@ test("session_start with no installed shims leaves PATH untouched (the loop is n
 	const saved = process.env.PATH;
 	const savedChild = process.env.MULTIPI_CHILD;
 	delete process.env.MULTIPI_CHILD;
+	const savedHome = process.env.MULTIPI_HOME;
+	process.env.MULTIPI_HOME = path.join(fx.dir, "home");
 	try {
 		const { pi, hooks } = fakePi();
 		withCwd(fx.repo, () => devloopExtension(pi));
@@ -364,6 +403,8 @@ test("session_start with no installed shims leaves PATH untouched (the loop is n
 		assert.equal(process.env.PATH, saved, "no shims dir ⇒ PATH unchanged");
 	} finally {
 		process.env.PATH = saved;
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
 		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
 		else process.env.MULTIPI_CHILD = savedChild;
 		fx.cleanup();
@@ -381,6 +422,202 @@ test("a child session never registers the shim PATH (inheritance comes from spaw
 		assert.equal(process.env.PATH, saved);
 	} finally {
 		process.env.PATH = saved;
+		fx.cleanup();
+	}
+});
+
+// --- Orchestrator liveness (spec 2026-11-15 §1): the sidecar is kept from events ---
+
+test("orchestrator liveness: session_start seeds the sidecar, tool_execution_* drives tool/seq/state, shutdown writes ended", async () => {
+	const fx = makeFixture(BASE_CONFIG);
+	const home = path.join(fx.dir, "home");
+	const stDir = path.join(home, "proj"); // resolveState: MULTIPI_HOME/<repo basename>
+	const savedHome = process.env.MULTIPI_HOME;
+	const savedChild = process.env.MULTIPI_CHILD;
+	const savedRole = process.env.MULTIPI_CHILD_ROLE;
+	process.env.MULTIPI_HOME = home;
+	delete process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD_ROLE;
+	try {
+		await withCwd(fx.repo, async () => {
+			const { hooks } = fakePiLoadOrchestrator();
+			const ctx = { cwd: fx.repo, hasUI: false, mode: "rpc", sessionManager: { getSessionId: () => "sess-live" } } as never;
+			const fire = (name: string, event: unknown) =>
+				Promise.all(hooks.filter((h) => h.name === name).map((h) => h.fn(event, ctx)));
+
+			await fire("session_start", { reason: "startup" });
+			let s = loadState(stDir);
+			assert.ok(s, "the sidecar exists after session_start");
+			assert.equal(s!.state, "active");
+			assert.equal(s!.pid, process.pid, "the in-process pid is the sidecar's pid");
+			assert.equal(s!.sessionId, "sess-live");
+			assert.equal(s!.tool, null);
+
+			await fire("tool_execution_start", { toolCallId: "c1", toolName: "devloop.gate", args: {} });
+			s = loadState(stDir);
+			assert.equal(s!.tool?.name, "devloop.gate");
+			assert.equal(s!.tool?.seq, 1, "the first tool call starts the sequence at 1");
+			assert.equal(s!.state, "active");
+
+			await fire("tool_execution_start", { toolCallId: "c2", toolName: "devloop.status", args: {} });
+			assert.equal(loadState(stDir)!.tool?.seq, 2, "seq increments on every start");
+
+			const evBefore = loadState(stDir)!.lastEventAt;
+			await fire("message_update", {});
+			const evAfter = loadState(stDir)!.lastEventAt;
+			assert.ok(evAfter >= evBefore, "high-frequency events tick lastEventAt");
+
+			await fire("tool_execution_end", { toolCallId: "c2", toolName: "devloop.status" });
+			s = loadState(stDir);
+			assert.equal(s!.tool, null, "the tool is cleared on end");
+			assert.equal(s!.state, "idle", "back to idle with no tool in flight");
+
+			await fire("session_shutdown", { reason: "quit" });
+			assert.equal(loadState(stDir)!.state, "ended", "shutdown writes state:ended");
+		});
+	} finally {
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		if (savedRole === undefined) delete process.env.MULTIPI_CHILD_ROLE;
+		else process.env.MULTIPI_CHILD_ROLE = savedRole;
+		fx.cleanup();
+	}
+});
+
+test("orchestrator liveness: shutdown makes the sidecar TERMINAL — the trailing tool event (pi's shutdown-mid-tool) never rewrites the ended tombstone", async () => {
+	const fx = makeFixture(BASE_CONFIG);
+	const home = path.join(fx.dir, "home");
+	const stDir = path.join(home, "proj");
+	const savedHome = process.env.MULTIPI_HOME;
+	const savedChild = process.env.MULTIPI_CHILD;
+	const savedRole = process.env.MULTIPI_CHILD_ROLE;
+	process.env.MULTIPI_HOME = home;
+	delete process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD_ROLE;
+	try {
+		await withCwd(fx.repo, async () => {
+			const { hooks } = fakePiLoadOrchestrator();
+			const ctx = { cwd: fx.repo, hasUI: false, mode: "rpc", sessionManager: { getSessionId: () => "sess-term" } } as never;
+			const fire = (name: string, event: unknown) =>
+				Promise.all(hooks.filter((h) => h.name === name).map((h) => h.fn(event, ctx)));
+
+			// The exact incident this ticket exists for: shutdown WHILE a tool is in flight.
+			await fire("session_start", { reason: "startup" });
+			await fire("tool_execution_start", { toolCallId: "c1", toolName: "devloop.gate", args: {} });
+			assert.equal(loadState(stDir)!.state, "active");
+			await fire("session_shutdown", { reason: "quit" });
+			assert.equal(loadState(stDir)!.state, "ended", "shutdown writes the tombstone");
+			// pi's docs guarantee the trailing tool_execution_end is delivered AFTER the shutdown.
+			// The tombstone (in-flight tool snapshot included) must not be TOUCHED by any
+			// later event — byte-identical is the sharpest pin.
+			const tombstone = readFileSync(sidecarPath(stDir), "utf8");
+			await fire("tool_execution_end", { toolCallId: "c1", toolName: "devloop.gate" });
+			assert.equal(loadState(stDir)!.state, "ended", "the trailing end does NOT rewrite the tombstone to idle");
+			// A late start and a late message tick are dead too.
+			await fire("tool_execution_start", { toolCallId: "c2", toolName: "devloop.status", args: {} });
+			await fire("message_update", {});
+			assert.equal(readFileSync(sidecarPath(stDir), "utf8"), tombstone, "late events never rewrite a shut-down doc");
+			assert.equal(loadState(stDir)!.state, "ended");
+		});
+	} finally {
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		if (savedRole === undefined) delete process.env.MULTIPI_CHILD_ROLE;
+		else process.env.MULTIPI_CHILD_ROLE = savedRole;
+		fx.cleanup();
+	}
+});
+
+test("orchestrator liveness: two same-millisecond message_update ticks cause at most ONE sidecar write (throttle pinned on count/content, not mtime)", async () => {
+	const fx = makeFixture(BASE_CONFIG);
+	const home = path.join(fx.dir, "home");
+	const stDir = path.join(home, "proj");
+	const savedHome = process.env.MULTIPI_HOME;
+	const savedChild = process.env.MULTIPI_CHILD;
+	const savedRole = process.env.MULTIPI_CHILD_ROLE;
+	process.env.MULTIPI_HOME = home;
+	delete process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD_ROLE;
+	const realNow = Date.now;
+	try {
+		await withCwd(fx.repo, async () => {
+			const { hooks } = fakePiLoadOrchestrator();
+			const ctx = { cwd: fx.repo, hasUI: false, mode: "rpc", sessionManager: { getSessionId: () => "sess-thr" } } as never;
+			const fire = (name: string, event: unknown) =>
+				Promise.all(hooks.filter((h) => h.name === name).map((h) => h.fn(event, ctx)));
+
+			// Frozen clock, two windows: session_start lands 2 s before the tick pair (the
+			// throttle window is already elapsed by the first tick), and both ticks then
+			// land in the SAME millisecond — the worst case for mtime-based assertions,
+			// which is exactly why we pin on the write COUNT and the resulting content.
+			const frozen = realNow() + 60_000;
+			Date.now = () => frozen - 2_000;
+			await fire("session_start", { reason: "startup" });
+			livenessWriteAttempts.count = 0;
+
+			Date.now = () => frozen;
+			await fire("message_update", {});
+			await fire("message_update", {});
+			assert.ok(livenessWriteAttempts.count <= 1, `at most one sidecar write in the window, got ${livenessWriteAttempts.count}`);
+			assert.equal(livenessWriteAttempts.count, 1, "the first tick wrote, the same-millisecond twin was dropped");
+			assert.equal(loadState(stDir)!.lastEventAt, frozen, "the surviving write carried the tick (in-memory update persisted once)");
+
+			// Once the window has elapsed, the next tick writes again — the throttle
+			// drops duplicates, not events.
+			Date.now = () => frozen + 2_000;
+			await fire("message_update", {});
+			assert.equal(livenessWriteAttempts.count, 2, "the next window's tick writes");
+			assert.equal(loadState(stDir)!.lastEventAt, frozen + 2_000, "and its content carries the newer tick");
+			Date.now = realNow;
+			// Housekeeping: end this session so its 15 s tick cannot outlive the test.
+			await fire("session_shutdown", { reason: "quit" });
+		});
+	} finally {
+		Date.now = realNow;
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		if (savedRole === undefined) delete process.env.MULTIPI_CHILD_ROLE;
+		else process.env.MULTIPI_CHILD_ROLE = savedRole;
+		fx.cleanup();
+	}
+});
+
+test("orchestrator liveness: an externally raised lastWakeSeq is never regressed by a persist (the watchdog's watermark)", async () => {
+	const fx = makeFixture(BASE_CONFIG);
+	const home = path.join(fx.dir, "home");
+	const stDir = path.join(home, "proj");
+	const savedHome = process.env.MULTIPI_HOME;
+	const savedChild = process.env.MULTIPI_CHILD;
+	const savedRole = process.env.MULTIPI_CHILD_ROLE;
+	process.env.MULTIPI_HOME = home;
+	delete process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD_ROLE;
+	try {
+		await withCwd(fx.repo, async () => {
+			const { hooks } = fakePiLoadOrchestrator();
+			const ctx = { cwd: fx.repo, hasUI: false, mode: "rpc", sessionManager: { getSessionId: () => "sess-wm" } } as never;
+			const fire = (name: string, event: unknown) =>
+				Promise.all(hooks.filter((h) => h.name === name).map((h) => h.fn(event, ctx)));
+
+			await fire("session_start", { reason: "startup" });
+			// The watchdog raised the watermark between two tool calls (it writes the sidecar too).
+			writeState(stDir, { ...loadState(stDir)!, lastWakeSeq: 3 });
+			await fire("tool_execution_start", { toolCallId: "c9", toolName: "devloop.gate", args: {} });
+			assert.equal(loadState(stDir)!.lastWakeSeq, 3, "the persist adopted the higher watermark instead of regressing it");
+		});
+	} finally {
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		if (savedRole === undefined) delete process.env.MULTIPI_CHILD_ROLE;
+		else process.env.MULTIPI_CHILD_ROLE = savedRole;
 		fx.cleanup();
 	}
 });

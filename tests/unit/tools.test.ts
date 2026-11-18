@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync, chmodSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket } from "../../extension/src/tools.ts";
+import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket, contextBuilds } from "../../extension/src/tools.ts";
 import { makeFixture } from "../fixtures.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -184,6 +184,48 @@ test("cancel marks the entry interrupted and kills via the controller registry (
 		delete process.env.FAKE_PI_SLEEP;
 		fx.cleanup();
 	}
+});
+
+test("every devloop.* call is bounded: a hung dispatch RESOLVES (never rejects, never hangs) with the reconciliation text (spec 2026-11-15 §2)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
+	setupEnv(fx);
+	process.env.FAKE_PI_MODE = "slow";
+	process.env.FAKE_PI_SLEEP = "30";
+	process.env.MULTIPI_TOOL_TIMEOUT_MS = "500"; // documented seam: no wall-clock minutes in tests
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Bound task");
+		const start = Date.now();
+		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		assert.ok(Date.now() - start < 10_000, "resolved at the bound, not when the child would report (30s)");
+		assert.equal(res.isError, true, "the timeout is an error RESULT");
+		const t = textOf(res);
+		assert.match(t, /devloop\.dispatch timed out after 1s/);
+		assert.match(t, /UNTOUCHED/);
+		assert.match(t, /scripts\/multipi-status\.sh/);
+		assert.match(t, /devloop\.status/);
+		assert.match(t, /devloop\.cancel/);
+		const cancel = cancelImpl(ctx, String(n)); // reconcile: kill the abandoned child
+		assert.match(textOf(cancel), /cancel sent/);
+	} finally {
+		delete process.env.FAKE_PI_MODE;
+		delete process.env.FAKE_PI_SLEEP;
+		delete process.env.MULTIPI_TOOL_TIMEOUT_MS;
+		fx.cleanup();
+	}
+});
+
+test("a bounded devloop.* call builds the tool context exactly ONCE (bound probe and run share one construction)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		createIssue(fx, "Bound budget check");
+		const before = contextBuilds.count;
+		const res = await call(ctx, "devloop.status", {});
+		assert.equal(res.isError ?? false, false, textOf(res));
+		assert.equal(contextBuilds.count - before, 1, "the bound probe must not rebuild the context (a config read + git subprocess each)");
+	} finally { fx.cleanup(); }
 });
 
 test("gate and merge tools drive the trains through the real scripts", async () => {
