@@ -349,3 +349,15 @@ test("_shim_exec_real: a plain word inherited as the counter is garbage — coer
 	assert.equal(got.status, 0, `stderr: ${got.stderr}`);
 	assert.equal(got.stdout, "1", "a word is not a counter; coercion keeps the guard armed for the hops that follow");
 });
+
+test("_shim_exec_real coerces a leading-zero inherited counter: 08/09 crash bash arithmetic (invalid octal), they read as no counter", () => {
+	const got = runShim(`_POLICYSHIM_DEPTH=08\n_shim_exec_real ${BASH} -c 'printf "%s" "$_POLICYSHIM_DEPTH"'`);
+	assert.equal(got.status, 0, `must not crash (rc 1, "value too great for base") — got ${got.status}; stderr: ${got.stderr}`);
+	assert.equal(got.stdout, "1", "a leading-zero value is non-canonical decimal garbage — coerced to 0, the exec bumps to 1");
+});
+
+test("_shim_exec_real: 010 reflects the documented read (garbage → 0 → depth 1), never bash's coincidental octal (8 → refused)", () => {
+	const got = runShim(`_POLICYSHIM_DEPTH=010\n_shim_exec_real ${BASH} -c 'printf "%s" "$_POLICYSHIM_DEPTH"'`);
+	assert.equal(got.status, 0, `stderr: ${got.stderr}`);
+	assert.equal(got.stdout, "1", "as octal 010 would be 8 (hard-refused); as non-canonical decimal it coerces to 0 and the exec proceeds at depth 1");
+});

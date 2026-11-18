@@ -287,7 +287,9 @@ expect "heavy.sh (mkdir path) takes a slot whose pid file says 0" "0" \
 # could rm -rf it (two jobs, one slot). The sweep now respects ONE POLL TICK of grace:
 # a fresh ownerless dir must SURVIVE the first tick and be swept once it has aged.
 mkdir -p "$lockdir/slot1.d"
-MULTIPI_HEAVY_SLOTS=1 PATH="$stubbin:$PATH" bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1 &
+# BOUNDED (mirrors the pid-0 pin's rationale): an acquisition-regression spin would make the
+# unbounded wait hang the whole smoke on the very class this pin exists to catch — 124 beats infinity.
+MULTIPI_HEAVY_SLOTS=1 PATH="$stubbin:$PATH" timeout 30 bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1 &
 _hgw=$!
 sleep 0.3
 [ -d "$lockdir/slot1.d" ] && pass "a fresh ownerless slot dir survives one poll tick (sweep grace)" ||

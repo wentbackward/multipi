@@ -132,6 +132,14 @@ _shim_exec_real() { # _shim_exec_real REALBIN ARGV...
   case "$depth" in
     *[!0-9]*) depth=0 ;;
   esac
+  # Leading zero = non-canonical decimal: bash arithmetic reads `08`/`09` as invalid
+  # OCTAL and hard-crashes the shim (rc 1, parse error, no guard line) — the same
+  # expression-semantics class this coercion exists to close, one spelling further.
+  # Garbage: read as no-counter-yet (0). A bare `0` stays canonical (the arm requires
+  # a digit after the zero).
+  case "$depth" in
+    0[0-9]*) depth=0 ;;
+  esac
   [ ${#depth} -le 9 ] || depth=999
   if [ $((depth + 1)) -gt 3 ]; then
     echo "multipi policy: DENIED shim:recursion-depth: depth $((depth + 1)) would exceed 3 — refusing (mutual-exec loop guard)" >&2
