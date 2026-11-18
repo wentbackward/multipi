@@ -58,8 +58,29 @@ clean_stale_temp() {
   fi
   for entry in "$lock_dir"/slot*.d; do
     [ -d "$entry" ] || continue
-    if ! kill -0 "$(cat "$entry/pid" 2>/dev/null || echo 0)" 2>/dev/null; then rm -rf -- "$entry"; fi
+    slot_holder_dead "$entry" && rm -rf -- "$entry"
   done
+}
+
+# slot_holder_dead LOCKDIR: true when a slot-lock directory holds NO live owner: no pid file
+# at all, an unusable one (non-numeric, a leading zero, 0), or a pid that is not running.
+# A SIGKILLed holder skips its EXIT trap, so its lock must ALWAYS read as FREE (ticket #68).
+# `0` is rejected by the regex, not by `kill -0`: pid 0 targets the CALLER'S own process
+# group and would answer "alive" for a ghost — the exact fallback the header forbids.
+slot_holder_dead() { # slot_holder_dead LOCKDIR
+  local pid=""
+  [ -f "$1/pid" ] || return 0
+  pid=$(tr -d '[:space:]' <"$1/pid" 2>/dev/null)
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
+  kill -0 "$pid" 2>/dev/null && return 1
+  return 0
+}
+
+# have_flock: a flock that actually WORKS (name resolution alone is not enough — a broken
+# placeholder answers `command -v` but fails at use; the branch point must be behavioural,
+# ticket #68's no-flock test seam rides on this).
+have_flock() {
+  command -v flock >/dev/null 2>&1 && flock --version >/dev/null 2>&1
 }
 
 # have_memory_cap: true when systemd can run a transient user scope with a memory limit.
@@ -106,7 +127,15 @@ try_slot_flock() {
 try_slot_mkdir() {
   local slot=$1 rc=0
   shift
-  if mkdir "$lock_dir/slot$slot.d" 2>/dev/null; then
+  local d="$lock_dir/slot$slot.d"
+  # A holder SIGKILLed mid-hold (EXIT trap skipped) leaves its dir with a dead pid — or no
+  # pid file at all; either way the lock reads as FREE. The startup sweep (clean_stale_temp)
+  # already ran BEFORE this slot was taken, so a WAITING instance must re-check at
+  # acquisition, or it polls the ghost forever (ticket #68).
+  if [ -d "$d" ] && slot_holder_dead "$d"; then
+    rm -rf -- "$d"
+  fi
+  if mkdir "$d" 2>/dev/null; then
     ran=yes
     echo $$ >"$lock_dir/slot$slot.d/pid"
     trap 'rm -rf -- "$lock_dir/slot$slot.d"' EXIT INT TERM
@@ -119,11 +148,15 @@ try_slot_mkdir() {
 }
 
 clean_stale_temp
+# Whether flock WORKS is a property of the system, not of each poll: probe once, reuse
+# the answer inside the loop (review round 2 — no repeated version probes per slot per tick).
+use_flock=no
+have_flock && use_flock=yes
 waiting_said=""
 while true; do
   for ((slot = 1; slot <= slots; slot++)); do
     ran=""
-    if command -v flock >/dev/null 2>&1; then
+    if [ "$use_flock" = yes ]; then
       try_slot_flock "$slot" "$@"
     else
       try_slot_mkdir "$slot" "$@"

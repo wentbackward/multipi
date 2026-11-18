@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Smoke test of the multipi scripts on a throwaway project with a local bare origin.
-# No network, no real GitHub: `gh` is tests/fake-gh. Run: bash tests/smoke.sh
+# No network, no real GitHub: `gh` is tests/fake-gh. Exception: the P3 doc-form passthrough pin
+# observes forwarding at the shim boundary and so requires a COMPILED `gh` on PATH (bootstrap-box
+# contract, ticket #68) — its absence is a "broken test environment" (the pin fails loudly), not a
+# vacuous pass. Run: bash tests/smoke.sh
 set -u
 plugin=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/multipi-smoke.XXXXXX")
@@ -11,6 +14,21 @@ git config --global user.email tester@example.invalid
 git config --global init.defaultBranch main
 mkdir -p "$work/bin" && ln -s "$plugin/tests/fake-gh" "$work/bin/gh"
 export PATH="$work/bin:$PATH"
+
+# Shared resolution rule from the policy shims (#68): this smoke runs in the dogfood-ARMED
+# environment (its PATH carries the policy-shims dir, so `command -v git` IS the shim),
+# and its git fixtures must resolve the real git the same wrapper-agnostic way the shims
+# do — never `command -v`. Sourcing the library is side-effect free.
+shim_dir="$plugin/scripts/policy-shims"
+. "$shim_dir/lib/policyshim.sh"
+# Consumed across the file boundary: the sourced shim_find_real reads SIM_SHIM_DIR to anchor
+# its own-dir exclusion (shellcheck cannot see the use, cf. the shims' own suppression).
+# shellcheck disable=SC2034
+SIM_SHIM_DIR="$shim_dir"
+# Resolve ONCE: every git fixture in this smoke execs the SAME real git the shims resolve
+# to (a fixture that captures the wrapper it sits next to is the bug this ticket fixes).
+smoke_real_git=$(shim_find_real git)
+[ -n "$smoke_real_git" ] || { echo "smoke: no compiled git on PATH — broken test environment" >&2; exit 1; }
 
 passed=0
 failed=0
@@ -193,6 +211,78 @@ first_end=$(awk '/^end 1/ {print $3}' "$work/heavy-1.out")
   pass "third heavy job starts only after a slot frees" ||
   fail "third heavy job started at ${third_start:-?} before the first ended at ${first_end:-?}"
 echo "heavy: 3x3s jobs on 2 slots took $(($(date +%s) - start))s"
+
+# --- heavy.sh: a dead holder's lock is FREE (ticket #68 secondary hygiene) ----------
+# The incident's spin was killed mid-hold, leaving the slot lock on disk. (a) flock path:
+# the kernel frees the flock when its last fd holder dies — a residual `slotN.lock` file
+# occupies nothing, so a fresh job takes the slot at once. (b) mkdir path (no flock):
+# a SIGKILLed holder skips its EXIT trap and leaves `slotN.d` with a dead pid — a WAITING
+# instance must sweep it at acquisition, not poll forever on a ghost holder.
+lockdir="$work/locks"
+mkdir -p "$lockdir"
+: >"$lockdir/slot1.lock"   # residual lock file of a dead (killed) holder
+expect "heavy.sh takes a slot whose residual lock file was left by a dead holder" "0" \
+  "$(bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
+# Dead pid that is provably dead: spawn a process and reap it.
+sleep 0.1 &
+_reaped_pid=$!
+wait "$_reaped_pid" 2>/dev/null
+# No-flock environment for the mkdir path: a dead stub that answers `command -v` but
+# fails `flock --version` — heavy.sh's branch point is behavioural (have_flock), so the
+# stub emulates a flock-less (macOS-shaped) system honestly.
+stubbin="$work/bin-noflock"
+mkdir -p "$stubbin"
+printf '#!/usr/bin/env bash\nexit 127\n' >"$stubbin/flock"
+chmod +x "$stubbin/flock"
+# Fresh invocation: a stale slot dir with a dead pid is swept and the slot taken.
+mkdir -p "$lockdir/slot1.d"
+echo "$_reaped_pid" >"$lockdir/slot1.d/pid"
+expect "heavy.sh (mkdir path, fresh) takes a slot whose owner pid is dead" "0" \
+  "$(PATH="$stubbin:$PATH" bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
+[ ! -d "$lockdir/slot1.d" ] && pass "the dead holder's slot dir is swept at acquisition" ||
+  fail "dead holder's slot dir left in place: $lockdir/slot1.d"
+# No pid file at all: a lock with no owner record must read as FREE, not alive.
+# (The pre-fix fallback `kill -0 0` targets the CALLER'S own process group — it always
+# answered "alive", so an ownerless dir was a permanent ghost.)
+mkdir -p "$lockdir/slot1.d"
+expect "heavy.sh (mkdir path, fresh) takes a slot whose holder left NO pid file" "0" \
+  "$(PATH="$stubbin:$PATH" bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
+[ ! -d "$lockdir/slot1.d" ] && pass "the ownerless slot dir is swept at acquisition" ||
+  fail "ownerless slot dir left in place: $lockdir/slot1.d"
+# A pid file containing 0: the old `^[0-9]+$` check admitted it, and `kill -0 0` answers
+# for the CALLER'S own process group (always "alive") — exactly the fallback the function
+# header forbids; the waiter spun on a ghost. Bounded: a regression must fail this pin
+# fast, not hang the whole smoke on the spin.
+mkdir -p "$lockdir/slot1.d"
+echo 0 >"$lockdir/slot1.d/pid"
+# SLOTS=1: the ghosted slot is the ONLY slot, so acquisition (not a sibling slot) is what
+# proves the pid-0 lock reads as FREE.
+expect "heavy.sh (mkdir path, fresh) takes a slot whose pid file says 0" "0" \
+  "$(MULTIPI_HEAVY_SLOTS=1 PATH="$stubbin:$PATH" timeout 30 bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
+[ ! -d "$lockdir/slot1.d" ] && pass "the pid-0 slot dir is swept at acquisition" ||
+  fail "pid-0 slot dir left in place: $lockdir/slot1.d"
+# WAITING instance: the only slot is held by a process that DIES while the waiter polls.
+# Pre-fix the waiter's startup sweep already ran (holder was alive then) and it polled on
+# the ghost forever; the fix sweeps the dead-owner dir at each acquisition attempt.
+sleep 30 & _holder=$!
+mkdir -p "$lockdir/slot1.d"
+echo "$_holder" >"$lockdir/slot1.d/pid"
+rm -f "$work/woke.flag"
+MULTIPI_HEAVY_SLOTS=1 PATH="$stubbin:$PATH" bash "$plugin/scripts/heavy.sh" bash -c "sleep 2; echo woke >\"$work/woke.flag\"" &
+_waiter=$!
+sleep 1                          # the waiter is now polling on the (held) slot
+kill -9 "$_holder" 2>/dev/null
+wait "$_holder" 2>/dev/null      # reap: an unreaped zombie still answers kill -0 (looks alive)
+deadline=$(( $(date +%s) + 15 ))
+while [ ! -f "$work/woke.flag" ]; do
+  [ "$(date +%s)" -ge "$deadline" ] && break
+  sleep 0.5
+done
+[ -f "$work/woke.flag" ] && pass "a WAITING instance takes a slot whose holder dies mid-wait" || {
+  fail "waiter never recovered from the dead holder (ghost slot)"
+  kill "$_waiter" 2>/dev/null || true
+}
+wait "$_waiter" 2>/dev/null
 
 # --- gate-train.sh ------------------------------------------------------------
 git checkout -q -b feat/1-first
@@ -638,7 +728,11 @@ echo "$out" | grep -q "not the gated head" && pass "the refusal names the vanish
 # silently tolerated — the residue must be diagnosable, not a silent permanent leak.
 # A git shim refuses only `branch -q -D train-*` deletions.
 bdshim_dir="$work/git-bdshim"
-bdshim_real=$(command -v git)
+# The #68 rule (shared helper, NOT command-v): under a dogfood-armed PATH `command -v git`
+# is the policy shim itself — capturing it would route the fixture's simulated refusal
+# through the shim's own policy (different refusal text) and, double-wrapped, mutual-exec
+# itself forever. The helper's compiled-artifact rule skips every wrapper, wherever it is.
+bdshim_real=$smoke_real_git
 mkdir -p "$bdshim_dir"
 cat >"$bdshim_dir/git" <<EOF
 #!/usr/bin/env bash
@@ -667,6 +761,110 @@ printf '%s\n' "$out" | grep -qF "KEPT train-feat/10-e (delete refused: error: si
   pass "the refused ref really survives the merge run" ||
   fail "the sim-refused ref vanished anyway"
 git -C "$gate" branch -q -D train-feat/10-e
+
+# --- #68: double-wrap regression (the 12-hour mutual-exec spin that wedged the #65 gate)
+# Rebuild the incident geometry and pin it with a bounded timeout: the fixture wrapper
+# layer (bdshim, on top) over a SECOND WRAPPER LAYER over the real git. Pre-#68, resolution
+# was "first executable outside my own dir": bdshim exec'd the layer below, the layer
+# below exec'd bdshim — one PID mutual-exec'ing at 53 % CPU for 12 h while holding a heavy
+# slot. The fix makes resolution wrapper-agnostic (compiled artifact only) in BOTH layers,
+# the merge terminates, and the refusal stays the fixture's own.
+# Two runs, because the lower layer plays a different role in each (review round 1):
+#  (1) INCIDENT ORDER (fixture wrapper on top): armed, the lower layer is the real dogfood
+#      shim dir this smoke inherits (that inheritance IS the incident); unarmed, the
+#      synthetic stand-in stands in for it. The fixed upper layer skips the non-compiled
+#      lower layer BY DESIGN, so that layer carries no traffic in this run: it pins that
+#      the incident's PATH terminates (the regression guard), it is not a geometry proof.
+#  (2) STACKED GEOMETRY (stand-in on top): the stand-in is primary, so EVERY git call
+#      enters it; it logs one line per exec (the measurement asserted below), then its
+#      pre-#68 rule execs the next executable `git` on PATH — the fixture wrapper. Traffic
+#      genuinely crosses the layer boundary (stand-in → bdshim → real git, one hop per
+#      layer). The real dogfood layer cannot play this role: its own policy text would
+#      replace the fixture's refusal.
+# Hermeticity (review round 2): no pin hinges on the ambient session's posture. Armed,
+# the dogfood shim dir ships a `gh` shim BESIDE its `git` shim; the runs' PATHs therefore
+# put the fake-gh bin dir ($work/bin) AHEAD of the sim layer, so the merge's `gh` calls
+# resolve to tests/fake-gh no matter how the surrounding session is armed. The git
+# geometry is untouched: the git fixtures still sit first, and $work/bin carries no git
+# (run (2)'s synthetic layers ship `git` only, so the same insulation is explicit, not
+# structural). Trusted-dogfood-ancestor precondition: when armed, run (1)'s lower layer
+# is a REAL installed policy layer inherited from this repo's own dogfood; the pin trusts
+# it to be a benign forwarding-only wrapper under the incident's PATH and does not
+# re-audit it.
+standin_dir="$work/olddogfood"
+dw_log="$work/dw-standin.log"
+rm -f "$dw_log"
+mkdir -p "$standin_dir"
+cat >"$standin_dir/git" <<EOF
+#!/usr/bin/env bash
+# Synthetic stand-in for an installed dogfood policy shim running the PRE-#68 rule:
+# skip own dir, exec the first other executable \`git\` on PATH (what the mutual exec
+# rode). Logs one line per exec: the measurement run (2) asserts, proving the stacked
+# geometry carries traffic rather than merely sitting on PATH.
+printf 'standin-exec %s\n' "\$*" >>"$dw_log"
+self=\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd -P)
+IFS=':'
+for d in \$PATH; do
+  r=\$(cd "\$d" 2>/dev/null && pwd -P) || continue
+  [ "\$r" = "\$self" ] && continue
+  if [ -f "\$r/git" ] && [ -x "\$r/git" ]; then exec "\$r/git" "\$@"; fi
+done
+echo "olddogfood stand-in: no other git on PATH" >&2
+exit 127
+EOF
+chmod +x "$standin_dir/git"
+shim_layer="$standin_dir"
+first_git=$(command -v git || true)
+if [ -n "$first_git" ] && [[ "$(head -c 2 -- "$first_git" 2>/dev/null)" == "#!" ]]; then
+  shim_layer=$(dirname "$first_git")   # armed: the incident's lower layer is the dogfood shim itself
+fi
+stage_branch feat/10-f f10.txt foxtrot
+bash "$plugin/scripts/gate-train.sh" feat/10-f >/dev/null 2>&1
+expect "feat/10-f gates green (double-wrap pin)" "0" "$?"
+# Bounded: the fix resolves in milliseconds; the pre-fix spin ran 12 h (timeout ⇒ 124).
+# $work/bin (fake-gh, no git) ahead of the sim layer: `gh` stays hermetic (see above).
+expect "run (1) PATH insulates gh to fake-gh ahead of the sim layer" "$work/bin/gh" \
+  "$( ( PATH="$bdshim_dir:$work/bin:$shim_layer:$PATH" type -P gh ) )"
+out=$(PATH="$bdshim_dir:$work/bin:$shim_layer:$PATH" timeout 60 bash "$plugin/scripts/merge-train.sh" feat/10-f 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ]; then pkill -f "$bdshim_dir/git" 2>/dev/null || true; fi   # failure path: reap a spinning wrapper
+echo "$out"
+expect "the double-wrapped merge TERMINATES under the bounded timeout (no mutual-exec spin)" "0" "$rc"
+printf '%s\n' "$out" | grep -qF "KEPT train-feat/10-f (delete refused: error: simulated refusal to delete a train ref)" &&
+  pass "the double-wrapped merge keeps the fixture's own refusal text (KEPT line)" ||
+  fail "no KEPT line with the simulated refusal (did the shim layer answer instead?)"
+[ -n "$(tref feat/10-f)" ] &&
+  pass "the double-wrapped refused ref really survives the merge run" ||
+  fail "the double-wrapped sim-refused ref vanished anyway"
+git -C "$gate" branch -q -D train-feat/10-f
+# Run (2): the stacked geometry with traffic across BOTH layers — the stand-in is primary
+# (first on PATH) and its pre-#68 rule hands every call to the next executable `git`, the
+# fixture wrapper: stand-in → bdshim → real git, one hop per layer. $work/bin is restated
+# for the same hermeticity as run (1) (explicit insulation, not structural luck).
+rm -f "$dw_log"
+expect "run (2) PATH insulates gh to fake-gh ahead of the sim layers" "$work/bin/gh" \
+  "$( ( PATH="$standin_dir:$bdshim_dir:$work/bin:$PATH" type -P gh ) )"
+stage_branch feat/10-g g10.txt golf
+bash "$plugin/scripts/gate-train.sh" feat/10-g >/dev/null 2>&1
+expect "feat/10-g gates green (stacked-geometry pin)" "0" "$?"
+out=$(PATH="$standin_dir:$bdshim_dir:$work/bin:$PATH" timeout 60 bash "$plugin/scripts/merge-train.sh" feat/10-g 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  pkill -f "$bdshim_dir/git" 2>/dev/null || true
+  pkill -f "$standin_dir/git" 2>/dev/null || true
+fi                                                        # failure path: reap a spinning wrapper
+echo "$out"
+expect "the stacked-geometry merge TERMINATES under the bounded timeout" "0" "$rc"
+printf '%s\n' "$out" | grep -qF "KEPT train-feat/10-g (delete refused: error: simulated refusal to delete a train ref)" &&
+  pass "the refusal survives the two-layer transit (KEPT line, fixture's own text)" ||
+  fail "no KEPT line with the simulated refusal after the two-layer transit"
+grep -qE "^standin-exec .*branch -q -D train-feat/10-g$" "$dw_log" 2>/dev/null &&
+  pass "the lower layer REALLY CARRIED THE TRAFFIC (it logged the train-ref delete it forwarded)" ||
+  fail "stand-in never logged the train-ref delete: the stacked geometry was not exercised"
+[ -n "$(tref feat/10-g)" ] &&
+  pass "the stacked-geometry refused ref really survives the merge run" ||
+  fail "the stacked-geometry sim-refused ref vanished anyway"
+git -C "$gate" branch -q -D train-feat/10-g
 # --- merge-train.sh: fail-closed dirty probe (absorbed from the #32 review) ----
 # A ticket worktree whose `git status` CANNOT RUN must be KEPT with a loud note —
 # empty-on-failure is never read as clean (the merge-time analogue of
@@ -682,7 +880,7 @@ expect "the dirty-probe branch gates green" "0" "$?"
 mwd="$work/home/project/worktrees/project"
 git worktree add -q "$mwd/issue-16-mp" feat/16-mp
 statusshim_dir="$work/git-status-shim"
-statusshim_real=$(command -v git)
+statusshim_real=$smoke_real_git   # #68: same shared resolution as bdshim_real
 mkdir -p "$statusshim_dir"
 cat >"$statusshim_dir/git" <<EOF
 #!/usr/bin/env bash
@@ -1516,11 +1714,14 @@ for d in "${path_dirs[@]}"; do
 done
 mkdir -p "$work/bin-nonode"
 # Re-provide what doctor.sh, common.sh and fake-gh need under the filtered PATH, deriving
-# each location from `command -v` (no hardcoded bin dirs); node itself is left out:
-for tool in env bash sh git jq python3 cut dirname basename realpath mkdir; do
+# each location from `command -v` (no hardcoded bin dirs); node itself is left out.
+# #68: git comes from the shared resolution, NOT `command -v` — under a dogfood-armed PATH
+# the latter is the shim itself, and the symlanted shim loses its lib (broken install).
+for tool in env bash sh jq python3 cut dirname basename realpath mkdir; do
   d=$(command -v "$tool" 2>/dev/null) || continue
   ln -sf "$d" "$work/bin-nonode/$tool"
 done
+ln -sf "$smoke_real_git" "$work/bin-nonode/git"
 ln -sf "$work/bin/gh" "$work/bin-nonode/gh"
 out=$(PATH="$work/bin-nonode:$path_nonode" bash "$plugin/scripts/doctor.sh" 2>&1)
 rc=$?
@@ -2082,7 +2283,7 @@ expect "the pr-query-failure summary lists nothing for removal" \
 # unclassifiable, NEVER "ancient" — a negative signal must not drive deletion,
 # the same rule as the tracker. A git shim makes `log -1 --format=%ct` fail.
 logshim_dir="$work/git-log-shim"
-logshim_real=$(command -v git)
+logshim_real=$smoke_real_git
 mkdir -p "$logshim_dir"
 cat >"$logshim_dir/git" <<EOF
 #!/usr/bin/env bash
@@ -2127,7 +2328,7 @@ expect "the failing-age-probe summary lists nothing for removal" \
 # empty-on-failure as clean would let a negative signal drive deletion). A git shim
 # makes status fail.
 statshim_dir="$work/git-status-shim"
-statshim_real=$(command -v git)
+statshim_real=$smoke_real_git
 mkdir -p "$statshim_dir"
 cat >"$statshim_dir/git" <<EOF
 #!/usr/bin/env bash
@@ -2206,7 +2407,7 @@ expect "a second --apply changes nothing (idempotent)" "cleanup: 0 removed, 0 dr
 
 # Failed local branch delete (review folded 4): the worktree goes, and the
 # SURVIVING BRANCH is reported — never swallowed.
-real_git=$(command -v git)
+real_git=$smoke_real_git
 shim_dir="$work/git-shim"
 mkdir -p "$shim_dir"
 cat >"$shim_dir/git" <<EOF
@@ -2900,12 +3101,15 @@ n1_hv=$(grep -c 'merge 12' "$GH_CALLS" 2>/dev/null); n1_hv=${n1_hv:-0}
 expect "P3 smoke: the real gh never saw the value-spelled merge" "$n0_hv" "$n1_hv"
 # Control: the token immediately after the verb IS still the doc form — the shim is
 # TRANSPARENT (fake-gh does not implement repo delete, so pin the FORWARDING, not its rc).
-n0_hp=$(grep -c 'repo delete --help' "$GH_CALLS" 2>/dev/null); n0_hp=${n0_hp:-0}
+# #68 re-pin: forwarding is observed at the SHIM BOUNDARY, not in the fake tracker's log —
+# a script can no longer be "the real gh" by contract (compiled-artifact rule), so the
+# passthrough exec lands on the first COMPILED gh (here the system gh). A box without one
+# is a BROKEN test environment, not a pass: rc 0 and a help-content token are both
+# asserted, so the pin cannot pass vacuously (review round 1).
 out=$(p3gh repo delete --help 2>&1); rc=$?
-[ "$rc" -ne 126 ] && pass "P3 smoke: 'gh repo delete --help' (immediate token) is not shim-blocked" ||
-  fail "P3 smoke: the doc-form delete was blocked at the shim (rc $rc): $out"
-n1_hp=$(grep -c 'repo delete --help' "$GH_CALLS" 2>/dev/null); n1_hp=${n1_hp:-0}
-expect "P3 smoke: the doc-form delete was forwarded to the real gh" "$((n0_hp + 1))" "$n1_hp"
+expect "P3 smoke: 'gh repo delete --help' (immediate token) passes the shims to the real gh (rc)" "0" "$rc"
+printf '%s\n' "$out" | grep -qi "usage" && pass "P3 smoke: the doc-form help rendered past the shim (real gh answered)" ||
+  fail "P3 smoke: no help content from the real gh — the passthrough did not land: $out"
 n0_av=$(grep -c 'repo delete' "$GH_CALLS" 2>/dev/null); n0_av=${n0_av:-0}
 out=$(p3gh --api-version v4 repo delete o/r 2>&1); rc=$?
 expect "P3 smoke: 'gh --api-version v4 repo delete o/r' is DENIED (the value does not become the noun)" "126" "$rc"
@@ -2917,26 +3121,24 @@ out=$(p3gh repo --api-version v4 delete o/r 2>&1); rc=$?
 expect "P3 smoke: the mid-verb 'gh repo --api-version v4 delete o/r' is DENIED too" "126" "$rc"
 echo "$out" | grep -qF "DENIED gh:repo-delete:" || fail "P3 smoke: the mid-verb api-version spelling was not caught: $out"
 
-# 10. passthrough: the real git receives the argv UNTOUCHED (a logging stand-in for it,
-#     first non-shim dir on PATH; it still execs the system git so the work happens).
-mkdir -p "$work/p3-gitlog"
-# Round-7 must-fix: the stand-in must exec the git captured on the PRISTINE PATH, as an
-# ABSOLUTE path. Its own runtime PATH has the shim dir FIRST — a bare command lookup there
-# re-resolves to the SHIM, and the shim resolves this stand-in again: an infinite
-# shim→stand-in exec loop that grew argv.log without bound and hung the suite.
-REALGIT=$(command -v git)
-cat >"$work/p3-gitlog/git" <<EOF
-#!/usr/bin/env bash
-{ printf 'ARGV:'; printf ' [%s]' "\$@"; echo; } >>"$work/p3-gitlog/argv.log"
-exec "$REALGIT" "\$@"
-EOF
-chmod +x "$work/p3-gitlog/git"
-out=$(PATH="$PSH:$work/p3-gitlog:$PATH" git commit -m "two words" --allow-empty 2>&1)
-grep -qxF "ARGV: [commit] [-m] [two words] [--allow-empty]" "$work/p3-gitlog/argv.log" &&
-  pass "P3 smoke: the real git received the argv untouched (order, values, spelling)" ||
-  fail "P3 smoke: the real git saw mangled argv: $(cat "$work/p3-gitlog/argv.log" | tail -1)"
-PATH="$PSH:$work/p3-gitlog:$PATH" git status --porcelain >/dev/null
-grep -qxF "ARGV: [status] [--porcelain]" "$work/p3-gitlog/argv.log" &&
+# 10. passthrough: the real git receives the argv UNTOUCHED. #68 re-pin: a script stand-in
+#     can no longer sit in the resolution chain BY CONTRACT (the compiled-artifact rule is
+#     exactly "never hand a shim an interpreted script"), so the argv is observed the only
+#     other way it exists: git's own GIT_TRACE view of the argv it actually ran. Order and
+#     spelling come from the trace line; single-tokenness of the -m value from the resulting
+#     commit message (a quote-drop would hand git a pathspec, not a message).
+out=$(GIT_TRACE=1 PATH="$PSH:$PATH" git commit -m "two words" --allow-empty 2>&1)
+expect "P3 smoke: the mutation passes the shims and runs (rc)" "0" "$?"
+# git's trace quotes values the way it likes (single quotes for spaced values on 2.53);
+# strip quotes before comparing so the pin asserts ORDER + VALUES, not the printer's style.
+# Review round 1: the grep must match this invocation's argv (the trailing `commit -m`),
+# not any `git commit*` prefix — a commit-graph maintenance line must not hijack tail -1.
+tr_line=$(printf '%s\n' "$out" | grep -F "trace: built-in: git commit -m" | tail -1 | sed "s/'//g" | sed 's/^.*trace: /trace: /')
+expect "P3 smoke: the real git received the argv untouched (order, values, spelling)" \
+  "trace: built-in: git commit -m two words --allow-empty" "$tr_line"
+expect "P3 smoke: the -m value stayed one token (quoting intact)" "two words" "$(git log -1 --format=%s)"
+out=$(GIT_TRACE=1 PATH="$PSH:$PATH" git status --porcelain 2>&1)
+printf '%s\n' "$out" | grep -qF "trace: built-in: git status --porcelain" &&
   pass "P3 smoke: read-only git passes straight through (zero policy cost)" ||
   fail "P3 smoke: the read-only passthrough argv is wrong"
 

@@ -3,13 +3,21 @@
 # permission-policy spec 2026-11-09-multipi-permission-policy.md §4-L2, §5, §8.
 #
 # The shim is a WRAPPER, not a reimplementation: it resolves the real binary OUTSIDE the
-# shim dir (no recursion), collects ground truth (acting repo from rev-parse, refspec
-# facts from the real argv, ancestor scripts from /proc), consults the shared evaluator
-# through extension/src/policydriver.ts, and execs the real binary with argv untouched.
+# shim dir AND as a COMPILED ARTIFACT — no interpreted script ever passes, whatever its
+# dir or name (ticket #68: under a wrapped PATH the "first other executable" WAS another
+# wrapper, and the mutual exec spun one PID forever while holding a heavy slot). It
+# collects ground truth (acting repo from rev-parse, refspec facts from the real argv,
+# ancestor scripts from /proc), consults the shared evaluator through
+# extension/src/policydriver.ts, and execs the real binary with argv untouched.
 #
-# Exit codes (pinned; DECISIONS 2026-11-10): 126 = policy deny or ask (nothing executed —
-# phase-1 ask is a block; token consumption arrives with P6); 127 = the real binary cannot
-# be located outside the shim dir (broken install). Any other exit is the real binary's own.
+# Every shim→binary exec goes through `_shim_exec_real`, which bumps an env depth counter
+# (`_POLICYSHIM_DEPTH`) and refuses (exit 126) when the next hop would land above 3 —
+# the mutual-exec guard of record.
+#
+# Exit codes (pinned; DECISIONS 2026-11-10): 126 = policy deny or ask, or the
+# recursion-depth guard (nothing executed — phase-1 ask is a block; token consumption
+# arrives with P6); 127 = the real binary cannot be located outside the shim dir (broken
+# install). Any other exit is the real binary's own.
 #
 # Requires git >= 2.36 (rev-parse --path-format=absolute). On older git the probe errors,
 # resolution stays EMPTY and the shim denies the mutation (fail closed, never misresolves).
@@ -43,9 +51,23 @@ shim_init() {
   fi
 }
 
-# Print the real binary's path: the FIRST executable on PATH that is NOT inside the shim
-# dir (resolving outside the shim dir is what makes recursion impossible). rc 1 when no
-# such binary exists (the caller exits 127).
+# True when FILE (symlinks followed by the open itself) is a COMPILED ARTIFACT: its first
+# two bytes are not the `#!` script magic. A wrapper that is a symlink TO a script fails
+# too. FAIL-CLOSED: an empty or unreadable candidate is NOT a compiled artifact (a failed
+# read must reject — accepting on unreadable would admit exactly the wrappers we hunt).
+# Pure shell, wrapper-agnostic, no path-name knowledge (ticket #68 — the
+# path-whitelist alternative is rejected in DECISIONS 2026-11-17).
+shim_is_compiled() { # shim_is_compiled FILE
+  local f=$1 magic=''
+  [ -f "$f" ] || return 1
+  IFS= read -r -n 2 magic <"$f" 2>/dev/null || return 1
+  [ "$magic" != '#!' ]
+}
+
+# Print the real binary's path: the FIRST executable on PATH that is (a) NOT inside the
+# shim dir and (b) a COMPILED ARTIFACT (shim_is_compiled). Both conditions are belt and
+# braces against the same accident — a wrapper anywhere on PATH must never be handed back
+# as "the real binary" (ticket #68). rc 1 when no such binary exists (the caller exits 127).
 shim_find_real() {
   local want=$1 entry real
   local -a parts
@@ -55,12 +77,29 @@ shim_find_real() {
     [ -n "$entry" ] || continue
     real=$(cd "$entry" 2>/dev/null && pwd -P) || continue
     [ "$real" = "$SIM_SHIM_DIR" ] && continue
-    if [ -f "$real/$want" ] && [ -x "$real/$want" ]; then
+    if [ -f "$real/$want" ] && [ -x "$real/$want" ] && shim_is_compiled "$real/$want"; then
       printf '%s\n' "$real/$want"
       return 0
     fi
   done
   return 1
+}
+
+# The mutual-exec recursion guard (ticket #68): every shim→binary exec bumps an ENV depth
+# counter and refuses when the next hop would land ABOVE 3 (exit 126, one stderr line,
+# nothing executed). A sound chain is short — session → wrapper → shim → real binary lands
+# at 1–2; only wrapper-vs-wrapper mutual exec climbs (the 12-h spin, where every "real"
+# resolution was another wrapper). The counter is INTERNAL plumbing, deliberately not a
+# MULTIPI_* operator seam (DECISIONS 2026-11-17).
+_shim_exec_real() { # _shim_exec_real REALBIN ARGV...
+  local depth=${_POLICYSHIM_DEPTH:-0}
+  if [ $((depth + 1)) -gt 3 ]; then
+    echo "multipi policy: DENIED shim:recursion-depth: depth $((depth + 1)) would exceed 3 — refusing (mutual-exec loop guard)" >&2
+    exit 126
+  fi
+  _POLICYSHIM_DEPTH=$((depth + 1))
+  export _POLICYSHIM_DEPTH
+  exec "$@"
 }
 
 _shim_add_candidate() { # _shim_add_candidate PATH  — dedupe-append into _SIM_CANDS
