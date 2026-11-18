@@ -122,6 +122,17 @@ shim_find_real() {
 # MULTIPI_* operator seam (DECISIONS 2026-11-17).
 _shim_exec_real() { # _shim_exec_real REALBIN ARGV...
   local depth=${_POLICYSHIM_DEPTH:-0}
+  # #67 round-4: bash arithmetic parses its strings as EXPRESSIONS — a garbage inherited
+  # counter is not a silent no-op: "0x1" reads as HEX 1 (one less than it was), a 25-digit
+  # value wraps 64 bits back UNDER the bound, and a plain word crashes under set -u. Any
+  # of them voids the hard-refuse invariant. Coerce: ≤ 9 digits is the real counter (the
+  # loop itself never passes 3 — values beyond that only reach the guard via this check),
+  # > 9 digits is beyond the bound by construction (clamp, so wraparound is impossible),
+  # anything else is garbage → 0 (the guard stays armed for the hops that follow).
+  case "$depth" in
+    *[!0-9]*) depth=0 ;;
+  esac
+  [ ${#depth} -le 9 ] || depth=999
   if [ $((depth + 1)) -gt 3 ]; then
     echo "multipi policy: DENIED shim:recursion-depth: depth $((depth + 1)) would exceed 3 — refusing (mutual-exec loop guard)" >&2
     exit 126
