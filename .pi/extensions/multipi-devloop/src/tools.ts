@@ -60,14 +60,18 @@ export interface ToolContext {
 const DEFAULT_TOOL_TIMEOUT_MINUTES = 45;
 
 /**
- * Test seam for the single-construction pin (tools.test.ts): counts buildContext calls.
+ * Explicit test seam (tools.test.ts single-construction pin): counts buildContext calls.
  * The bound probe and the guarded run historically constructed the context TWICE per
  * bounded tool call (a config read + a git subprocess each); the pin asserts exactly one.
+ * One named object — production reads none of it (#65 round-4: no loose mutable exports).
  */
-export const contextBuilds = { count: 0 };
+export const testSeams = {
+	/** buildContext invocations (the single-construction pin counts deltas of this). */
+	contextBuilds: 0,
+};
 
 export function buildContext(cwd: string): ToolContext {
-	contextBuilds.count += 1;
+	testSeams.contextBuilds += 1;
 	const cfg = loadConfig(cwd);
 	if (!cfg) throw new Error(`no .devloop.json found at or above ${cwd}`);
 	const p = resolvePaths(cfg);
