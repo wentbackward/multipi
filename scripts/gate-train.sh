@@ -34,6 +34,7 @@ scripts_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # tests that exercise the armed posture.
 if [ "${MULTIPI_GATE_SCRUB_POLICY_SHIMS:-1}" != 0 ]; then
   PATH=$(dl_scrub_policy_shims "$PATH")
+  [ -n "$PATH" ] || dl_die "policy-shim scrub emptied PATH (every entry carried an interpreted git or gh — nothing left to run)"
   export PATH
 fi
 
