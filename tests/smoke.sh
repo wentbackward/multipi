@@ -406,7 +406,10 @@ emptbin="$work/emptbin"
 mkdir -p "$emptbin/gitshim" "$emptbin/ghshim"
 printf '#!/bin/bash\nexit 1\n' >"$emptbin/gitshim/git"; chmod +x "$emptbin/gitshim/git"
 printf '#!/bin/bash\nexit 1\n' >"$emptbin/ghshim/gh";    chmod +x "$emptbin/ghshim/gh"
-out=$(PATH="$emptbin/gitshim:$emptbin/ghshim" bash "$plugin/scripts/gate-train.sh" feat/1-first 2>&1)
+# env resolves the command with the NEW PATH (assignments first), so the interpreter
+# is named by absolute path — the outer PATH is intact here, this line runs before it isn't.
+abs_bash=$(command -v bash)
+out=$(env PATH="$emptbin/gitshim:$emptbin/ghshim" "$abs_bash" "$plugin/scripts/gate-train.sh" feat/1-first 2>&1)
 rc=$?
 expect "gate-train: a PATH the scrub empties entirely is the named error" "2" "$rc"
 echo "$out" | grep -qF "policy-shim scrub emptied PATH" && pass "the named scrub-emptied-PATH error is printed" ||
