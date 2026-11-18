@@ -278,7 +278,7 @@ echo 0 >"$lockdir/slot1.d/pid"
 touch -t 202001010000.00 "$lockdir/slot1.d"   # backdated: the sweep grace tick (#67) must not slow the pin
 # SLOTS=1: the ghosted slot is the ONLY slot, so acquisition (not a sibling slot) is what
 # proves the pid-0 lock reads as FREE.
-expect "heavy.sh (mkdir path, fresh) takes a slot whose pid file says 0" "0" \
+expect "heavy.sh (mkdir path) takes a slot whose pid file says 0" "0" \
   "$(MULTIPI_HEAVY_SLOTS=1 PATH="$stubbin:$PATH" timeout 30 bash "$plugin/scripts/heavy.sh" true >/dev/null 2>&1; echo $?)"
 [ ! -d "$lockdir/slot1.d" ] && pass "the pid-0 slot dir is swept at acquisition" ||
   fail "pid-0 slot dir left in place: $lockdir/slot1.d"
