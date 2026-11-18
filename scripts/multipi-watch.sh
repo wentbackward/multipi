@@ -36,7 +36,8 @@
 # Documented seams:
 #   MULTIPI_WATCH_TOOL_MS     integer ms; the tool-in-flight wake threshold (default 720000)
 #   MULTIPI_STATUS_STALE_MS   integer ms; the stale bound (default 120000; wedge = 5×)
-#   MULTIPI_WATCH_NOW_MS      integer epoch-ms; the issuing clock (same pattern as
+#   MULTIPI_WATCH_NOW_MS      integer epoch-ms (canonical decimal — a leading zero is
+#                             refused, never read as octal); the issuing clock (same pattern as
 #                             MULTIPI_APPROVE_NOW_MS) — tests drive wake choice without sleeping
 #   MULTIPI_INTERRUPT_TTY     the injection target override (shared with multipi-interrupt.sh)
 set -u
@@ -83,8 +84,16 @@ stale=$(int_or "${MULTIPI_STATUS_STALE_MS:-}" 120000)
 log="$DL_STATE/watch.log"
 mkdir -p "$DL_STATE" 2>/dev/null || true
 lv_now() {
+  # Returns 4 (NEVER exit) on a malformed seam: we run inside $(...) in every call site,
+  # where an exit would not kill the check and the corrupt clock would keep feeding
+  # silent comparisons (#78 found this latent hole on the NON-NUMERIC path too). A
+  # leading zero is malformed here: $((now - hb)) would crash ("value too great for
+  # base", 09) or read as epoch 8 ms (08 — every heartbeat looks fresh). The issuing
+  # clock is the STRICT seam (spec §4: a wrong clock silently skews every comparison).
   if [ -n "${MULTIPI_WATCH_NOW_MS:-}" ]; then
-    case "${MULTIPI_WATCH_NOW_MS}" in '' | *[!0-9]*) echo "multipi-watch: MULTIPI_WATCH_NOW_MS must be an integer ms" >&2; exit 4 ;; esac
+    case "${MULTIPI_WATCH_NOW_MS}" in
+      *[!0-9]* | 0[0-9]*) echo "multipi-watch: MULTIPI_WATCH_NOW_MS must be a canonical decimal integer ms (no leading zeros)" >&2; return 4 ;;
+    esac
     printf '%s' "${MULTIPI_WATCH_NOW_MS}"
   else
     date +%s%3N
@@ -98,7 +107,7 @@ wlog() { printf '%s %s\n' "$1" "$2" >>"$log" 2>/dev/null || true; }
 one_shot() {
   local now sc state pid tick ev hb toolseq toolname toolstart lastwakeseq
   local wedge_age tool_age kind min_n msg lw
-  now=$(lv_now)
+  now=$(lv_now) || return 4
   sc=$(lv_sidecar)
   if [ ! -f "$sc" ]; then
     wlog "$now" "IDLE:no-sidecar"
@@ -209,7 +218,7 @@ if [ "$daemon" = 1 ]; then
   while :; do
     if ! one_shot >>"$log" 2>&1; then
       # The daemon scopes ITS OWN timestamp: one_shot's `now` is local to the check.
-      wlog "$(lv_now)" "CHECK-FAILED"
+      wlog "$(lv_now || date +%s%3N)" "CHECK-FAILED"
     fi
     sleep "$interval"
   done

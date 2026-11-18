@@ -13,7 +13,8 @@
 # No arguments. No network: the script only reads the sidecar, /proc, /proc/meminfo and ps.
 #
 # Documented seams:
-#   MULTIPI_STATUS_STALE_MS  integer ms; the stale bound (default 120000)
+#   MULTIPI_STATUS_STALE_MS  integer ms (canonical decimal — a leading zero is refused,
+#                            never read as octal); the stale bound (default 120000)
 #   MULTIPI_STATUS_MEMINFO   /proc/meminfo path (default /proc/meminfo) — tests drive a
 #                            fabricated file; the line degrades to no figures when unreadable
 #   MULTIPI_STATUS_PI_PAT    ERE for the NO-SIDECAR process probe (default 'pi-coding-agent');
@@ -29,8 +30,11 @@ scripts_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 [ $# -eq 0 ] || { echo "usage: scripts/multipi-status.sh (no arguments)" >&2; exit 4; }
 dl_load_config
 [ -n "${DL_ROOT:-}" ] || { echo "multipi-status: not inside a git repository" >&2; exit 4; }
+# #78: a LEADING-ZERO bound (09) passes the all-digit gate, then bash honours it as 9 ms
+# — a fresh sidecar flips to WEDGE and the typo never surfaces. Spec §1a pins the stance:
+# malformed ⇒ rc 4. A non-canonical decimal is malformed: refuse it, never honour it.
 stale=${MULTIPI_STATUS_STALE_MS:-120000}
-case "$stale" in '' | *[!0-9]*) echo "multipi-status: MULTIPI_STATUS_STALE_MS must be an integer ms" >&2; exit 4 ;; esac
+case "$stale" in '' | *[!0-9]* | 0[0-9]*) echo "multipi-status: MULTIPI_STATUS_STALE_MS must be a canonical decimal integer ms (no leading zeros)" >&2; exit 4 ;; esac
 now=$(date +%s%3N)
 memsuffix=$(lv_mem_suffix "${MULTIPI_STATUS_MEMINFO:-/proc/meminfo}")
 
