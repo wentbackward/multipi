@@ -15,10 +15,12 @@ git config --global init.defaultBranch main
 mkdir -p "$work/bin" && ln -s "$plugin/tests/fake-gh" "$work/bin/gh"
 export PATH="$work/bin:$PATH"
 
-# Shared resolution rule from the policy shims (#68): this smoke runs in the dogfood-ARMED
-# environment (its PATH carries the policy-shims dir, so `command -v git` IS the shim),
-# and its git fixtures must resolve the real git the same wrapper-agnostic way the shims
-# do — never `command -v`. Sourcing the library is side-effect free.
+# Shared resolution rule from the policy shims (#68): its git fixtures must resolve the
+# real git the same wrapper-agnostic way the shims do — never `command -v`. The pin is
+# posture-agnostic: the sanctioned gate-driven run is SCRUBBED of the policy shims
+# (ticket #70, authority separation), while a smoke run inherited from a dogfood loop
+# session is ARMED (its PATH carries the policy-shims dir, so `command -v git` IS the
+# shim). Sourcing the library is side-effect free.
 shim_dir="$plugin/scripts/policy-shims"
 . "$shim_dir/lib/policyshim.sh"
 # Consumed across the file boundary: the sourced shim_find_real reads SIM_SHIM_DIR to anchor

@@ -116,7 +116,11 @@ is a seam; never introduce undocumented ones.
   reached. Only processes the loop spawns should carry these; an operator shell
   must not. A SET-but-unusable target (missing/unreadable/not executable) fails
   closed with exit 127 and NEVER falls back to the PATH scan; an EMPTY value is
-  unset.
+  unset. Like every env seam, the value is mutable by a descendant process's own
+  environment: a grandchild an agent spawns could point the seam at a script of
+  its own and steer its own process tree's resolution there — the named
+  best-effort limit, and the decision layer (and the refusal audit lines) still
+  run over whatever the shim resolved.
 
 **Config keys (`.devloop.json`):** `"factory"` (`"collaborative"` | `"dark"`, default
 `"collaborative"` — a preset that only sets defaults; an explicit option always wins), the
