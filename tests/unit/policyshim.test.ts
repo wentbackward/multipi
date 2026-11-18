@@ -323,3 +323,29 @@ test("a mutual-exec chain dies at the guard on hop 4 (the pre-fix infinite loop,
 	assert.match(nested.stdout, /hop4=126/, `hop 4 must be the refusal: ${nested.stdout}`);
 	assert.match(nested.stdout, /depth=3/, `hops 1–3 must reach depth 3: ${nested.stdout}`);
 });
+
+// --- #67 round-4: a GARBAGE inherited counter must not void the guard silently -------
+// Bash arithmetic parses its strings as EXPRESSIONS: "0x1" is hex 1 (the counter reads
+// one LESS than it was), and a 25-digit value wraps 64 bits back under the bound (a deep
+// chain refused nowhere). Both made the hard-refuse invariant a silent no-op.
+
+test("_shim_exec_real coerces a non-decimal inherited counter: 0x1 is HEX to bash arithmetic, not depth 1", () => {
+	const got = runShim(`_POLICYSHIM_DEPTH=0x1\n_shim_exec_real ${BASH} -c 'printf "%s" "$_POLICYSHIM_DEPTH"'`);
+	assert.equal(got.status, 0, `stderr: ${got.stderr}`);
+	assert.equal(got.stdout, "1", "garbage coerces to 0 and the exec bumps to 1 — bash's hex read (2 after the bump) must not win");
+});
+
+test("_shim_exec_real: a huge inherited counter cannot wrap 64 bits back under the bound (it still refuses)", () => {
+	// 1000016442979868502654978 = 2 + 54211·2⁶⁴: bash arithmetic wraps it to 2, so the
+	// unguarded comparison sees depth 2 and EXECUTES — the wrap voids the guard.
+	const got = runShim(`_POLICYSHIM_DEPTH=1000016442979868502654978\n_shim_exec_real ${BASH} -c 'echo SHOULD-NOT-RUN'`);
+	assert.equal(got.status, 126, `expected 126, got ${got.status}; stderr: ${got.stderr}`);
+	assert.equal(got.stdout, "", "the command must not run");
+	assert.match(got.stderr, /recursion/i, `the stderr line names the guard: ${got.stderr}`);
+});
+
+test("_shim_exec_real: a plain word inherited as the counter is garbage — coerced to 0, the exec proceeds at depth 1", () => {
+	const got = runShim(`_POLICYSHIM_DEPTH=recurse\n_shim_exec_real ${BASH} -c 'printf "%s" "$_POLICYSHIM_DEPTH"'`);
+	assert.equal(got.status, 0, `stderr: ${got.stderr}`);
+	assert.equal(got.stdout, "1", "a word is not a counter; coercion keeps the guard armed for the hops that follow");
+});
