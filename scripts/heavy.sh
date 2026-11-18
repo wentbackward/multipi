@@ -58,7 +58,7 @@ clean_stale_temp() {
   fi
   for entry in "$lock_dir"/slot*.d; do
     [ -d "$entry" ] || continue
-    slot_holder_dead "$entry" && rm -rf -- "$entry"
+    slot_sweepable "$entry" && rm -rf -- "$entry"
   done
 }
 
@@ -76,11 +76,34 @@ slot_holder_dead() { # slot_holder_dead LOCKDIR
   return 0
 }
 
-# have_flock: a flock that actually WORKS (name resolution alone is not enough — a broken
-# placeholder answers `command -v` but fails at use; the branch point must be behavioural,
-# ticket #68's no-flock test seam rides on this).
+# slot_sweepable LOCKDIR: a slot-lock dir may be REMOVED only when its owner is dead AND
+# the dir is at least one poll tick OLD. A holder between its `mkdir` and its
+# `echo $$ > pid` looks ownerless for a few microseconds — the grace tick closes that
+# window (ticket #67, review of #68 r3: the sweep racing a fresh dir would let two jobs
+# into one slot). Unstat-able dirs read as UNSWEEPABLE: the fail-safe direction (a stalled
+# queue is recoverable by deletion; a double-acquire is not). `stat -c %Y` (GNU) and
+# `stat -f %m` (BSD) cover both platforms the mkdir path exists for.
+slot_sweepable() { # slot_sweepable LOCKDIR
+  local mt
+  slot_holder_dead "$1" || return 1
+  mt=$(stat -c %Y "$1" 2>/dev/null) || mt=$(stat -f %m "$1" 2>/dev/null) || return 1
+  [ $(( $(date +%s) - mt )) -ge "$poll_seconds" ]
+}
+
+# have_flock: a flock that actually WORKS. The probe performs the SAME operation the slot
+# locks perform — a non-blocking exclusive acquisition on a scratch file via an inherited
+# fd — because a NAME check is not a capability check: `flock --version` is missing from a
+# working busybox flock (the old probe silently downgraded it to the mkdir path, ticket
+# #67) and a broken placeholder answers `command -v` but fails at use (ticket #68). The
+# scratch file is per-pid and deleted afterwards; the lock is released with the subshell.
 have_flock() {
-  command -v flock >/dev/null 2>&1 && flock --version >/dev/null 2>&1
+  local f rc
+  command -v flock >/dev/null 2>&1 || return 1
+  f="${TMPDIR:-/tmp}/.multipi-have-flock.$$.tmp"
+  ( flock -n 9 ) 9>>"$f"
+  rc=$?
+  rm -f "$f"
+  return "$rc"
 }
 
 # have_memory_cap: true when systemd can run a transient user scope with a memory limit.
@@ -131,8 +154,11 @@ try_slot_mkdir() {
   # A holder SIGKILLed mid-hold (EXIT trap skipped) leaves its dir with a dead pid — or no
   # pid file at all; either way the lock reads as FREE. The startup sweep (clean_stale_temp)
   # already ran BEFORE this slot was taken, so a WAITING instance must re-check at
-  # acquisition, or it polls the ghost forever (ticket #68).
-  if [ -d "$d" ] && slot_holder_dead "$d"; then
+  # acquisition, or it polls the ghost forever (ticket #68). The check is
+  # slot_sweepable, not slot_holder_dead: a FRESH ownerless dir may belong to a holder
+  # between its mkdir and its pid write, and sweeping it is the sub-ms double-acquire of
+  # ticket #67 — the grace tick (>= poll_seconds old) closes the window.
+  if [ -d "$d" ] && slot_sweepable "$d"; then
     rm -rf -- "$d"
   fi
   if mkdir "$d" 2>/dev/null; then
