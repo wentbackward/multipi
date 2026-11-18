@@ -247,6 +247,88 @@ expect "gate-train stops on a conflict and names the branch" "3 TRAIN rebase con
 
 git checkout -q main
 
+# --- gate-train.sh x policy-shim PATH scrub (ticket #70) ---------------------------
+# Authority separation: the dogfood policy-shims protect the loop's SESSIONS; they must
+# never veto the loop's own verification. A wrapper dir whose git and gh are INTERPRETED
+# scripts (2-byte #! magic — the shim signature) stands in for the armed
+# scripts/policy-shims dir. The gate (the loop's arbiter) runs with those dirs scrubbed
+# from PATH by default; MULTIPI_GATE_SCRUB_POLICY_SHIMS=0 restores the armed PATH.
+scrub() { bash -c ". \"$plugin/scripts/lib/common.sh\" && dl_scrub_policy_shims \"$*\"" 2>/dev/null; }
+scrubbin="$work/scrubbin"
+mkdir -p "$scrubbin/git-script" "$scrubbin/gh-script" "$scrubbin/real-bin" "$scrubbin/linkdir"
+printf '#!/bin/bash\nexit 1\n' >"$scrubbin/git-script/git"; chmod +x "$scrubbin/git-script/git"
+printf '#!/bin/bash\nexit 1\n' >"$scrubbin/gh-script/gh"; chmod +x "$scrubbin/gh-script/gh"
+printf 'MZ' >"$scrubbin/real-bin/git"     # compiled stand-in: its first two bytes are not #!
+ln -s "$scrubbin/git-script/git" "$scrubbin/linkdir/git"
+expect "scrub drops an entry whose git is an interpreted script" "/usr/bin" \
+  "$(scrub "/usr/bin:$scrubbin/git-script")"
+expect "scrub drops an entry whose gh (alone) is an interpreted script" "/usr/bin" \
+  "$(scrub "/usr/bin:$scrubbin/gh-script")"
+expect "scrub drops an entry reaching the interpreted git through a symlink" "/usr/bin" \
+  "$(scrub "/usr/bin:$scrubbin/linkdir")"
+expect "scrub keeps an entry whose git is compiled" "/usr/bin:$scrubbin/real-bin" \
+  "$(scrub "/usr/bin:$scrubbin/real-bin")"
+expect "scrub keeps an entry with neither git nor gh" "/usr/bin:$scrubbin" "$(scrub "/usr/bin:$scrubbin")"
+expect "scrub drops every shim entry and keeps the rest in order" "/usr/bin" \
+  "$(scrub "$scrubbin/gh-script:/usr/bin:$scrubbin/git-script")"
+expect "scrub tolerates an empty PATH" "" "$(scrub "")"
+expect "scrub tolerates empty PATH entries" "/usr/bin" "$(scrub ":/usr/bin:")"
+
+# End-to-end: the gate-train invoked with the wrapper dir PREPENDED to PATH. The probe
+# check records the CHECK ENVIRONMENT's git (checks run from the gate worktree cwd, so
+# gitprobe.txt lands in the gate dir); the wrapper git marks itself and execs the real
+# git, so an armed run still completes — the marker proves WHO served the git calls.
+realgit=$(command -v git)
+shimbin="$work/shimbin"
+mkdir -p "$shimbin"
+printf '#!/bin/bash\ntouch "%s/shim-git-hit"\nexec "%s" "$@"\n' "$work" "$realgit" >"$shimbin/git"
+printf '#!/bin/bash\ntouch "%s/shim-gh-hit"\nexit 127\n' "$work" >"$shimbin/gh"
+chmod +x "$shimbin/git" "$shimbin/gh"
+git checkout -q -B feat/20-scrub origin/main
+cat >.devloop.json <<EOF
+{
+  "base_branch": "main",
+  "fast_check": "test ! -e fast-fail",
+  "checks": [
+    {"name": "unit", "command": "./check.sh", "summary": "passed|failed"},
+    {"name": "gitprobe", "command": "type -P git > gitprobe.txt && head -c 2 gitprobe.txt", "heavy": false}
+  ],
+  "heavy": {"slots": 2, "port_env": "SMOKE_PORT", "port_base": 9100, "port_step": 10, "poll_seconds": 1}
+}
+EOF
+git add -A && git commit -q -m "test: gate git-probe check (Refs #20)" && git push -q -u origin feat/20-scrub
+rm -f "$work/shim-git-hit" "$work/shim-gh-hit" "$work/home/project/train-green.txt" "$gate/gitprobe.txt"
+out=$(PATH="$shimbin:$PATH" bash "$plugin/scripts/gate-train.sh" feat/20-scrub 2>&1)
+rc=$?
+echo "$out"
+expect "wrapper-shim PATH prepended: the default (scrubbed) gate still gates green" "0" "$rc"
+expect "the check's environment sees the COMPILED git, not the armed wrapper" "$realgit" \
+  "$(cat "$gate/gitprobe.txt" 2>/dev/null)"
+[ "$(head -c 2 "$gate/gitprobe.txt" 2>/dev/null)" != "#!" ] &&
+  pass "the check's git is not an interpreted script" ||
+  fail "the check's git carries the #! magic (wrapper not scrubbed)"
+[ ! -e "$work/shim-git-hit" ] && pass "the armed wrapper git was never executed" ||
+  fail "the armed wrapper git executed despite the default scrub"
+[ -f "$work/home/project/train-green.txt" ] &&
+  pass "the scrubbed green train wrote its record" || fail "the scrubbed train wrote no green record"
+
+# Seam off (0): the armed PATH is honored end to end — the check's git IS the wrapper,
+# and the wrapper DID serve the gate's own git calls (scrub point precedes them all).
+rm -f "$work/shim-git-hit" "$work/shim-gh-hit" "$work/home/project/train-green.txt" "$gate/gitprobe.txt"
+out=$(PATH="$shimbin:$PATH" MULTIPI_GATE_SCRUB_POLICY_SHIMS=0 bash "$plugin/scripts/gate-train.sh" feat/20-scrub 2>&1)
+rc=$?
+echo "$out"
+expect "seam-off: the armed posture is honored and the train still gates green" "0" "$rc"
+expect "seam-off: the check's git IS the armed wrapper" "$shimbin/git" \
+  "$(cat "$gate/gitprobe.txt" 2>/dev/null)"
+[ -e "$work/shim-git-hit" ] && pass "seam-off: the armed wrapper served the gate's git calls" ||
+  fail "seam-off: the armed wrapper never ran"
+rm -f "$work/shim-git-hit" "$work/shim-gh-hit"
+
+# Restore the fixture config (the gate reads the main-root config from disk) and the branch.
+cp "$work/.smoke-devloop-backup" .devloop.json
+git checkout -q main
+
 # --- gate-train.sh x scenario stage (dark-factory spec §5) ----------------------
 # Store OFF: the train behaves exactly as before and the stage is never invoked.
 [ ! -f "$work/home/project/logs/train-scenarios.log" ] &&
@@ -2233,7 +2315,7 @@ diff -q "$plugin/skills/devloop/SKILL.md" "$plugin/.pi/skills/devloop/SKILL.md" 
 # The documented seams, config keys, the guard's honest limits and the runbook are
 # rg-asserted here: prose that decays silently is how loops lose their contracts.
 agents_md="$plugin/AGENTS.md"
-for seam in MULTIPI_CHILD_ROLE MULTIPI_SCENARIO_FILE MULTIPI_SCENARIO_ID MULTIPI_SCENARIO_TARGET MULTIPI_LIST_LAG_RETRY_MS; do
+for seam in MULTIPI_CHILD_ROLE MULTIPI_SCENARIO_FILE MULTIPI_SCENARIO_ID MULTIPI_SCENARIO_TARGET MULTIPI_LIST_LAG_RETRY_MS MULTIPI_GATE_SCRUB_POLICY_SHIMS; do
   grep -qF "$seam" "$agents_md" && pass "AGENTS.md names the $seam env seam" ||
     fail "AGENTS.md is missing the $seam env seam"
 done
