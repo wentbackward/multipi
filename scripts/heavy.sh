@@ -12,7 +12,16 @@
 # entries to delete), heavy.clean_temp_minutes (120), heavy.poll_seconds (10).
 # Environment: MULTIPI_LOCK_DIR overrides the lock directory, MULTIPI_HEAVY_SLOTS the slot count.
 set -u
-scripts_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# Pure-bash bootstrap (no dirname, no pwd(1)): a PATH that an upstream actor
+# scrubbed or emptied entirely carries no coreutils, and the named dl_die must
+# still be reachable (alignment with gate-train.sh, the ticket #67 form; #76
+# item 2). The cd runs in a SUBSHELL — the script's cwd must stay where the
+# operator called it.
+case "${BASH_SOURCE[0]}" in
+  */*) _sd=${BASH_SOURCE[0]%/*} ;;
+  *) _sd=. ;;
+esac
+scripts_dir=$(cd -- "$_sd" && printf '%s' "$PWD")
 # shellcheck source=lib/common.sh
 . "$scripts_dir/lib/common.sh"
 
