@@ -3614,6 +3614,20 @@ echo "$LV_LINE" | grep -qiF "wedge" && pass "status rc 2 line names the WEDGE" |
 mkstate idle 200000 0 0
 lvstatus MULTIPI_STATUS_STALE_MS=999999
 expect "status honours MULTIPI_STATUS_STALE_MS (200 s heartbeat under a 1000 s bound is not stale)" "1" "$LV_RC"
+# #78 (the #76 canonical-form class, first sibling gate): a LEADING-ZERO bound passes the
+# all-digit gate, then bash honours "09" as 9 ms — a fresh sidecar flips to WEDGE (rc 2)
+# and the operator's typo never surfaces. Spec §1a pins the stance: malformed ⇒ rc 4.
+# A leading zero IS malformed: refuse it; never silently honour bash's reading.
+mkstate active 1000 0 0
+lvstatus MULTIPI_STATUS_STALE_MS=09
+expect "status rc 4: a leading-zero MULTIPI_STATUS_STALE_MS is refused (pre-fix '09' was honoured as 9 ms and this FRESH sidecar reported WEDGE)" "4" "$LV_RC"
+echo "$LV_LINE" | grep -qF "MULTIPI_STATUS_STALE_MS" && pass "status rc 4 names the offending seam" || fail "status rc 4 line: $LV_LINE"
+mkstate active 200000 0 0
+lvstatus MULTIPI_STATUS_STALE_MS=09
+expect "status rc 4: the stale-sidecar case is a refusal too (never a silent state claim)" "4" "$LV_RC"
+mkstate active 200000 0 0
+lvstatus MULTIPI_STATUS_STALE_MS=0
+expect "status honours the CANONICAL zero (the arm is 0[0-9]* — bare '0' stays legal)" "2" "$LV_RC"
 mkstate ended 1000 0 0
 lvstatus
 expect "status rc 3: state ended is dead" "3" "$LV_RC"
@@ -3813,6 +3827,27 @@ expect "watch: 09 reads as the documented default (120000 ms) — the 61 s heart
   "1" "$(grep -cF ' HEALTHY' "$wl" 2>/dev/null)"
 [ -s "$WK" ] && fail "a leading-zero stale bound wedged anyway (09 was honoured as octal 9 ms)" \
   || pass "watch: a leading-zero stale bound fell back to the default (no wedge)"
+# #78 (the #76 canonical-form class, second sibling gate): MULTIPI_WATCH_NOW_MS shares the
+# hazard — "08" passes the all-digit gate, then $((now - hb)) crashes ("value too great
+# for base") or reads as epoch 8 ms: EVERY heartbeat looks fresh, so a 200 s-silent
+# orchestrator logs HEALTHY with the rc 0 success line hiding the corrupt clock. The
+# issuing clock is the STRICT seam (spec §4: a wrong clock silently skews every
+# comparison): a leading zero IS malformed → rc 4, never a silent corrupt clock.
+lvfresh
+mkstate active 200000 0 0
+lvwatch MULTIPI_WATCH_NOW_MS=08
+expect "watch rc 4: a leading-zero MULTIPI_WATCH_NOW_MS is refused (pre-fix '08' read as epoch 8 ms made the 200 s heartbeat look fresh)" "4" "$LV_RC"
+echo "$LV_LINE" | grep -qF "MULTIPI_WATCH_NOW_MS" && pass "watch rc 4 names the offending seam" || fail "watch rc 4 line: $LV_LINE"
+lvfresh
+mkstate active 200000 0 0
+lvwatch MULTIPI_WATCH_NOW_MS=09
+expect "watch rc 4: MULTIPI_WATCH_NOW_MS=09 (invalid octal) is refused too — no mid-check arithmetic crash" "4" "$LV_RC"
+echo "$LV_LINE" | grep -qF "value too great for base" && fail "the arithmetic crash noise leaked into the output" \
+  || pass "watch rc 4 prints no 'value too great for base' crash noise"
+lvfresh
+mkstate active 1000 0 0
+lvwatch
+expect "watch rc 0: after the refusals, a plain healthy check is a clean no-op (nothing poisoned)" "0" "$LV_RC"
 rm -f "$LVSC"
 lvwatch
 expect "watch rc 5: no sidecar (the daemon self-idles)" "5" "$LV_RC"
