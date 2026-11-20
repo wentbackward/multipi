@@ -316,11 +316,13 @@ test("every residual-pin opening is parseable by the title scanner — an unpars
 	const src = fs.readFileSync(new URL(import.meta.url), "utf8");
 	const strictTitles = [...src.matchAll(/^test\("(.*)", \(\)/gm)].map((m) => m[1]);
 	const strictResiduals = strictTitles.filter((t) => /^residual \d/.test(t));
-	// Tolerant opener: the word `test`, a paren, ANY whitespace (incl. newlines), then a
-	// quote- or backtick-delimited title starting with `residual <digit>`. The strict
-	// scanner's own regex literal in this file does not match it (the paren is spelled
+	// Tolerant opener: `test`, ANY whitespace (incl. newlines) on EITHER side of the opening
+	// paren, then a quote- or backtick-delimited title starting with `residual <digit>`. #97
+	// closed the paren-side hole: `test ( "…"` is legal JS, and the pre-fix pattern only
+	// tolerated whitespace AFTER the paren, so that form stayed silent to both scans. The
+	// strict scanner's own regex literal in this file does not match it (the paren is spelled
 	// escaped in the literal), so this count is not self-inflated.
-	const lenientCount = [...src.matchAll(/test\(\s*["`]residual \d/g)].length;
+	const lenientCount = [...src.matchAll(/test\s*\(\s*["`]residual \d/g)].length;
 	assert.equal(
 		lenientCount,
 		strictResiduals.length,
