@@ -20,6 +20,36 @@ import { redactActionSummary, ACTION_SUMMARY_MAX } from "../../extension/src/pol
  * Offline: it spawns the local `bash` against the repo's own script — no network.
  * Corpus is ASCII except where a multi-byte case is marked (short of the bound, so
  * byte-wise vs code-point-wise matching is locale-insensitive there).
+ *
+ * KNOWN RESIDUALS — three accepted engine divergences outside the corpus. The
+ * byte-identity above is total OVER THE CORPUS, not over the whole input space;
+ * in every residual the shim scrubs AT LEAST as much as the TS engine, so the
+ * literal token-dir core is removed by both and none of them is a leak. Each is
+ * pinned by an exact-literal test below: if an engine is ever aligned, amend that
+ * test AND this note in the same change.
+ *
+ * 1. ASTRAL-PLANE COUNTING (pre-existing, DECISIONS.md 2026-11-14): astral-plane
+ *    characters count 1 in a UTF-8 bash but 2 UTF-16 units in TS, so the two engines
+ *    may cut a few characters apart on emoji-heavy strings crossing the bound.
+ *    Direction is symmetric (either may cut slightly sooner); both outputs stay
+ *    valid, bounded UTF-8.
+ *
+ * 2. UNICODE WHITESPACE IN THE SPAN CLASS (the #55 review-tail residual, NBSP case
+ *    pinned below): JS `\s` and POSIX `[:space:]` diverge — glibc does not put U+00A0
+ *    in `[:space:]` even under C.utf8, so `~/.m/dev-loop-tokens\u00A0tail` yields
+ *    `x <token-dir>\u00A0tail` in TS but `x <token-dir>` in the shim; U+2028 adds a
+ *    C-locale-scoped divergence (glibc's C `[:space:]` is ASCII-only). Direction is
+ *    asymmetric: the shim OVER-scrubs (it eats the whitespace-separated tail that TS
+ *    keeps) — more removed, never less.
+ *
+ * 3. TRAILING NEWLINE (the #55 review-tail residual, pinned below): the shim's
+ *    `s=$(…)` substitutions (scripts/policy-shims/lib/policyshim.sh — a pre-existing
+ *    pattern, the sed line predates the consolidation branch) strip a trailing
+ *    newline from the summary while the TS redactor preserves it. Direction is
+ *    asymmetric: the shim DROPS the line terminator; the scrub itself is identical,
+ *    so the shim never prints material the TS engine would not have. Low-value input
+ *    for a fallback audit line — kept as an accepted documented difference, not
+ *    aligned.
  */
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
