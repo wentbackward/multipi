@@ -68,7 +68,7 @@ Label note: the `dl/*` labels (`dl/in-progress`, `dl/in-review`, `dl/approved`, 
 
 1. `<target>/scripts/doctor.sh` — must print `doctor: ready` with zero MISSING.
 2. `bash <target>/tests/smoke.sh` when the plugin's own tests are present (dogfood) — offline proof.
-3. In a fresh pi session in the target: `devloop.status` answers, and `devloop.dispatch` refuses a
+3. In a fresh pi session in the target: `devloop_status` answers, and `devloop_dispatch` refuses a
    bogus role with the list of real ones. (Both are cheap; no tickets are created.)
 
 Done. Hand back to the `devloop` skill: it creates the tickets from the spec and keeps the loop

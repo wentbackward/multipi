@@ -29,7 +29,7 @@ unblocked requirements*; it stops only for stop conditions.
 | Per-role GitHub identities (apps, rulesets, `as-role.sh`) | Out. The loop works under the user's own `gh` login. Documented as a later addition. |
 | `test-engineer` role | Out. The implementer writes failing tests first; the reviewer verifies each acceptance criterion has a behaviour test. Revisit only if weakened tests are observed in practice. |
 | Local ticket folder / other ticketing backends | Out. GitHub issues are the ticket system in v1. The orchestrator's ticket vocabulary (list/create/comment/close/view/label) is kept narrow so a different backend is a later adapter, not a rewrite. |
-| Live steering of running children (RPC mid-turn messaging) | Out. In-flight requirement changes go through: edit issue → `devloop.cancel` → re-dispatch. Documented as a v2 option (§8.4). |
+| Live steering of running children (RPC mid-turn messaging) | Out. In-flight requirement changes go through: edit issue → `devloop_cancel` → re-dispatch. Documented as a v2 option (§8.4). |
 
 ## 2. Architecture
 
@@ -53,11 +53,11 @@ Five tools, grouped in a `devloop` namespace:
 
 | Tool | Parameters | Behaviour |
 |---|---|---|
-| `devloop.dispatch` | `{role: "implementer"|"code-reviewer"|"verifier", ticket?, branch?, worktree?, task?, notes?}` | Spawns the role as an isolated headless `pi -p --no-session --mode json` subprocess with the role's system prompt (`agents/<role>.md`) via `--append-system-prompt`, cwd = the ticket's worktree. Streams the child's tool calls and text via `onUpdate` (visible in the user's TUI). Returns the child's final report + usage. For `implementer`: deterministically computes the branch name (`<type>/<n>-<slug>`), creates the worktree on the latest base (or a dependency branch), allocates a port range outside the gate's range, resolves the notes file path, and assembles the full brief from the template + config. The orchestrator supplies the *ticket*, not the paths. Enforces ≤3 in-flight implementers via a state file (survives restarts): a fourth concurrent dispatch is **refused** with the list of in-flight tickets (the orchestrator re-issues once a report lands; children are blocking, so slots free as reports arrive). If the ticket's worktree/branch already exists (a re-dispatch after cancel or crash), dispatch reuses it instead of recreating it. |
-| `devloop.cancel` | `{ticket}` | Kills one running child (SIGTERM, SIGKILL after 5s) recorded in the dispatch state file (pid + worktree per ticket), frees its slot. The worktree and its commits survive; re-dispatch resumes. |
-| `devloop.gate` | `{branches: string[]}` (merge order) | Wraps `scripts/gate-train.sh`. Stacks the approved branches on the latest base in the gate worktree, runs every configured check once (heavy ones through `heavy.sh`). Structured result: `{status: "green"|"red"|"conflict", branch?, failures[{check, summary}], logs: <path>}`. Script exit codes: 0 green, 1 red (incl. `gate_setup` failure, log kept), 2 usage/config, 3 rebase conflict (branch named in output). |
-| `devloop.merge` | `{branches: string[]}` (same order as the gate) | Wraps `scripts/merge-train.sh`. Replays each branch on the current base, verifies the replayed tree is *exactly* the gated tree, pushes, opens the PR from the notes file, squash-merges, deletes the branch. Structured per-branch outcome + exit-code meaning surfaced to the model. Script exit codes: 0 all merged, 2 usage/config, 3 replay conflict, 4 tree differs from the gated one (re-gate), 5 notes file missing, 6 branch changed since the gate, 7 PR not merged / gh failed, 8 not gated green. |
-| `devloop.status` | — | Derived snapshot, for restart-recovery and user reporting: open issues with phase labels, worktrees, in-flight dispatches (from the state file), last gate result. Everything is derivable from GitHub + git + state file; nothing is stored that cannot be reconstructed. |
+| `devloop_dispatch` | `{role: "implementer"|"code-reviewer"|"verifier", ticket?, branch?, worktree?, task?, notes?}` | Spawns the role as an isolated headless `pi -p --no-session --mode json` subprocess with the role's system prompt (`agents/<role>.md`) via `--append-system-prompt`, cwd = the ticket's worktree. Streams the child's tool calls and text via `onUpdate` (visible in the user's TUI). Returns the child's final report + usage. For `implementer`: deterministically computes the branch name (`<type>/<n>-<slug>`), creates the worktree on the latest base (or a dependency branch), allocates a port range outside the gate's range, resolves the notes file path, and assembles the full brief from the template + config. The orchestrator supplies the *ticket*, not the paths. Enforces ≤3 in-flight implementers via a state file (survives restarts): a fourth concurrent dispatch is **refused** with the list of in-flight tickets (the orchestrator re-issues once a report lands; children are blocking, so slots free as reports arrive). If the ticket's worktree/branch already exists (a re-dispatch after cancel or crash), dispatch reuses it instead of recreating it. |
+| `devloop_cancel` | `{ticket}` | Kills one running child (SIGTERM, SIGKILL after 5s) recorded in the dispatch state file (pid + worktree per ticket), frees its slot. The worktree and its commits survive; re-dispatch resumes. |
+| `devloop_gate` | `{branches: string[]}` (merge order) | Wraps `scripts/gate-train.sh`. Stacks the approved branches on the latest base in the gate worktree, runs every configured check once (heavy ones through `heavy.sh`). Structured result: `{status: "green"|"red"|"conflict", branch?, failures[{check, summary}], logs: <path>}`. Script exit codes: 0 green, 1 red (incl. `gate_setup` failure, log kept), 2 usage/config, 3 rebase conflict (branch named in output). |
+| `devloop_merge` | `{branches: string[]}` (same order as the gate) | Wraps `scripts/merge-train.sh`. Replays each branch on the current base, verifies the replayed tree is *exactly* the gated tree, pushes, opens the PR from the notes file, squash-merges, deletes the branch. Structured per-branch outcome + exit-code meaning surfaced to the model. Script exit codes: 0 all merged, 2 usage/config, 3 replay conflict, 4 tree differs from the gated one (re-gate), 5 notes file missing, 6 branch changed since the gate, 7 PR not merged / gh failed, 8 not gated green. |
+| `devloop_status` | — | Derived snapshot, for restart-recovery and user reporting: open issues with phase labels, worktrees, in-flight dispatches (from the state file), last gate result. Everything is derivable from GitHub + git + state file; nothing is stored that cannot be reconstructed. |
 
 Two hooks:
 
@@ -122,22 +122,22 @@ Flow (owned by the `devloop` skill):
 2. **Schedule.** ≤3 implementers at once, one ticket each; a ticket starts when its dependencies
    are merged (or may stack on a dependency's pushed branch). Pair tickets that touch different
    areas. After every merge or report, start the next ticket immediately — no pausing to report.
-3. **Implement.** `devloop.dispatch {role: implementer, ticket}` (parallel tool calls give the
+3. **Implement.** `devloop_dispatch {role: implementer, ticket}` (parallel tool calls give the
    concurrency; the tool enforces the cap).
-4. **Review.** On green report + pushed branch: `devloop.dispatch {role: code-reviewer, branch}`.
+4. **Review.** On green report + pushed branch: `devloop_dispatch {role: code-reviewer, branch}`.
    Loop to APPROVE per §3.
-5. **Gate.** One or more approved → `devloop.gate [b1 b2 ...]` in merge order (heavy job; the
+5. **Gate.** One or more approved → `devloop_gate [b1 b2 ...]` in merge order (heavy job; the
    orchestrator continues other work while it runs where practical).
    - GREEN → merge.
    - RED → never merge. Re-run once (flake vs failure). Still red → bisect the train (half, then
      rest), send the culprit's log excerpt to its implementer, gate the rest without it, issue for
      a real flake.
    - CONFLICT at bn → drop it, gate/merge the rest, implementer rebases on the new base, re-gate.
-6. **Merge.** `devloop.merge [same branches, same order]`. Base moved (exit 4) → re-gate first.
+6. **Merge.** `devloop_merge [same branches, same order]`. Base moved (exit 4) → re-gate first.
    Afterwards: remove merged worktrees, comment on issues, close via `Closes #n`, start next tickets.
    Stacked branches rebase `--onto` after the lower merges, never carrying foreign commits.
 7. **Run & verify.** A merged ticket that adds/changes a job: run it for real (background if long),
-   record result on the issue, `devloop.dispatch {role: verifier}` on the outputs. Deploy only when
+   record result on the issue, `devloop_dispatch {role: verifier}` on the outputs. Deploy only when
    the user is not actively using the system.
 8. **Decide & stop.** Spec silence → decide, log, continue. Stop and ask Paul only for:
    missing/rejected credentials; a paid action above the project cost cap; a spec contradiction
@@ -148,7 +148,7 @@ Flow (owned by the `devloop` skill):
    commits, issues, PRs or prompts.
 
 Restart-recovery: on session start the skill reads AGENTS.md, the spec, `.devloop.json`,
-`docs/DECISIONS.md`, runs `doctor.sh`, then `devloop.status` to find work in flight (labels,
+`docs/DECISIONS.md`, runs `doctor.sh`, then `devloop_status` to find work in flight (labels,
 worktrees, state file) before starting anything new.
 
 ## 5. Project config: `.devloop.json`
@@ -169,7 +169,7 @@ the gate), `gate_setup`, `gate_worktree` (default `../<repo>-gate`), `notes_dir`
 `Task: <brief>` as the prompt, cwd = worktree, `stdio` pipes; stdout consumed as newline-delimited
 JSON events (`message_end`, `tool_result_end`) for streaming + usage aggregation. Model defaults to
 the parent session's model and thinking level (overridable per agent frontmatter). Aborts:
-`ctx.signal` (parent Ctrl+C or `devloop.cancel`) → SIGTERM, SIGKILL after 5s. Invocation resolution
+`ctx.signal` (parent Ctrl+C or `devloop_cancel`) → SIGTERM, SIGKILL after 5s. Invocation resolution
 follows the pi subagent example (re-execute `process.argv[1]` when it is the pi entry script).
 
 ### 6.2 Context a child builds from
@@ -197,7 +197,7 @@ comment; the stop-gate won't spin on it; the orchestrator reports to the user.
 ### 6.4 In-flight changes & interruption
 
 - Global: Ctrl+C kills all running children (signal propagation).
-- Selective: `devloop.cancel {ticket}`.
+- Selective: `devloop_cancel {ticket}`.
 - Requirement change in flight: edit the issue (source of truth) → cancel → re-dispatch. The
   resumed child re-reads the ticket first; invalidated partial work is discarded per brief and the
   decision logged in `docs/DECISIONS.md`. Audit trail = issue history + commits + decisions log.
@@ -215,7 +215,7 @@ comment; the stop-gate won't spin on it; the orchestrator reports to the user.
 | Merge tree mismatch / base moved | Branch aborts cleanly (exit 2 / 4); nothing merges silently; re-gate required. |
 | Stop-gate exhaustion | Gives up after `max_blocks` consecutive blocks, says so on stderr→model, allows the stop; expects an issue describing the blocker. |
 | Extension handler errors | Reported by pi, fail-closed where a safety decision is involved (e.g. format hook failure does not corrupt the file; stop-gate failure → allow stop, report error). |
-| Restart mid-loop | `devloop.status` reconstructs phase from labels + worktrees + state file; stale state-file entries (dead pids) are pruned on read. |
+| Restart mid-loop | `devloop_status` reconstructs phase from labels + worktrees + state file; stale state-file entries (dead pids) are pruned on read. |
 
 ## 8. v2 options (documented, not built)
 
@@ -295,7 +295,7 @@ session must become tickets without leaving the loop.
   forbidden by the role prompt and produce no loop state.
 - Disposition: free-form like the verifier — NO ticket required, consumes NO implementer
   capacity slot, runs at the repo root (read-only).
-- Two modes via `devloop.dispatch` params:
+- Two modes via `devloop_dispatch` params:
   - `spec: "<path>"` — decompose the spec into a complete ordered ticket plan.
   - `focus: "<text>"` — turn operator feedback into 1–3 tickets.
 - Key: `analyst-<slug>` (slug = `branchSlug(basename(spec))` or `operator-feedback`); a second
@@ -331,7 +331,7 @@ running children (unchanged).
 Observed in live operation and added without changing any pinned contract above (label
 vocabulary, exit codes, state-file shape, gate/merge semantics all unchanged).
 
-**`devloop.pause` — operator checkpoint.** Interrupts every running child (SIGTERM to the
+**`devloop_pause` — operator checkpoint.** Interrupts every running child (SIGTERM to the
 whole process tree; worktrees and branches kept), writes `HANDOFF.md` to the notes dir
 (per-child positions — ticket, branch, elapsed, worktree HEAD, dirty-file count — plus the
 open-board snapshot at that instant), and comments each interrupted ticket with a one-line
@@ -392,7 +392,7 @@ observed live in two projects), then on WHOLE-TEXT scans (an analyst plan quotin
 **Worktree lifecycle.** `worktree_dir` (config; default `~/.multipi/<repo>/worktrees/<repo>`,
 absolute / `~/` / relative-to-repo-parent) holds all issue worktrees
 (`<dir>/issue-<ticket>`) and, by default, the gate worktree (`<dir>/gate`). Re-dispatch
-reuses the worktree recorded in the dispatch entry. `devloop.merge` removes each merged
+reuses the worktree recorded in the dispatch entry. `devloop_merge` removes each merged
 branch's worktree when its tree is clean (dirty ⇒ kept and reported). `scripts/
 cleanup-worktrees.sh [--apply] [repo]` collects ticket-worktree litter with consent semantics (dark-factory
 spec §1/§6): without `--apply` it prints removal candidates as DRYRUN and deletes nothing; with `--apply` it

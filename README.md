@@ -16,26 +16,26 @@ Derived from [`wentbackward/claude-dev-loop`](https://github.com/wentbackward/cl
 ## How it works
 
 ```
-spec ──► devloop.dispatch analyst ──► ticket plan (ordered, falsifiable criteria)
+spec ──► devloop_dispatch analyst ──► ticket plan (ordered, falsifiable criteria)
            │                              │ orchestrator raises them
            ▼                              ▼
    GitHub issues (acceptance criteria, Depends on #n)
            │
            ▼
-   devloop.dispatch ──► role child: pi -p --no-session --mode json
+   devloop_dispatch ──► role child: pi -p --no-session --mode json
                         (own worktree, own ports, notes file, STATUS: report)
            │
            ▼
-   devloop.dispatch code-reviewer ──► VERDICT: APPROVE / CHANGES REQUIRED
+   devloop_dispatch code-reviewer ──► VERDICT: APPROVE / CHANGES REQUIRED
            │
            ▼
-   devloop.gate [branches…]      one full check run per train (red ⇒ nothing merges)
+   devloop_gate [branches…]      one full check run per train (red ⇒ nothing merges)
            │
            ▼
-   devloop.merge [branches…]     replay ⇒ tree==gated ⇒ ordered squash ⇒ close issues
+   devloop_merge [branches…]     replay ⇒ tree==gated ⇒ ordered squash ⇒ close issues
            │
            ▼
-   devloop.dispatch verifier     audit real outputs; anomalies become new tickets
+   devloop_dispatch verifier     audit real outputs; anomalies become new tickets
            ▲
    user feedback in session ────┘ (steering: every request becomes a ticket, §skill 8)
 ```
@@ -43,7 +43,7 @@ spec ──► devloop.dispatch analyst ──► ticket plan (ordered, falsifia
 The stop-gate hook (`agent_before_settle`) makes "keep going while work is startable" a
 harness property, not a discipline: red fast check → continue (bounded), dirty tree →
 continue (bounded), startable ticket + free slot → continue (unbounded). While a
-`devloop.dispatch` call is running, the child streams progress into the tool output
+`devloop_dispatch` call is running, the child streams progress into the tool output
 (elapsed, tokens, cost, current activity — `[implementer 12:03 · tok 132k · $1.44 ·
 bash: npm test:unit]`), so a long wait is observable, not opaque.
 
@@ -64,7 +64,7 @@ Each ticket's work lives in its **own worktree**, and the loop owns its full lif
 worktrees sit in one directory per project (`worktree_dir`, default
 `~/.multipi/<repo>/worktrees/<repo>/` — so the repo's parent directory holds a single entry
 instead of one folder per ticket), a child re-dispatch resumes in the same worktree, and
-`devloop.merge` **removes the worktree when the train it belonged to merges** (a dirty
+`devloop_merge` **removes the worktree when the train it belonged to merges** (a dirty
 worktree is kept — uncommitted work is never destroyed to tidy a directory). Litter left by
 earlier versions is collected with `scripts/cleanup-worktrees.sh [repo]`, which only removes
 clean worktrees whose branch is already gone from the remote.
@@ -73,12 +73,12 @@ clean worktrees whose branch is already gone from the remote.
 
 | Tool | What it does |
 |---|---|
-| `devloop.dispatch` | `{role, ticket}` (implementer) / `{role, ticket}` (reviewer) / `{role, task, worktree?}` (verifier) / `{role, spec}` or `{role, focus}` (analyst — spec decomposition or feedback-to-tickets; no ticket, no capacity slot, plan lands in the notes dir). Computes branch, worktree, ports, notes path and the full brief; enforces the concurrency cap; labels the ticket as it goes. |
-| `devloop.cancel` | Kill one child by ticket. Worktree and branch are kept; re-dispatch resumes. |
-| `devloop.pause` | Operator pause: interrupt every running child (worktrees kept), write `HANDOFF.md` (per-child positions + board snapshot) to the notes dir, and comment each interrupted ticket. A fresh session resumes from the handoff (skill step 0.3). |
-| `devloop.gate` | `{branches}` — stack on latest base in the gate worktree, run every configured check once. green / red / conflict(branch) / error. |
-| `devloop.merge` | `{branches}` — replay, verify tree == gated tree, squash each PR in order, delete branches. Refusals are informative, never silent. |
-| `devloop.status` | In-flight children, open tickets with `dl/` labels, capacity, last green gate. |
+| `devloop_dispatch` | `{role, ticket}` (implementer) / `{role, ticket}` (reviewer) / `{role, task, worktree?}` (verifier) / `{role, spec}` or `{role, focus}` (analyst — spec decomposition or feedback-to-tickets; no ticket, no capacity slot, plan lands in the notes dir). Computes branch, worktree, ports, notes path and the full brief; enforces the concurrency cap; labels the ticket as it goes. |
+| `devloop_cancel` | Kill one child by ticket. Worktree and branch are kept; re-dispatch resumes. |
+| `devloop_pause` | Operator pause: interrupt every running child (worktrees kept), write `HANDOFF.md` (per-child positions + board snapshot) to the notes dir, and comment each interrupted ticket. A fresh session resumes from the handoff (skill step 0.3). |
+| `devloop_gate` | `{branches}` — stack on latest base in the gate worktree, run every configured check once. green / red / conflict(branch) / error. |
+| `devloop_merge` | `{branches}` — replay, verify tree == gated tree, squash each PR in order, delete branches. Refusals are informative, never silent. |
+| `devloop_status` | In-flight children, open tickets with `dl/` labels, capacity, last green gate. |
 
 ## Hooks
 
@@ -116,7 +116,7 @@ What that does (idempotent — re-run after a `git pull` in multipi to update):
 - `scripts/` → copied into the target and **versioned with the target** (the deterministic
   backbone: doctor, gate-train, merge-train, heavy queue).
 - `extension/` → `.pi/extensions/multipi-devloop/` in the target — pi loads project extensions
-  on session start, so the five `devloop.*` tools and both hooks are simply present.
+  on session start, so the five `devloop_*` tools and both hooks are simply present.
 - `agents/*.md` → `.pi/agents/` (role prompts, analyst/implementer/code-reviewer/verifier) **and** a copy
   bundled inside the extension (fallback when the project layer is absent).
 - `skills/` → `.pi/skills/devloop` + `.pi/skills/devloop-setup` (visible via pi's skill picker).
@@ -141,7 +141,7 @@ make check    # tsc --noEmit + node unit tests + shellcheck (loud warning if abs
 ```
 
 Fully offline. A live end-to-end pass needs API access: open a pi session in a managed
-repo and run `devloop.status`, then dispatch a trivial ticket.
+repo and run `devloop_status`, then dispatch a trivial ticket.
 
 ## Field record (this repo runs its own loop)
 

@@ -2991,7 +2991,7 @@ echo "$out" | grep -qF "DENIED oneshot:unresolvable-target:" && pass "P3 smoke: 
 # 3b. gate-hang regression (post-approval review): the node-availability probe must never
 #     READ STDIN. A bare `node` inherits the caller's stdin (REPL/script read); under the
 #     gate that stdin is the open orchestrator execFile pipe, so the probe blocked forever
-#     and devloop.gate never resolved. Pin offline: the SAME foreign deny must land, well
+#     and devloop_gate never resolved. Pin offline: the SAME foreign deny must land, well
 #     before the feeder closes, when the mutation runs against an OPEN stdin pipe.
 t0=$(date +%s)
 out=$( (cd "$work/p3-foreign" && PATH="$PSH:$PATH" git commit -q --allow-empty -m x) < <(sleep 15) 2>&1); rc=$?
@@ -3637,7 +3637,7 @@ mkstate() {
   local state=$1 hbag=$2 seq=$3 sag=$4 pid=${5:-$LVPID} now tool=null
   now=$(if [ -n "${LV_NOW:-}" ]; then printf '%s' "$LV_NOW"; else date +%s%3N; fi)
   mkdir -p "$lvstate"
-  [ "$seq" -gt 0 ] && tool="{\"name\":\"devloop.gate\",\"startedAt\":$((now - sag)),\"seq\":$seq}"
+  [ "$seq" -gt 0 ] && tool="{\"name\":\"devloop_gate\",\"startedAt\":$((now - sag)),\"seq\":$seq}"
   printf '{"schema":1,"sessionId":"smoke","pid":%s,"state":"%s","tool":%s,"lastEventAt":%s,"lastTickAt":%s,"lastWakeSeq":-1}\n' \
     "$pid" "$state" "$tool" "$((now - hbag))" "$((now - hbag))" >"$LVSC"
 }
@@ -3846,7 +3846,7 @@ mkstate active 1000 1 780000   # tool in flight 13 min — BEFORE the 45-min bou
 LV_WAKE_OUT=$(lvwatch); rc=$LV_RC
 expect "watch rc 0: a 13-min tool is woken (not left to the 45-min bound)" "0" "$LV_RC"
 expect "watch: the exact WAKE line (the tool named, 13 min)" \
-  "WAKE (multipi-watch): devloop.gate has been in flight 13min. If it is wedged, say so and abort/retry; otherwise continue." \
+  "WAKE (multipi-watch): devloop_gate has been in flight 13min. If it is wedged, say so and abort/retry; otherwise continue." \
   "$(head -1 "$WK" 2>/dev/null)"
 expect "watch log: the WAKE is recorded at the seam's clock" "1" "$(grep -c '^1000000000000 WAKE' "$wl" 2>/dev/null)"
 expect "watch: the sidecar's lastWakeSeq watermark moved to the woken seq" "1" "$(lvget lastWakeSeq)"
@@ -4054,7 +4054,7 @@ const pi = { registered: [], handlers: {}, commands: [], registerTool(t) { this.
 const mod = await import(process.env.MULTIPI_PLUGIN_DIR + "/extension/index.ts");
 if (typeof mod.default !== "function") { console.error("extension default export is not a factory"); process.exit(1); }
 mod.default(pi);
-const want = ["devloop.dispatch", "devloop.cancel", "devloop.pause", "devloop.gate", "devloop.merge", "devloop.status"].join(",");
+const want = ["devloop_dispatch", "devloop_cancel", "devloop_pause", "devloop_gate", "devloop_merge", "devloop_status"].join(",");
 if (pi.registered.join(",") !== want) { console.error("registered tools:", pi.registered.join(",")); process.exit(1); }
 for (const ev of ["agent_before_settle", "tool_result", "session_start", "session_tree"]) {
   if (typeof pi.handlers[ev] !== "function") { console.error("missing hook:", ev); process.exit(1); }

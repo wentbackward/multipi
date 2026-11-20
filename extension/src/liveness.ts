@@ -1,7 +1,7 @@
 /**
  * Orchestrator liveness (spec 2026-11-15 §1/§2). The pure-node half of the liveness surface:
  * the JSON sidecar at <state dir>/orchestrator-state.json, the status render decisions behind
- * scripts/multipi-status.sh, and the withTimeout bound behind every devloop.* tool call.
+ * scripts/multipi-status.sh, and the withTimeout bound behind every devloop_* tool call.
  *
  * Dependency rule (AGENTS.md): pure-node — NO pi imports. Only index.ts talks to pi events;
  * the operators' bash scripts talk to the sidecar via scripts/lib/liveness.sh. Both sides are
@@ -207,10 +207,10 @@ export function resolveToolTimeoutMs(configMinutes: number, env: NodeJS.ProcessE
 	return Math.round(configMinutes * 60000);
 }
 
-/** The exact reconciliation text a timed-out devloop.* tool resolves with (spec §2). Minute-scale
+/** The exact reconciliation text a timed-out devloop_* tool resolves with (spec §2). Minute-scale
  * bounds render `<N>m` (the spec's pin); sub-minute seam bounds render `<N>s` so the line never
  * claims "0m". */
 export function timeoutText(name: string, ms: number): string {
 	const dur = ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}s` : `${Math.round(ms / 60_000)}m`;
-	return `${name} timed out after ${dur} — external state (branch, worktree, child) is UNTOUCHED; check scripts/multipi-status.sh and devloop.status, then retry or devloop.cancel <ticket>.`;
+	return `${name} timed out after ${dur} — external state (branch, worktree, child) is UNTOUCHED; check scripts/multipi-status.sh and devloop_status, then retry or devloop_cancel <ticket>.`;
 }

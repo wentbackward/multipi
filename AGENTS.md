@@ -67,7 +67,7 @@ bootstrap another project, the **`devloop-setup` skill**.
   `MULTIPI_STATUS_PI_PAT`). `scripts/multipi-interrupt.sh [--dry-run] "message"` force-sends
   a message into a wedged session (rc 0 injected · 4 usage · 5 no live session · 6 no TTY —
   prints the kill-and-resume fallback; a TTY paste, not an RPC: a detached terminal is
-  unreachable, that is the honest limit). Every `devloop.*` tool call is bounded by
+  unreachable, that is the honest limit). Every `devloop_*` tool call is bounded by
   `orchestrator.tool_timeout_minutes` (default 45; `MULTIPI_TOOL_TIMEOUT_MS` overrides,
   0 = disabled) and resolves with the reconciliation text on expiry. The watchdog
   (`scripts/multipi-watch.sh --daemon`, auto-started by TUI sessions, single-instance

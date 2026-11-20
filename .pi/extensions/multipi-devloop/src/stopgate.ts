@@ -95,7 +95,7 @@ export function evaluateStopGate(i: StopGateInputs): StopGateDecision {
 		return {
 			action: "block",
 			bumpCounter: false,
-			message: `${startable} ticket(s) are startable (unblocked, dependencies closed) and a dispatch slot is free (running ${i.running}/${i.cap}). Keep going: dispatch them with devloop.dispatch, gate and merge what is dl/gated.`,
+			message: `${startable} ticket(s) are startable (unblocked, dependencies closed) and a dispatch slot is free (running ${i.running}/${i.cap}). Keep going: dispatch them with devloop_dispatch, gate and merge what is dl/gated.`,
 		};
 	}
 	return { action: "pass" };
@@ -142,7 +142,7 @@ export function runFastCheck(command: string | null, cwd: string): Promise<{ pas
 	return new Promise((resolve) => {
 		// Spawning (rather than execFile, whose options ignore `stdio` in Node 24) with stdin
 		// "ignore": a check that reads stdin (REPL, `read`) must see immediate EOF, never a pipe
-		// the parent holds open for the entire run — that hung devloop.gate (see #48/#41).
+		// the parent holds open for the entire run — that hung devloop_gate (see #48/#41).
 		const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
 		// As in execFile: maxBuffer is enforced per stream; the tail combines stdout then stderr.
 		const out = collectStream(child.stdout!, FAST_CHECK_MAX_BUFFER, () => child.kill("SIGTERM"));
