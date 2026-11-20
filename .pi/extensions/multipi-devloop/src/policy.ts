@@ -546,8 +546,12 @@ export function evaluate(policy: Policy, ctx: PolicyContext): PolicyDecision {
 export const ACTION_SUMMARY_MAX = 160;
 /** The rule id an ask with no matched rule escalates under (structural-id family). */
 export const RULE_POSTURE_ASK = "posture:ask";
-/** `~` is LITERAL in the token-dir convention — every spelling of home is scrubbed (spec §8). */
-const TOKEN_DIR_RE = /(~|\$HOME|\$\{HOME\}|\/)[^\s"'`|;&<>]*dev-loop-tokens[^\s"'`|;&<>]*/g;
+/** `~` is LITERAL in the token-dir convention — every spelling of home is scrubbed (spec §8).
+ * The redaction contract (this regex, the bound, the line formatters, the redactor) lives ONCE
+ * here (ticket #55): the hook re-exports it, the driver imports it, and the shell mirror in
+ * scripts/policy-shims/lib/policyshim.sh is locked to it by the equivalence pin
+ * (tests/unit/shim-redact-equiv.test.ts). */
+export const TOKEN_DIR_RE = /(~|\$HOME|\$\{HOME\}|\/)[^\s"'`|;&<>]*dev-loop-tokens[^\s"'`|;&<>]*/g;
 
 /** The deny line — the exact tripwire shape the P2 hook pins: `DENIED <rule-id>: <reason>`. */
 export function formatPolicyDeny(d: PolicyDecision): string {
@@ -562,7 +566,8 @@ export function formatPolicyAsk(d: PolicyDecision, actionSummary: string): strin
 
 /** Log hygiene (spec §8): scrub token-dir paths (every home spelling); substitute the
  * scenario-store dir with `<store>` when the caller supplies one (no store paths in action
- * summaries — the hook's redactSummary has the same duty); then bound the summary. */
+ * summaries — the hook and the driver both funnel through THIS function); then bound the
+ * summary. */
 export function redactActionSummary(summary: string, storeDir?: string | null): string {
 	let out = summary.replace(TOKEN_DIR_RE, "<token-dir>");
 	if (storeDir && out.includes(storeDir)) out = out.split(storeDir).join("<store>");

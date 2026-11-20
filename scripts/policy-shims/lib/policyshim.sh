@@ -281,15 +281,72 @@ _shim_json_escape() { # minimal JSON string escaper for the fallback audit line
   printf '%s' "$s"
 }
 
+# Find a locale in which bash counts CHARACTERS: é must measure as 1. Called LAZILY by
+# `_shim_redact_summary` — at most once per process, and only when the truncation branch
+# first needs it: every git/gh shim invocation sources this lib, so a source-time probe
+# paid 1-2 child-bash forks on the hot path for a feature the happy path never reaches
+# (#55 review round-2 SF1). Result is cached in SHIM_UTF8_LOCALE (flag SHIM_UTF8_PROBED);
+# empty = none found (the documented byte-based fallback in _shim_redact_summary).
+_shim_pick_utf8_locale() {
+  local probe=$'\xc3\xa9' cand
+  for cand in C.UTF-8 C.utf8; do
+    if LC_ALL="$cand" bash -c '[ "${#1}" -eq 1 ]' _ "$probe" 2>/dev/null; then
+      printf '%s' "$cand"
+      return
+    fi
+  done
+  printf ''
+}
+
 # Minimal mirror of the driver's redactActionSummary for the ONE path that bypasses it:
 # scrub the token-dir shape and bound the length (a commit message may carry a token path
 # and the fallback line must not print it raw — P3 review round-6 should-fix).
+# LOCKED to extension/src/policy.ts by the equivalence pin (tests/unit/shim-redact-equiv.
+# test.ts, #55): identical adversarial input must yield byte-identical output.
+#
+# The bound counts CHARACTERS, decided under a PINNED UTF-8 locale — never the caller's:
+# under a C locale ${#s}/${s:0:160} count BYTES and cut mid-UTF-8-sequence (a lone 0xB6
+# tail — an undecodable audit line; #55 review SF1, reproduced). The probe picks a locale
+# in which bash counts characters (C.UTF-8 / C.utf8). The probe is evaluated LAZILY —
+# on the first call that actually needs it, cached per process — never at source time
+# (#55 review round-2 SF1: every shim invocation sources this lib, and only the
+# driver-broken fallback path ever truncates). If NO candidate is found it degrades to
+# the historical byte-based bound — documented fallback, only on systems without any
+# UTF-8 locale (the output can then split a sequence, as before).
 _shim_redact_summary() {
   local s=$1
-  # Double-quoted program: the class excludes whitespace, both quotes, backtick and the
-  # shell meta set — the token-path shape the driver's TOKEN_DIR_RE scrubs.
-  s=$(printf '%s' "$s" | sed -E "s#(~|\$HOME|\$\{HOME\}|/)[^[:space:]\"'\`|;&<>]*dev-loop-tokens[^[:space:]\"'\`|;&<>]*#<token-dir>#g")
-  s=${s:0:160}
+  # ERE mirrors the TS TOKEN_DIR_RE: (~ | literal $HOME | literal ${HOME} | /), a span
+  # excluding whitespace, both quotes, backtick and the shell meta set, over the
+  # token-dir name. The program is built with $'...' so the backslashes reach sed
+  # VERBATIM: in the old double-quoted string `\$` collapsed to a bare $, which mid-ERE
+  # is the END-OF-LINE anchor — the $HOME/${HOME} alternatives silently never matched
+  # (the latent desync the equivalence pin exists to catch). Bound = 160 chars cut with
+  # the ellipsis mark, the TS truncation shape.
+  local re
+  re=$'(~|\\$HOME|\\$\\{HOME\\}|/)[^[:space:]"\'`|;&<>]*dev-loop-tokens[^[:space:]"\'`|;&<>]*'
+  s=$(printf '%s' "$s" | sed -E "s#${re}#<token-dir>#g")
+  # The gate under the caller's locale never MISSES a needed cut: a byte-counting (C)
+  # locale over-counts (superset trigger), a char-counting locale counts the same
+  # characters the pinned locale does. The DECISION itself happens in a child bash
+  # under the pinned UTF-8 locale, where ${#s}/${s:0:160} count characters and a
+  # sequence can never be split. A C-locale caller therefore sees the same answer the
+  # TS engine makes (the pin drives LC_ALL=C over the whole corpus). Astral-plane
+  # strings (emoji & co.) count 1 here but 2 UTF-16 units in TS, so for those the two
+  # engines may differ by a few chars — both outputs stay valid, bounded UTF-8.
+  if [ "${#s}" -gt 160 ]; then
+    # Lazy init: probe the UTF-8 locale on first NEED, cache per process. The flag is
+    # separate from SHIM_UTF8_LOCALE because an EMPTY locale (no candidate) is a valid,
+    # already-probed answer and must not re-trigger the probe.
+    if [ -z "${SHIM_UTF8_PROBED:-}" ]; then
+      SHIM_UTF8_PROBED=1
+      SHIM_UTF8_LOCALE=$(_shim_pick_utf8_locale)
+    fi
+    if [ -n "$SHIM_UTF8_LOCALE" ]; then
+      s=$(LC_ALL="$SHIM_UTF8_LOCALE" bash -c 'if [ "${#1}" -gt 160 ]; then printf "%s…" "${1:0:160}"; else printf "%s" "$1"; fi' _ "$s")
+    else
+      s="${s:0:160}…"
+    fi
+  fi
   printf '%s' "$s"
 }
 
@@ -316,6 +373,9 @@ shim_audit_fallback() { # shim_audit_fallback RULEID VERDICT SUMMARY
       # MAIN root). The shim deliberately does not dl_load_config — its helpers call bare
       # `git`, which would re-enter the shimmed binary — so set the resolver context
       # locally for this call only.
+      # dl_resolve/dl_canonical read DL_ROOT from the CALLER's scope (dynamic scope, no
+      # subshell) — this local assignment IS the mechanism, hence the suppression.
+      # shellcheck disable=SC2034
       local DL_ROOT=$main
       logs=$(dl_canonical "$(dl_resolve "$configured")")
     fi

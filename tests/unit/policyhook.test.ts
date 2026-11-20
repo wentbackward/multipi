@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { loadPolicy } from "../../extension/src/policy.ts";
+import * as sharedPolicy from "../../extension/src/policy.ts";
+import * as hookModule from "../../extension/src/policyhook.ts";
 import {
 	ACTION_SUMMARY_MAX,
 	createPolicyEnforcer,
@@ -294,6 +297,49 @@ test("write paths are matched against the Edit rules (write binds to the Edit fa
 		const res = f.onToolCall({ toolName: "write", input: { path: ".env", content: "x" }, sessionId: null });
 		assert.equal(res?.block, true, "writing .env trips the Edit rule via ./ normalization");
 	} finally { c.fx.cleanup(); }
+});
+
+// --- the redaction contract has ONE source (ticket #55) ----------------------
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+test("no live code or test references the removed hook-local redactSummary (#55 review: the stale name stays dead)", () => {
+	// The hook's pre-#55 name `redactSummary` died when the contract moved to policy.ts
+	// (`redactActionSummary`). A surviving reference in live code or a test comment keeps
+	// a dead symbol teachable and drift-inducing — scan the layers that emit the contract.
+	// docs/DECISIONS.md is deliberately out of scope: its entries are historical record.
+	// Recursive readdir yields DIRECTORY names too (lib/): filter to regular files or
+	// readFileSync dies with EISDIR.
+	const files = ["tests/smoke.sh"];
+	const scan = (rel: string): void => {
+		for (const entry of readdirSync(path.join(ROOT, rel))) {
+			const abs = path.join(rel, entry);
+			if (statSync(path.join(ROOT, abs)).isDirectory()) scan(abs);
+			else files.push(abs);
+		}
+	};
+	scan("scripts/policy-shims");
+	scan("extension/src");
+	for (const f of files) {
+		assert.ok(!/\bredactSummary\b/.test(readFileSync(path.join(ROOT, f), "utf8")),
+			`${f}: references the removed symbol redactSummary (the shared name is redactActionSummary)`);
+	}
+});
+
+test("the hook's redaction contract IS the shared policy.ts contract (identity, not a copy, #55)", () => {
+	// Referential identity: the hook must RE-EXPORT the shared bindings. A copy (even an
+	// identical-looking one) would defeat the point — a one-line drift in one place would
+	// silently desynchronise redaction between the hook and the driver/shim layers.
+	assert.equal(hookModule.ACTION_SUMMARY_MAX, sharedPolicy.ACTION_SUMMARY_MAX, "the bound is the shared constant");
+	assert.equal(hookModule.RULE_POSTURE_ASK, sharedPolicy.RULE_POSTURE_ASK, "the posture-ask id is the shared constant");
+	assert.equal(hookModule.TOKEN_DIR_RE, sharedPolicy.TOKEN_DIR_RE, "the token-dir regex is the shared object");
+	assert.equal(hookModule.formatPolicyDeny, sharedPolicy.formatPolicyDeny, "the deny line formatter is the shared function");
+	assert.equal(hookModule.formatPolicyAsk, sharedPolicy.formatPolicyAsk, "the ask line formatter is the shared function");
+	assert.equal(hookModule.redactActionSummary, sharedPolicy.redactActionSummary, "the redactor is the shared function");
+	// The pre-#55 hook-local names are gone: nothing may re-mint the contract under a second name.
+	for (const stale of ["redactSummary", "formatDeny", "formatAsk"] as const) {
+		assert.ok(!(stale in hookModule), `the triplicated name ${stale} must not survive in policyhook`);
+	}
 });
 
 // --- summary hygiene + failure containment ------------------------------------
