@@ -20,6 +20,37 @@ import { redactActionSummary, ACTION_SUMMARY_MAX } from "../../extension/src/pol
  * Offline: it spawns the local `bash` against the repo's own script — no network.
  * Corpus is ASCII except where a multi-byte case is marked (short of the bound, so
  * byte-wise vs code-point-wise matching is locale-insensitive there).
+ *
+ * KNOWN RESIDUALS — three accepted engine divergences outside the corpus. The
+ * byte-identity above is total OVER THE CORPUS, not over the whole input space.
+ * In every residual the token-dir SCRUB itself is identical (the literal core is
+ * removed by both engines); where the divergence is asymmetric (residuals 2 and 3)
+ * the shim removes at least as much as the TS engine — never less. None of these is
+ * a leak. Each is pinned by an exact-literal test below: if an engine is ever
+ * aligned, amend that test AND this note in the same change.
+ *
+ * 1. ASTRAL-PLANE COUNTING (pre-existing, DECISIONS.md 2026-11-14): astral-plane
+ *    characters count 1 in a UTF-8 bash but 2 UTF-16 units in TS, so the two engines
+ *    may cut a few characters apart on emoji-heavy strings crossing the bound.
+ *    Direction is symmetric (either may cut slightly sooner); both outputs stay
+ *    valid, bounded UTF-8.
+ *
+ * 2. UNICODE WHITESPACE IN THE SPAN CLASS (the #55 review-tail residual, NBSP case
+ *    pinned below): JS `\s` and POSIX `[:space:]` diverge — glibc does not put U+00A0
+ *    in `[:space:]` even under C.utf8, so `~/.m/dev-loop-tokens\u00A0tail` yields
+ *    `x <token-dir>\u00A0tail` in TS but `x <token-dir>` in the shim; U+2028 adds a
+ *    C-locale-scoped divergence (glibc's C `[:space:]` is ASCII-only). Direction is
+ *    asymmetric: the shim OVER-scrubs (it eats the whitespace-separated tail that TS
+ *    keeps) — more removed, never less.
+ *
+ * 3. TRAILING NEWLINE (the #55 review-tail residual, pinned below): the shim's
+ *    `s=$(…)` substitutions (scripts/policy-shims/lib/policyshim.sh — a pre-existing
+ *    pattern, the sed line predates the consolidation branch) strip a trailing
+ *    newline from the summary while the TS redactor preserves it. Direction is
+ *    asymmetric: the shim DROPS the line terminator; the scrub itself is identical,
+ *    so the shim never prints material the TS engine would not have. Low-value input
+ *    for a fallback audit line — kept as an accepted documented difference, not
+ *    aligned.
  */
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -111,6 +142,42 @@ test("representative outputs are the LITERAL contract (the engines cannot drift 
 	// Multi-byte over the bound: the cut counts CHARACTERS, never bytes.
 	assert.equal(shimRedact(CORPUS[19].input), CORPUS[19].input, "byte-long but char-short: untouched");
 	assert.equal(shimRedact(CORPUS[20].input), "\u00e9".repeat(ACTION_SUMMARY_MAX) + "\u2026", "175 chars cut to 160 + ellipsis");
+});
+
+test("residual 1: NBSP stops the TS span (JS \\s) but not the shim span (POSIX [:space:]) — the shim OVER-scrubs (#55 review-tail)", () => {
+	// glibc puts U+00A0 in NO [:space:] (not even under C.utf8) while JS \\s matches it:
+	// the TS span halts AT the NBSP, the shim span swallows it and the tail with it.
+	// Pinned under the default locale AND a C-locale caller — the direction is the same
+	// everywhere: the shim removes MORE, never less (no raw token-dir core in either).
+	for (const extraEnv of [{}, { LC_ALL: "C", LANG: "C" }] as NodeJS.ProcessEnv[]) {
+		const input = "x ~/.m/dev-loop-tokens\u00A0tail";
+		assert.equal(redactActionSummary(input, null), "x <token-dir>\u00A0tail", "TS: \\s stops the span at NBSP");
+		assert.equal(shimRedact(input, extraEnv), "x <token-dir>", "shim: [:space:] lacks NBSP — the span eats the tail");
+	}
+});
+
+test("residual 1 (scope): U+2028 diverges ONLY for a C-locale caller, same over-scrub direction (#55 review-tail)", () => {
+	const input = "x ~/.m/dev-loop-tokens\u2028tail";
+	assert.equal(redactActionSummary(input, null), "x <token-dir>\u2028tail", "TS: \\s matches U+2028");
+	assert.equal(
+		shimRedact(input, { LC_ALL: "C", LANG: "C" }),
+		"x <token-dir>",
+		"C-locale caller: [:space:] is ASCII-only, the span eats the tail",
+	);
+	// NB: under a UTF-8 ambient locale glibc DOES put U+2028 in [:space:], so the engines
+	// agree there — the residual is C-locale-scoped by construction, which is why this
+	// test drives LC_ALL=C explicitly and makes no default-locale assertion.
+});
+
+test("residual 2: a trailing newline is stripped by the shim's $(…) substitutions but preserved by TS (#55 review-tail)", () => {
+	const input = "ls ~/.m/dev-loop-tokens/t\n";
+	const ts = redactActionSummary(input, null);
+	const sh = shimRedact(input);
+	assert.equal(ts, "ls <token-dir>\n", "TS preserves the trailing newline");
+	assert.equal(sh, "ls <token-dir>", "shim: the s=$(…) substitution eats it");
+	// Safe direction: the SCRUB is identical in both; only the line terminator differs,
+	// so the shim never prints material the TS engine would not have printed.
+	assert.ok(!ts.includes("dev-loop-tokens") && !sh.includes("dev-loop-tokens"), "raw token-dir core scrubbed by both");
 });
 
 test("a C-locale caller gets the same output, always valid UTF-8 (locale-pinned bound, #55 review SF1)", () => {

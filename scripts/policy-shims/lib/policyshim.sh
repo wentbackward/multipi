@@ -302,7 +302,10 @@ _shim_pick_utf8_locale() {
 # scrub the token-dir shape and bound the length (a commit message may carry a token path
 # and the fallback line must not print it raw — P3 review round-6 should-fix).
 # LOCKED to extension/src/policy.ts by the equivalence pin (tests/unit/shim-redact-equiv.
-# test.ts, #55): identical adversarial input must yield byte-identical output.
+# test.ts, #55): identical adversarial input must yield byte-identical output. The
+# pin's KNOWN RESIDUALS note lists the three accepted engine divergences OUTSIDE the
+# pinned corpus (direction of each, why each is safe) — keep that note in lockstep
+# with the residual pins if either engine ever changes.
 #
 # The bound counts CHARACTERS, decided under a PINNED UTF-8 locale — never the caller's:
 # under a C locale ${#s}/${s:0:160} count BYTES and cut mid-UTF-8-sequence (a lone 0xB6
