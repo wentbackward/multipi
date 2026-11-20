@@ -28,8 +28,8 @@
    The full checks run once per batch in the gate.
 5. Small Conventional Commits, each referencing the ticket (`Refs #12`).
 6. The independent code-reviewer on every branch; fix every must-fix; re-review until APPROVE.
-7. Approved branches are gated as one train (`gate-train.sh` via `devloop.gate`); a green
-   train merges in order (`merge-train.sh` via `devloop.merge`), one squash per ticket.
+7. Approved branches are gated as one train (`gate-train.sh` via `devloop_gate`); a green
+   train merges in order (`merge-train.sh` via `devloop_merge`), one squash per ticket.
    A red train is never merged.
 8. After a job ticket merges, run the job for real and verify its outputs.
 

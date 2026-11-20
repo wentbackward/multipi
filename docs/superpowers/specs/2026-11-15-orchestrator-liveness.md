@@ -1,12 +1,12 @@
 # Spec — Orchestrator liveness, interrupt, and bounded tool calls (2026-11-15)
 
-**Trigger (reported, verbatim):** *"Clearly there's an issue with the devloop.gate. … 1. I
+**Trigger (reported, verbatim):** *"Clearly there's an issue with the devloop_gate. … 1. I
 need some way to see if anything is running or if you're just wedged and 2. some way to
 interrupt you with a message to unwedge the process. On top of that, would some kind of wake
 up interrupt help even if it's every 10 minutes or so — at least you won't be forever
 wedged."*
 
-Observed incident (evidence in the #55 gate logs): a `devloop.gate` tool call spawned its
+Observed incident (evidence in the #55 gate logs): a `devloop_gate` tool call spawned its
 child (train logs written 18:46), then the tool promise never resolved in the orchestrator
 ("No result provided"); the session sat silent for ~6h with no observable liveness state and
 no operator path in. A wedged tool call must be (a) visible, (b) interruptible by the
@@ -14,8 +14,8 @@ operator with a plain message, and (c) unable to exceed a bound.
 
 ## Non-goals
 
-- Nothing about child-process liveness (children are already tracked; `devloop.status` shows
-  in-flight; `devloop.cancel` kills one). This spec covers the **orchestrator session** only.
+- Nothing about child-process liveness (children are already tracked; `devloop_status` shows
+  in-flight; `devloop_cancel` kills one). This spec covers the **orchestrator session** only.
 - No daemons outside the loop's own one-shot scripts (below).
 - No changes to the label pipeline, gate/merge semantics, or the guard.
 
@@ -28,7 +28,7 @@ convention). Shape:
 
 ```json
 { "schema": 1, "sessionId": "...", "pid": 123, "state": "active|idle|ended",
-  "tool": { "name": "devloop.gate", "startedAt": 176..., "seq": 7 } | null,
+  "tool": { "name": "devloop_gate", "startedAt": 176..., "seq": 7 } | null,
   "lastEventAt": 176..., "lastTickAt": 176..., "lastWakeSeq": 0 }
 ```
 
@@ -80,7 +80,7 @@ full permanently). Accordingly:
 
 ## 2. Bounded tool calls — the unwedge (part B)
 
-`tools.ts` wraps **every** `devloop.*` implementation in `withTimeout(impl, ms)`
+`tools.ts` wraps **every** `devloop_*` implementation in `withTimeout(impl, ms)`
 (extracted as a pure helper in `liveness.ts` so it is unit-testable without pi);
 the tool name enters the timeout message via `timeoutText(name, ms)`:
 
@@ -89,8 +89,8 @@ the tool name enters the timeout message via `timeoutText(name, ms)`:
   env seam overrides (integer ms; `0` = disabled) — documented, tests use it.
 - On expiry the tool **resolves with an error result** (never rejects, never hangs):
   `devloop.<tool> timed out after <N>m — external state (branch, worktree, child) is
-  UNTOUCHED; check scripts/multipi-status.sh and devloop.status, then retry or
-  devloop.cancel <ticket>.` Bounds are rendered in whole minutes (`45m` for the
+  UNTOUCHED; check scripts/multipi-status.sh and devloop_status, then retry or
+  devloop_cancel <ticket>.` Bounds are rendered in whole minutes (`45m` for the
   default). A bound UNDER 60 000 ms (only reachable via the `MULTIPI_TOOL_TIMEOUT_MS`
   seam) renders `<N>s` instead — whole seconds, minimum `1s` — so the line never
   claims `0m`; the rest of the text is word-for-word the same. The underlying promise

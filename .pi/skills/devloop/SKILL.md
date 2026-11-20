@@ -14,7 +14,7 @@ and act on them.
 ## 0. Start of a session (always, first)
 
 1. Read `AGENTS.md`, the spec it names, `.devloop.json`, `docs/DECISIONS.md` and the repo's spec docs.
-2. `devloop.status` — in-flight children, open tickets with their `dl/` labels, capacity, last green
+2. `devloop_status` — in-flight children, open tickets with their `dl/` labels, capacity, last green
    gate. Then `git worktree list` and `git fetch` for anything the state file misses.
 3. **Handoff:** if `HANDOFF.md` exists in the loop notes dir, read it — the loop was paused by the
    operator. Re-dispatch the listed interrupted children (same ticket -> same worktree; their
@@ -37,7 +37,7 @@ and act on them.
 
 ### 1.1 Self-seeding: spec → analyst → tickets
 
-`devloop.dispatch {role: "analyst", spec: <spec path>}` — the analyst reads the spec and the
+`devloop_dispatch {role: "analyst", spec: <spec path>}` — the analyst reads the spec and the
 existing code, and returns an ordered ticket plan (also written to the plan file named in its
 report). Then, for each planned ticket IN PLAN ORDER:
 
@@ -63,7 +63,7 @@ Then dispatch implementers per the normal rules. If the analyst came back `STATU
 
 ## 2. Scheduling
 
-- Up to `heavy.slots` implementers at once (check `devloop.status`); a fourth concurrent dispatch is
+- Up to `heavy.slots` implementers at once (check `devloop_status`); a fourth concurrent dispatch is
   refused by the tool with the in-flight list — wait for a report, do not retry in a tight loop.
 - A ticket is STARTABLE when unblocked and every dependency is merged or in-flight (stacking).
 - Never run two tickets that edit the same hot files at once — conflicts cost more than waiting. Pair
@@ -79,7 +79,7 @@ Then dispatch implementers per the normal rules. If the analyst came back `STATU
 
 ## 3. Dispatch
 
-`devloop.dispatch {role: "implementer", ticket: <n>}` — everything else (branch, worktree, ports,
+`devloop_dispatch {role: "implementer", ticket: <n>}` — everything else (branch, worktree, ports,
 notes, brief) is computed for you. When a dependency's branch is pushed but unmerged and the ticket
 stacks on it, tell the child in a follow-up comment on the ticket before dispatching; the re-dispatch
 brief carries the stack-on context through the branch base.
@@ -92,7 +92,7 @@ On the child's report:
 
 ## 4. Review loop (every branch, before the gate)
 
-`devloop.dispatch {role: "code-reviewer", ticket: <n>}` reviews the ticket's branch independently of
+`devloop_dispatch {role: "code-reviewer", ticket: <n>}` reviews the ticket's branch independently of
 the implementer. Never skip it; never merge on the implementer's self-review.
 
 - `VERDICT: CHANGES REQUIRED`: comment the must-fix list verbatim on the issue, re-dispatch the
@@ -104,7 +104,7 @@ the implementer. Never skip it; never merge on the implementer's self-review.
 
 When the set of `dl/approved` branches stabilises (nothing new expected this pass):
 1. Choose the merge order: foundations first, dependents later; pairs from different areas adjacent.
-2. `devloop.gate {branches: [...]}` in that order. Green: label every covered ticket `dl/gated` and
+2. `devloop_gate {branches: [...]}` in that order. Green: label every covered ticket `dl/gated` and
    comment the gate log path.
 3. Red: nothing merges. Read the tail, identify the owning ticket(s), dispatch the implementer(s) to
    fix, and re-gate the whole train when they are back.
@@ -113,7 +113,7 @@ When the set of `dl/approved` branches stabilises (nothing new expected this pas
 
 ## 6. Merge
 
-`devloop.merge {branches: [...]}` — the SAME list and order as the gate. Outcomes:
+`devloop_merge {branches: [...]}` — the SAME list and order as the gate. Outcomes:
 - `merged`: label `dl/merged`, close the issues, comment the squash commits. Stacked branches that
   sat on a now-merged lower branch rebase `--onto` the base; re-gate if they carry foreign commits.
 - `tree-differs` / `branch-changed` / `replay-conflict`: someone moved the ground — re-gate, then
@@ -124,7 +124,7 @@ When the set of `dl/approved` branches stabilises (nothing new expected this pas
 
 ## 7. Verify and close
 
-After a meaningful train lands, `devloop.dispatch {role: "verifier", worktree: <where the real output
+After a meaningful train lands, `devloop_dispatch {role: "verifier", worktree: <where the real output
 lives>, task: <precise, checkable expectations with the commands to run>}`. The verifier's anomalies
 become new tickets (broken expectation = P1 ticket before the loop continues). When the spec section
 is done: mark its issues closed, summarise what shipped and where, and stop ONLY then.
@@ -135,11 +135,11 @@ is done: mark its issues closed, summarise what shipped and where, and stop ONLY
   first move is `scripts/multipi-status.sh` (rc 2 = suspected wedge, rc 3 = dead) and, if the
   session is alive but silent, `scripts/multipi-interrupt.sh "..."` to force-send a message into
   it — the watchdog (`multipi-watch.sh --daemon`, auto-started) already does this on its own
-  cadence. Every `devloop.*` call is bounded (default 45 min), so a wedged tool resolves on its
+  cadence. Every `devloop_*` call is bounded (default 45 min), so a wedged tool resolves on its
   own with the reconciliation text.
-- `devloop.cancel {ticket}` kills one child (its worktree and branch are kept; a re-dispatch resumes).
+- `devloop_cancel {ticket}` kills one child (its worktree and branch are kept; a re-dispatch resumes).
   Ctrl+C kills everything — after it, recover via step 0.
-- **Pausing:** when the user asks to pause, stop, or checkpoint the loop, call `devloop.pause`:
+- **Pausing:** when the user asks to pause, stop, or checkpoint the loop, call `devloop_pause`:
   it interrupts every running child (worktrees kept), writes `HANDOFF.md` (per-child positions
   plus the board snapshot), and comments each interrupted ticket. Then settle — a fresh session
   resumes from the handoff (step 0.3). It is also a safe checkpoint before an expected
@@ -150,7 +150,7 @@ is done: mark its issues closed, summarise what shipped and where, and stop ONLY
   testing, a test result, a "I wish it would…" — turn it into a ticket the same turn:
   - Single obvious item: create the issue directly, with a `## Reported` section quoting the user's
     words verbatim plus your context (what they were testing, what they saw).
-  - Multi-item or ambiguous: `devloop.dispatch {role: "analyst", focus: <user's words + context>}`
+  - Multi-item or ambiguous: `devloop_dispatch {role: "analyst", focus: <user's words + context>}`
     and raise the tickets from the plan (§1.1 mechanics).
   - Triage on creation: reproducible defect → dispatch an implementer immediately (or queue it per
     §2); preference/enhancement → queue it; anything needing the user's judgement →
