@@ -878,3 +878,22 @@ test("dispatch streams a status line (elapsed, tokens, cost, activity) while the
 		assert.match(statusLines[statusLines.length - 1], /implementer/);
 	} finally { fx.cleanup(); }
 });
+
+// ---------------------------------------------------------------------------
+// Grammar pin (#99): providers validating tool names against the OpenAI
+// function-name grammar reject a DOT (observed: Kimi 400 "function name is
+// invalid"). Every registered control-plane tool name must stay inside the
+// portable character set — the list is derived from the registration, not a
+// hardcoded echo, so a future rename cannot drift back out silently.
+// ---------------------------------------------------------------------------
+test("pin: every registered control-plane tool name matches the OpenAI function-name grammar /^[A-Za-z][A-Za-z0-9_-]*$/ (no dots)", () => {
+	const names = makeTools().map((t) => t.name);
+	assert.ok(names.length > 0, "makeTools() returned no tools");
+	for (const name of names) {
+		assert.match(
+			name,
+			/^[A-Za-z][A-Za-z0-9_-]*$/,
+			`registered tool name ${JSON.stringify(name)} violates the OpenAI function-name grammar — a dot (or any other character outside [A-Za-z0-9_-]) makes every grammar-validating provider reject the whole request (Kimi 400)`,
+		);
+	}
+});
