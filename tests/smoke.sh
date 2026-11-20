@@ -4139,6 +4139,27 @@ echo "$BOARD_OUT" | grep -qF "in-flight: 1/2 implementers — #88 (5m)" && \
   pass "board: a young child renders plain" || fail "board in-flight: $(grep -F in-flight <<<"$BOARD_OUT" || echo '<none>')"
 rm -f "$bddir_state/dispatch.json"
 
+# (e2) two in-flight children: the census, the ordering, and the SECOND child's
+#     in-progress annotation (a mid-line lookup, not a line-start one). Dispatch keys
+#     are ticket numbers, so the two children ride tickets 88 and 1.
+sleep 120 & BD_LIVE2=$!
+BDGH="$bdbase/gh-e"; mkdir -p "$BDGH"
+FAKE_GH_DIR="$BDGH" gh issue create "In-flight ticket" "body one" >/dev/null
+FAKE_GH_DIR="$BDGH" gh issue edit 1 --add-label dl/in-progress >/dev/null
+printf '{"88":{"pid":%s,"role":"implementer","worktree":"%s/wt-88","startedAt":%s,"status":"running"},"1":{"pid":%s,"role":"implementer","worktree":"%s/wt-1","startedAt":%s,"status":"running"}}\n' \
+  "$BD_LIVE" "$bddir_state" "$(( $(date +%s%3N) - 5 * 60 * 1000 ))" \
+  "$BD_LIVE2" "$bddir_state" "$(( $(date +%s%3N) - 5 * 60 * 1000 ))" >"$bddir_state/dispatch.json"
+board MULTIPI_BOARD_CHILD_BOUND_MIN=60
+expect "board rc 0: two young children" "0" "$BOARD_RC"
+echo "$BOARD_OUT" | grep -qE "in-flight: 2/2 implementers — #88 \([0-9]+m\), #1 \([0-9]+m\)" && \
+  pass "board: the census counts two implementers at capacity" || fail "board census: $(grep -F in-flight <<<"$BOARD_OUT" || echo '<none>')"
+echo "$BOARD_OUT" | grep -qE "#1  \[dl/in-progress\] In-flight ticket  \(running [0-9]+m\)" && \
+  pass "board: the SECOND child's in-progress annotation is found mid-line" || \
+  fail "board in-progress line: $(grep -F in-progress <<<"$BOARD_OUT" || echo '<none>')"
+kill "$BD_LIVE2" 2>/dev/null || true
+wait "$BD_LIVE2" 2>/dev/null || true
+rm -f "$bddir_state/dispatch.json"
+
 # (f) rc 1: a dl/blocked ticket renders FIRST with its question; the summary counts;
 #     in-review gets its PR + head annotation; gated gets the mergeable note.
 BDGH="$bdbase/gh-block"; mkdir -p "$BDGH"

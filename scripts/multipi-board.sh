@@ -351,7 +351,8 @@ render_ticket() {
   elif has_lbl dl/gated "${T_LBL[i]}"; then
     printf '  #%s  [dl/gated] %s  (gate green — mergeable)\n' "$n" "$title"
   elif has_lbl dl/in-progress "${T_LBL[i]}"; then
-    d=$(printf '%s\n' "${ifl_kv# }" | grep -oE "^${n}:[^ ]+" | sed -n 1p | cut -d: -f2)
+    # mid-line safe: a second child sits AFTER a space, not at the line start
+    d=$(printf '%s\n' "${ifl_kv# }" | grep -oE "(^| )${n}:[^ ]+" | sed -n 1p | sed -E "s/^[[:space:]]*${n}://")
     if [ -n "$d" ]; then bit="running $d"; else bit="no child in flight"; fi
     printf '  #%s  [dl/in-progress] %s  (%s)\n' "$n" "$title" "$bit"
   else
