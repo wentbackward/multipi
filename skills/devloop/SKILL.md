@@ -136,7 +136,10 @@ is done: mark its issues closed, summarise what shipped and where, and stop ONLY
   session is alive but silent, `scripts/multipi-interrupt.sh "..."` to force-send a message into
   it — the watchdog (`multipi-watch.sh --daemon`, auto-started) already does this on its own
   cadence. Every `devloop_*` call is bounded (default 45 min), so a wedged tool resolves on its
-  own with the reconciliation text.
+  own with the reconciliation text. For the whole loop at a glance, the user runs
+  `scripts/multipi-board.sh` (pure-read; rc 1 = a `dl/blocked` ticket waits on their decision,
+  rc 2 = a red last gate or an over-bound child — the blocked ticket renders first, with its
+  question).
 - `devloop_cancel {ticket}` kills one child (its worktree and branch are kept; a re-dispatch resumes).
   Ctrl+C kills everything — after it, recover via step 0.
 - **Pausing:** when the user asks to pause, stop, or checkpoint the loop, call `devloop_pause`:
