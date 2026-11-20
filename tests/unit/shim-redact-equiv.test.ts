@@ -303,3 +303,27 @@ test("the residual-pin titles number themselves by the KNOWN RESIDUALS note's it
 		`exactly the three noted divergences carry "residual N" titles, got: ${residualTitles.map((t) => JSON.stringify(t)).join(", ")}`,
 	);
 });
+
+// #95 (the #93 review tail): the strict scanner above parses only single-line titles in
+// the exact opening form — a future residual pin whose title is split over lines, or
+// written as a backtick expression, would drop out of the scan and the count-of-three
+// assertion would pass SILENTLY on a form it cannot read. The companion below re-opens
+// every pin with a line-break-tolerant pattern and asserts the two scans agree on the
+// number of residual-title openings: a form the strict scanner cannot parse goes RED
+// here instead of disappearing from the pin. Best effort like the scanner itself — it
+// reads source text, not an AST.
+test("every residual-pin opening is parseable by the title scanner — an unparseable form goes red, not silent (#95)", () => {
+	const src = fs.readFileSync(new URL(import.meta.url), "utf8");
+	const strictTitles = [...src.matchAll(/^test\("(.*)", \(\)/gm)].map((m) => m[1]);
+	const strictResiduals = strictTitles.filter((t) => /^residual \d/.test(t));
+	// Tolerant opener: the word `test`, a paren, ANY whitespace (incl. newlines), then a
+	// quote- or backtick-delimited title starting with `residual <digit>`. The strict
+	// scanner's own regex literal in this file does not match it (the paren is spelled
+	// escaped in the literal), so this count is not self-inflated.
+	const lenientCount = [...src.matchAll(/test\(\s*["`]residual \d/g)].length;
+	assert.equal(
+		lenientCount,
+		strictResiduals.length,
+		`${lenientCount} residual-title openings tolerated vs ${strictResiduals.length} the strict scanner parsed: a residual pin is written in a form the title scanner cannot parse — rewrite it (or extend the scanner AND this companion in the same change)`,
+	);
+});
