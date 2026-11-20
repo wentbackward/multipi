@@ -20,6 +20,8 @@
 #   auth status
 #   pr view <branch> [--json state]        0 open, 1 none
 #   pr list --head <branch> --json state   0 always ([] when no PR)
+#     --json number round-trips offline too: PRs are allocated numbers at create (starting at
+#     100, persisted in <dir>/pr-seq) — a stand-in of the real CLI's numbering.
 #     --state open|closed|merged|all is HONORED with the real CLI's default:
 #     WITHOUT --state only OPEN PRs are listed — a MERGED PR is invisible
 #     unless the caller asks for all (or merged).
@@ -115,6 +117,13 @@ case "${1:-} ${2:-}" in
     printf '%s\n' "$title" >"$dir/$(key "$head").title"
     [ -f "$body_file" ] && cp "$body_file" "$dir/$(key "$head").body"
     echo OPEN >"$dir/$(key "$head").state"
+    if [ ! -f "$dir/$(key "$head").number" ]; then
+      seq_file="$dir/pr-seq"
+      seq_next=100
+      [ -f "$seq_file" ] && seq_next=$((10#$(sed -n 1p "$seq_file")))
+      printf '%s\n' "$((seq_next + 1))" >"$seq_file"
+      printf '%s\n' "$seq_next" >"$dir/$(key "$head").number"
+    fi
     ;;
   "pr merge"|"pr squash-merge")
     branch=$3
@@ -166,10 +175,12 @@ case "${1:-} ${2:-}" in
   "pr list")
     head=""
     pstate=open
+    json=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --head) head=$2; shift 2 ;;
         --state) pstate=$2; shift 2 ;;
+        --json) json=$2; shift 2 ;;
         *) shift ;;
       esac
     done
@@ -182,7 +193,13 @@ case "${1:-} ${2:-}" in
       closed) [ "$st" = CLOSED ] && show=1 ;;
       merged) [ "$st" = MERGED ] && show=1 ;;
     esac
-    [ "$show" = 1 ] && printf '[{"state":"%s"}]\n' "$st" || printf '[]\n'
+    numfield=""
+    case ",$json," in
+      *,number,*)
+        [ -f "$dir/$(key "$head").number" ] && numfield="\"number\":$(sed -n 1p "$dir/$(key "$head").number"),"
+        ;;
+    esac
+    [ "$show" = 1 ] && printf '[{%s"state":"%s"}]\n' "$numfield" "$st" || printf '[]\n'
     ;;
   "issue list")
     state=open json=""
