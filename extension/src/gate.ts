@@ -40,7 +40,7 @@ export function runScript(script: string, opts: TrainRunOptions): Promise<{ code
 	return new Promise((resolve) => {
 		// Spawning (rather than execFile, whose options ignore `stdio` in Node 24) with stdin
 		// "ignore": a check that reads stdin (REPL, `read`) must see immediate EOF, never a pipe
-		// the parent holds open for the entire run — that hung devloop.gate (see #48/#41).
+		// the parent holds open for the entire run — that hung devloop_gate (see #48/#41).
 		const child = spawn("bash", [path.join(opts.scriptsDir, script), ...opts.branches], {
 			cwd: opts.repoRoot,
 			env: { ...process.env, ...opts.env },

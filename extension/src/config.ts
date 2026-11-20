@@ -18,9 +18,9 @@ export interface HeavyConfig {
 export interface StopGateConfig { requireCleanTree: boolean; maxBlocks: number; }
 export interface MergeConfig { method: string; deleteBranch: boolean; }
 
-/** Orchestrator-side bounds (spec 2026-11-15 §2): the devloop.* tool-call ceiling. */
+/** Orchestrator-side bounds (spec 2026-11-15 §2): the devloop_* tool-call ceiling. */
 export interface OrchestratorConfig {
-	/** Minutes before a devloop.* tool call resolves with a timeout error (default 45). */
+	/** Minutes before a devloop_* tool call resolves with a timeout error (default 45). */
 	toolTimeoutMinutes: number;
 }
 

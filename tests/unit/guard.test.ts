@@ -154,7 +154,7 @@ test("allows benign bash that never names the store", () => {
 
 test("ignores tools outside the guarded set even when they name the store", () => {
 	assert.equal(hits("web_search", { query: `${STORE}/a.md` }), false);
-	assert.equal(hits("devloop.dispatch", { ticket: `${STORE}/9` }), false);
+	assert.equal(hits("devloop_dispatch", { ticket: `${STORE}/9` }), false);
 	assert.equal(hits("bash", { command: "" }), false);
 });
 

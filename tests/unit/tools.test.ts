@@ -94,7 +94,7 @@ test("dispatch(implementer) runs the child, opens the PR, labels in-review", asy
 	try {
 		const ctx = ctxWithAgents(fx);
 		const n = createIssue(fx, "Add a feature X");
-		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
 		assert.match(textOf(res), /implementer #\d+ .* -> done/);
 		// worktree created in the consolidated worktree dir (<state>/worktrees/<repo>/issue-<n>)
@@ -117,7 +117,7 @@ test("dispatch stamps the child with its role (MULTIPI_CHILD_ROLE via the spawn 
 	try {
 		const ctx = ctxWithAgents(fx);
 		const n = createIssue(fx, "Role plumbing check");
-		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
 		assert.ok(existsSync(roleFile), "the child saw the FAKE_PI_ECHO_ROLE seam");
 		assert.equal(readFileSync(roleFile, "utf8"), "implementer", "child env carried its role name");
@@ -139,7 +139,7 @@ test("dispatch refuses a second implementer on the same ticket while one is in f
 			path.join(state, "dispatch.json"),
 			JSON.stringify({ "77": { pid: process.pid, role: "implementer", branch: "feat/77-x", worktree: "/wt/77", startedAt: 1, status: "running" } }),
 		);
-		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: 77 });
+		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: 77 });
 		assert.equal(res.isError, true);
 		assert.match(textOf(res), /already has an implementer running/);
 	} finally { fx.cleanup(); }
@@ -154,7 +154,7 @@ test("dispatch refuses the (slots+1)-th concurrent implementer and lists in-flig
 		mkdirSync(state, { recursive: true });
 		const mk = (k: string, br: string) => ({ pid: process.pid, role: "implementer", branch: br, worktree: `/wt/${k}`, startedAt: 1, status: "running" });
 		writeFileSync(path.join(state, "dispatch.json"), JSON.stringify({ "11": mk("11", "feat/11-a"), "12": mk("12", "feat/12-b") }));
-		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: 13 });
+		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: 13 });
 		assert.equal(res.isError, true);
 		const t = textOf(res);
 		assert.match(t, /capacity full: 2\/2/);
@@ -172,7 +172,7 @@ test("cancel marks the entry interrupted and kills via the controller registry (
 		const ctx = ctxWithAgents(fx);
 		const n = createIssue(fx, "Long task");
 		const tools = makeTools();
-		const dispatch = tools.find((t) => t.name === "devloop.dispatch")!;
+		const dispatch = tools.find((t) => t.name === "devloop_dispatch")!;
 		const p = (dispatch.execute as unknown as (...a: unknown[]) => Promise<any>)("tc-slow", { role: "implementer", ticket: n }, new AbortController().signal, undefined, { cwd: ctx.cwd });
 		await new Promise((r) => setTimeout(r, 400)); // let the child start
 		const cancel = cancelImpl(ctx, String(n));
@@ -186,7 +186,7 @@ test("cancel marks the entry interrupted and kills via the controller registry (
 	}
 });
 
-test("every devloop.* call is bounded: a hung dispatch RESOLVES (never rejects, never hangs) with the reconciliation text (spec 2026-11-15 §2)", async () => {
+test("every devloop_* call is bounded: a hung dispatch RESOLVES (never rejects, never hangs) with the reconciliation text (spec 2026-11-15 §2)", async () => {
 	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
 	setupEnv(fx);
 	process.env.FAKE_PI_MODE = "slow";
@@ -196,15 +196,15 @@ test("every devloop.* call is bounded: a hung dispatch RESOLVES (never rejects, 
 		const ctx = ctxWithAgents(fx);
 		const n = createIssue(fx, "Bound task");
 		const start = Date.now();
-		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
 		assert.ok(Date.now() - start < 10_000, "resolved at the bound, not when the child would report (30s)");
 		assert.equal(res.isError, true, "the timeout is an error RESULT");
 		const t = textOf(res);
-		assert.match(t, /devloop\.dispatch timed out after 1s/);
+		assert.match(t, /devloop_dispatch timed out after 1s/);
 		assert.match(t, /UNTOUCHED/);
 		assert.match(t, /scripts\/multipi-status\.sh/);
-		assert.match(t, /devloop\.status/);
-		assert.match(t, /devloop\.cancel/);
+		assert.match(t, /devloop_status/);
+		assert.match(t, /devloop_cancel/);
 		const cancel = cancelImpl(ctx, String(n)); // reconcile: kill the abandoned child
 		assert.match(textOf(cancel), /cancel sent/);
 	} finally {
@@ -215,14 +215,14 @@ test("every devloop.* call is bounded: a hung dispatch RESOLVES (never rejects, 
 	}
 });
 
-test("a bounded devloop.* call builds the tool context exactly ONCE (bound probe and run share one construction)", async () => {
+test("a bounded devloop_* call builds the tool context exactly ONCE (bound probe and run share one construction)", async () => {
 	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
 	setupEnv(fx);
 	try {
 		const ctx = ctxWithAgents(fx);
 		createIssue(fx, "Bound budget check");
 		const before = testSeams.contextBuilds;
-		const res = await call(ctx, "devloop.status", {});
+		const res = await call(ctx, "devloop_status", {});
 		assert.equal(res.isError ?? false, false, textOf(res));
 		assert.equal(testSeams.contextBuilds - before, 1, "the bound probe must not rebuild the context (a config read + git subprocess each)");
 	} finally { fx.cleanup(); }
@@ -235,12 +235,12 @@ test("gate and merge tools drive the trains through the real scripts", async () 
 		const ctx = ctxWithAgents(fx);
 		pushBranch(fx, "feat/1-a", "a.txt");
 		pushBranch(fx, "feat/2-b", "b.txt");
-		const gateRes = await call(ctx, "devloop.gate", { branches: ["feat/1-a", "feat/2-b"] });
+		const gateRes = await call(ctx, "devloop_gate", { branches: ["feat/1-a", "feat/2-b"] });
 		assert.equal(gateRes.isError ?? false, false, textOf(gateRes));
 		assert.match(textOf(gateRes), /GATE GREEN/);
 		notesFor(fx, "feat/1-a");
 		notesFor(fx, "feat/2-b");
-		const mergeRes = await call(ctx, "devloop.merge", { branches: ["feat/1-a", "feat/2-b"] });
+		const mergeRes = await call(ctx, "devloop_merge", { branches: ["feat/1-a", "feat/2-b"] });
 		assert.equal(mergeRes.isError ?? false, false, textOf(mergeRes));
 		assert.match(textOf(mergeRes), /MERGED feat\/1-a, feat\/2-b/);
 		const log = sh(fx.repo, "log", "--format=%s", "-2", "origin/main").toString().trim().split("\n");
@@ -257,10 +257,10 @@ test("merge tool surfaces refusal reasons verbatim (not gated green)", async () 
 		pushBranch(fx, "feat/0-other", "o.txt");
 		pushBranch(fx, "feat/1-a", "a.txt");
 		// Establish the gate worktree (gate a different branch green), then drop the record.
-		const g = await call(ctx, "devloop.gate", { branches: ["feat/0-other"] });
+		const g = await call(ctx, "devloop_gate", { branches: ["feat/0-other"] });
 		assert.equal(g.isError ?? false, false, textOf(g));
 		execFileSync("rm", ["-f", path.join(ctx.stateDir, "train-green.txt")]);
-		const res = await call(ctx, "devloop.merge", { branches: ["feat/1-a"] });
+		const res = await call(ctx, "devloop_merge", { branches: ["feat/1-a"] });
 		assert.equal(res.isError, true);
 		assert.match(textOf(res), /MERGE REFUSED \(refused\)/);
 	} finally { fx.cleanup(); }
@@ -277,7 +277,7 @@ test("status renders children, tickets and the gate record", async () => {
 			path.join(ctx.stateDir, "dispatch.json"),
 			JSON.stringify({ [String(n)]: { pid: process.pid, role: "implementer", branch: "feat/x", worktree: "/wt", startedAt: 1, status: "running" } }),
 		);
-		const res = await call(ctx, "devloop.status", {});
+		const res = await call(ctx, "devloop_status", {});
 		assert.equal(res.isError ?? false, false);
 		const t = textOf(res);
 		assert.match(t, /Implementers in flight: 1\//);
@@ -447,7 +447,7 @@ test("dispatch(analyst) refuses without spec or focus", async () => {
 	setupEnv(fx);
 	try {
 		const ctx = ctxWithAgents(fx);
-		const res = await call(ctx, "devloop.dispatch", { role: "analyst" });
+		const res = await call(ctx, "devloop_dispatch", { role: "analyst" });
 		assert.equal(res.isError, true);
 		assert.match(textOf(res), /requires `spec`.*`focus`/);
 	} finally { fx.cleanup(); }
@@ -458,7 +458,7 @@ test("dispatch(analyst) plans from a spec, writes no ticket, records a done entr
 	setupEnv(fx);
 	try {
 		const ctx = ctxWithAgents(fx);
-		const res = await call(ctx, "devloop.dispatch", { role: "analyst", spec: "docs/prd.md" });
+		const res = await call(ctx, "devloop_dispatch", { role: "analyst", spec: "docs/prd.md" });
 		assert.equal(res.isError ?? false, false, textOf(res));
 		const out = textOf(res);
 		assert.match(out, /analyst .* -> done/);
@@ -557,7 +557,7 @@ test("dispatch(scenario-writer) runs the child at the repo root (no worktree, no
 	try {
 		const ctx = ctxWithAgents(fx);
 		const n = createIssue(fx, "Cache hit skips recompute", SC_WRITER_BODY);
-		const res = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: n });
+		const res = await call(ctx, "devloop_dispatch", { role: "scenario-writer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
 		// The echoed task IS the brief (written verbatim to the echo file): it must carry the
 		// ticket number, its acceptance criteria, the cited spec section and the store dir.
@@ -601,7 +601,7 @@ test("dispatch(scenario-writer) DONE posts the scenario TITLES (id, title, requi
 			"",
 			"STATUS: DONE",
 		].join("\n"));
-		const res = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: n });
+		const res = await call(ctx, "devloop_dispatch", { role: "scenario-writer", ticket: n });
 		assert.match(textOf(res), /scenario-writer #\d+ .* -> done/, textOf(res));
 		const commentFile = path.join(fx.dir, "gh", "comments", String(n));
 		assert.ok(existsSync(commentFile), "a comment was posted on the ticket");
@@ -631,7 +631,7 @@ test("dispatch(scenario-writer) BLOCKED labels the ticket dl/blocked and posts n
 	try {
 		const ctx = ctxWithAgents(fx);
 		const n = createIssue(fx, "Cache hit skips recompute", SC_WRITER_BODY);
-		const res = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: n });
+		const res = await call(ctx, "devloop_dispatch", { role: "scenario-writer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
 		assert.match(textOf(res), /scenario-writer #\d+ .* -> blocked/, textOf(res));
 		const labelFile = path.join(fx.dir, "gh", "labels", String(n));
@@ -653,7 +653,7 @@ test("dispatch(scenario-writer) DONE with no scenario lines posts no comment", a
 	try {
 		const ctx = ctxWithAgents(fx);
 		const n = createIssue(fx, "Cache hit skips recompute", SC_WRITER_BODY);
-		const res = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: n });
+		const res = await call(ctx, "devloop_dispatch", { role: "scenario-writer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
 		assert.match(textOf(res), /scenario-writer #\d+ .* -> done/, textOf(res));
 		assert.ok(!existsSync(path.join(fx.dir, "gh", "comments", String(n))), "no comment without scenario lines");
@@ -672,7 +672,7 @@ test("dispatch(scenario-writer) refuses when the scenario store is off in the co
 	try {
 		const ctx = ctxWithAgents(fx);
 		const n = createIssue(fx, "Cache hit skips recompute", SC_WRITER_BODY);
-		const res = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: n });
+		const res = await call(ctx, "devloop_dispatch", { role: "scenario-writer", ticket: n });
 		assert.equal(res.isError, true);
 		assert.match(textOf(res), /scenario store is off/i);
 	} finally { fx.cleanup(); }
@@ -684,10 +684,10 @@ test("dispatch(scenario-writer) requires a ticket and finds it among open issues
 	process.env.MULTIPI_LIST_LAG_RETRY_MS = "50"; // the not-found refusal retries once; the seam keeps it off the wall clock
 	try {
 		const ctx = ctxWithAgents(fx);
-		const res1 = await call(ctx, "devloop.dispatch", { role: "scenario-writer" });
+		const res1 = await call(ctx, "devloop_dispatch", { role: "scenario-writer" });
 		assert.equal(res1.isError, true);
 		assert.match(textOf(res1), /scenario-writer requires `ticket`/);
-		const res2 = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: 9999 });
+		const res2 = await call(ctx, "devloop_dispatch", { role: "scenario-writer", ticket: 9999 });
 		assert.equal(res2.isError, true);
 		assert.match(textOf(res2), /not found among open issues/);
 	} finally {
@@ -706,7 +706,7 @@ test("dispatch(scenario-writer) refuses a second writer on the same ticket while
 			path.join(ctx.stateDir, "dispatch.json"),
 			JSON.stringify({ "scenario-writer-77": { pid: process.pid, role: "scenario-writer", worktree: fx.repo, startedAt: 1, status: "running" } }),
 		);
-		const res = await call(ctx, "devloop.dispatch", { role: "scenario-writer", ticket: 77 });
+		const res = await call(ctx, "devloop_dispatch", { role: "scenario-writer", ticket: 77 });
 		assert.equal(res.isError, true);
 		assert.match(textOf(res), /already running/);
 	} finally { fx.cleanup(); }
@@ -760,7 +760,7 @@ test("dispatch(implementer) (store on, uncovered): refuses, naming the ticket an
 	try {
 		const ctx = ctxWithAgents(fx);
 		const n = createIssue(fx, "No scenario yet");
-		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
 		assert.equal(res.isError, true, textOf(res));
 		const t = textOf(res);
 		assert.match(t, new RegExp(`ticket #${n} is not startable`), t);
@@ -776,7 +776,7 @@ test("dispatch(implementer) (store on, covered by a valid t<n>- scenario): proce
 		const ctx = ctxWithAgents(fx);
 		const n = createIssue(fx, "Covered ticket gets implemented");
 		seedScenario(fx, `t${n}-the-behaviour`);
-		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
 		assert.match(textOf(res), new RegExp(`implementer #${n} .* -> done`), textOf(res));
 		const labels = readFileSync(path.join(fx.dir, "gh", "labels", String(n)), "utf8").trim().split("\n");
@@ -825,7 +825,7 @@ test("dispatch(implementer) (store on, store unreadable): refuses as not startab
 		const n = createIssue(fx, "Locked store ticket");
 		seedScenario(fx, `t${n}-would-cover-it`); // covered while the store is readable
 		storeDir = lockStoreDir(fx);
-		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
 		assert.equal(res.isError, true, textOf(res));
 		const t = textOf(res);
 		assert.match(t, new RegExp(`ticket #${n} is not startable`), t);
@@ -847,7 +847,7 @@ test("stop gate (store off): coverage fields absent — a store-less config beha
 		assert.ok(d, "without a store, an open ticket is startable as always");
 		assert.match(d!.entries[0].content, /startable/i);
 		// and the dispatch still proceeds without any scenario
-		const res = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
 	} finally { fx.cleanup(); }
 });
@@ -860,7 +860,7 @@ test("dispatch streams a status line (elapsed, tokens, cost, activity) while the
 		const n = createIssue(fx, "Stream a status line");
 		const updates: string[] = [];
 		const tools = makeTools();
-		const tool = tools.find((t) => t.name === "devloop.dispatch")!;
+		const tool = tools.find((t) => t.name === "devloop_dispatch")!;
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any -- test harness drives raw tool executes
 		const res = await (tool.execute as unknown as (id: string, p: Record<string, unknown>, s: unknown, u: (u: { content?: { text?: string }[] }) => void, tc: unknown) => Promise<any>)(
 			"tc-test",

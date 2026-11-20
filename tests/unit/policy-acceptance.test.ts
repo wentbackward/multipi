@@ -136,7 +136,7 @@ test("P5 acceptance: the full train (dispatch -> review -> gate -> merge) runs z
 		// DISPATCH: the implementer child (fake-pi) commits in its worktree and pushes its
 		// branch — through the shims, as a self-repo mutation.
 		const n = createIssue(fx, "Train ticket zero deny");
-		const dispatch = await call(ctx, "devloop.dispatch", { role: "implementer", ticket: n });
+		const dispatch = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
 		assert.equal(dispatch.isError ?? false, false, textOf(dispatch));
 		assert.match(textOf(dispatch), /implementer #\d+ .* -> done/);
 		const branch = JSON.parse(readFileSync(path.join(stateDir(fx), "dispatch.json"), "utf8"))[String(n)].branch as string;
@@ -146,20 +146,20 @@ test("P5 acceptance: the full train (dispatch -> review -> gate -> merge) runs z
 		const reportFile = path.join(fx.dir, "review-verdict.md");
 		writeFileSync(reportFile, "Reviewed the diff. No issues.\n\nVERDICT: APPROVE\n");
 		process.env.FAKE_PI_REPORT = reportFile;
-		const review = await call(ctx, "devloop.dispatch", { role: "code-reviewer", ticket: n });
+		const review = await call(ctx, "devloop_dispatch", { role: "code-reviewer", ticket: n });
 		delete process.env.FAKE_PI_REPORT;
 		assert.equal(review.isError ?? false, false, textOf(review));
 		assert.match(textOf(review), /code-reviewer #\d+ .* -> done/);
 
 		// GATE: green across the train; the train-green record is written.
-		const gate = await call(ctx, "devloop.gate", { branches: [branch] });
+		const gate = await call(ctx, "devloop_gate", { branches: [branch] });
 		assert.equal(gate.isError ?? false, false, textOf(gate));
 		assert.match(textOf(gate), /GATE GREEN/);
 		assert.ok(existsSync(path.join(stateDir(fx), "train-green.txt")), "the train-green record was written");
 
 		// MERGE: merge-train replays and squashes through `gh pr merge` — the main push.
 		notesFor(fx, branch);
-		const merge = await call(ctx, "devloop.merge", { branches: [branch] });
+		const merge = await call(ctx, "devloop_merge", { branches: [branch] });
 		assert.equal(merge.isError ?? false, false, textOf(merge));
 		assert.match(textOf(merge), /MERGED/);
 		const mainAfter = execFileSync("git", ["-C", fx.origin, "rev-parse", "refs/heads/main"], { stdio: "pipe" }).toString().trim();

@@ -102,7 +102,7 @@ async function runGuarded<T>(toolCtx: { cwd: string }, fn: (ctx: ToolContext) =>
 }
 
 /**
- * The bounded run (spec 2026-11-15 §2 — the unwedge): every devloop.* call races the
+ * The bounded run (spec 2026-11-15 §2 — the unwedge): every devloop_* call races the
  * `.devloop.json` orchestrator.tool_timeout_minutes bound (MULTIPI_TOOL_TIMEOUT_MS seam,
  * 0 = disabled). On expiry the call RESOLVES with the reconciliation error text — it never
  * rejects and never hangs; the abandoned promise's side effects (a spawned child, a pushed
@@ -795,7 +795,7 @@ export async function pauseImpl(ctx: ToolContext): Promise<AgentToolResult<undef
 
 	const parts: string[] = [];
 	parts.push(runningKeys.length > 0 ? `Paused: interrupted ${runningKeys.length} child(ren): ${runningKeys.join(", ")}` : "Paused: no children were running (idle checkpoint)");
-	if (laggards.length > 0) parts.push(`WARNING: ${laggards.join(", ")} did not die within ${PAUSE_EXIT_GRACE_MS / 1000}s — kill by pid or re-run devloop.cancel`);
+	if (laggards.length > 0) parts.push(`WARNING: ${laggards.join(", ")} did not die within ${PAUSE_EXIT_GRACE_MS / 1000}s — kill by pid or re-run devloop_cancel`);
 	if (boardError) parts.push(`board snapshot unavailable: ${boardError}`);
 	parts.push(`handoff: ${handoffPath}`);
 	if (commented.length > 0) parts.push(`commented tickets: ${commented.join(", ")}`);
@@ -872,6 +872,22 @@ export async function formatEditedFile(cwd: string, filePath: string): Promise<v
 // ---------------------------------------------------------------------------
 // Tool registrations
 // ---------------------------------------------------------------------------
+/** The registered control-plane tool names — the single source of truth (one name per tool,
+ * no aliases). Underscored, not dotted: the OpenAI function-name grammar
+ * (`^[A-Za-z][A-Za-z0-9_-]*$`) rejects a dot, so a dot makes the whole request
+ * fail on every grammar-validating provider (observed: Kimi 400). The
+ * `tests/unit/tools.test.ts` grammar pin keeps this list portable. Used verbatim in every
+ * `name:` field AND every `runBounded(...)` label below — the labels are operator-visible
+ * log/reconciliation text and must agree with the registered name. */
+export const TOOL_NAMES = {
+	dispatch: "devloop_dispatch",
+	cancel: "devloop_cancel",
+	pause: "devloop_pause",
+	gate: "devloop_gate",
+	merge: "devloop_merge",
+	status: "devloop_status",
+} as const;
+
 const DispatchSchema = Type.Object({
 	role: Type.String({ description: "implementer | code-reviewer | verifier | analyst | scenario-writer" }),
 	ticket: Type.Optional(Type.Number({ description: "Issue number (required for implementer, code-reviewer and scenario-writer)" })),
@@ -886,41 +902,41 @@ type Params<S extends TSchema> = import("typebox").Static<S>;
 
 export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, any, any>> {
 	const dispatch = defineTool({
-		name: "devloop.dispatch",
+		name: TOOL_NAMES.dispatch,
 		label: "Dispatch dev-loop role agent",
 		promptGuidelines: instructions ? [instructions] : undefined,
 		description:
 			"Dispatch one role agent (implementer / code-reviewer / verifier / analyst / scenario-writer) as an isolated headless child. Implementer runs in its own git worktree; analyst and scenario-writer run at the repo root (no worktree, no capacity slot). For implementer and scenario-writer pass the ticket; everything else (branch, worktree, ports, notes path, brief) is computed deterministically. Blocks until the child reports. At most N implementers run concurrently (N = heavy.slots); a further dispatch is refused with the in-flight list.",
 		parameters: DispatchSchema,
-		execute: (_id, params: Params<typeof DispatchSchema>, signal, onUpdate, toolCtx) => runBounded("devloop.dispatch", toolCtx, (c) => dispatchImpl(c, params, signal, onUpdate)),
+		execute: (_id, params: Params<typeof DispatchSchema>, signal, onUpdate, toolCtx) => runBounded(TOOL_NAMES.dispatch, toolCtx, (c) => dispatchImpl(c, params, signal, onUpdate)),
 	});
 
 	const cancelSchema = Type.Object({
 		ticket: Type.Number({ description: "Ticket whose child should be cancelled" }),
 	});
 	const cancel = defineTool({
-		name: "devloop.cancel",
+		name: TOOL_NAMES.cancel,
 		label: "Cancel dev-loop child",
 		description: "Kill the child currently working on a ticket (the worktree and branch are kept; re-dispatch resumes).",
 		parameters: cancelSchema,
-		execute: (_id, params: Params<typeof cancelSchema>, _s, _u, toolCtx) => runBounded("devloop.cancel", toolCtx, (c) => Promise.resolve(cancelImpl(c, String(params.ticket)))),
+		execute: (_id, params: Params<typeof cancelSchema>, _s, _u, toolCtx) => runBounded(TOOL_NAMES.cancel, toolCtx, (c) => Promise.resolve(cancelImpl(c, String(params.ticket)))),
 	});
 
 	const branchesSchema = Type.Object({
 		branches: Type.Array(Type.String(), { description: "Branch names, in the exact order to gate/merge" }),
 	});
 	const gate = defineTool({
-		name: "devloop.gate",
+		name: TOOL_NAMES.gate,
 		label: "Run batch gate",
 		description:
 			"Run the batch gate: stack the given branches (in order) on the latest base in the gate worktree and run every configured check once. Returns green / red (with failing output tail) / conflict (named branch) / error.",
 		parameters: branchesSchema,
 		execute: (_id, params: Params<typeof branchesSchema>, _s, _u, toolCtx) =>
-			runBounded("devloop.gate", toolCtx, async (ctx) => {
+			runBounded(TOOL_NAMES.gate, toolCtx, async (ctx) => {
 				const out = await runGateTrain({ scriptsDir: ctx.scriptsDir, repoRoot: ctx.cfg.root, branches: params.branches });
 				const label =
 					out.status === "green"
-						? "GATE GREEN — the train is gated. Record the label dl/gated on the covered tickets, then devloop.merge with the same branches, same order."
+						? "GATE GREEN — the train is gated. Record the label dl/gated on the covered tickets, then devloop_merge with the same branches, same order."
 						: out.status === "red"
 						  ? "GATE RED — nothing merges. Read the tail, dispatch the owning implementer to fix, re-push, re-gate."
 						  : out.status === "conflict"
@@ -931,13 +947,13 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 	});
 
 	const merge = defineTool({
-		name: "devloop.merge",
+		name: TOOL_NAMES.merge,
 		label: "Merge gated train",
 		description:
 			"Merge a previously gated train: replays each branch on the current base, verifies the tree is exactly the gated tree, squashes each PR in order, deletes branches. Refusals: replay-conflict / tree-differs (re-gate) / notes-missing / branch-changed / pr-not-merged / not-gated-green.",
 		parameters: branchesSchema,
 		execute: (_id, params: Params<typeof branchesSchema>, _s, _u, toolCtx) =>
-			runBounded("devloop.merge", toolCtx, async (ctx) => {
+			runBounded(TOOL_NAMES.merge, toolCtx, async (ctx) => {
 				const out = await runMergeTrain({ scriptsDir: ctx.scriptsDir, repoRoot: ctx.cfg.root, branches: params.branches });
 				const label =
 					out.status === "merged"
@@ -948,12 +964,12 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 	});
 
 	const status = defineTool({
-		name: "devloop.status",
+		name: TOOL_NAMES.status,
 		label: "Dev-loop status",
 		description: "Show the loop's current state: in-flight children, open tickets with dl/ labels, capacity, and the last green gate record.",
 		parameters: Type.Object({}),
 		execute: (_id: string, _p: unknown, _s: AbortSignal | undefined, _u: unknown, toolCtx: { cwd: string }): Promise<AgentToolResult<undefined>> =>
-			runBounded("devloop.status", toolCtx, async (ctx) => {
+			runBounded(TOOL_NAMES.status, toolCtx, async (ctx) => {
 				const state = pruneDead(readState(ctx.stateDir));
 				const kids = Object.entries(state)
 					.map(([k, e]) => `| #${k} | ${e.role} | ${e.branch ?? "-"} | ${e.status} | ${new Date(e.startedAt).toISOString().slice(0, 16).replace("T", " ")} |`)
@@ -980,12 +996,12 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 	});
 
 	const pause = defineTool({
-		name: "devloop.pause",
+		name: TOOL_NAMES.pause,
 		label: "Pause dev-loop",
 		description:
 			"Operator pause: terminate every running child (worktrees kept), write HANDOFF.md (per-child positions + board snapshot) in the notes dir, and comment on the interrupted tickets. On resume (fresh session + 'keep going'), step 0 reads the handoff and re-dispatches the interrupted children.",
 		parameters: Type.Object({}),
-		execute: (_id, _params, _s, _u, toolCtx) => runBounded("devloop.pause", toolCtx, (c) => pauseImpl(c)),
+		execute: (_id, _params, _s, _u, toolCtx) => runBounded(TOOL_NAMES.pause, toolCtx, (c) => pauseImpl(c)),
 	});
 
 	return [dispatch, cancel, pause, gate, merge, status];

@@ -81,8 +81,8 @@ test("extension registers 6 tools, the full orchestrator hook set and the /devlo
 		const { pi, tools, hooks, commands } = fakePi();
 		devloopExtension(pi);
 		assert.equal(tools.length, 6);
-		assert.ok(tools.includes("devloop.pause"));
-		assert.ok(tools.includes("devloop.dispatch"));
+		assert.ok(tools.includes("devloop_pause"));
+		assert.ok(tools.includes("devloop_dispatch"));
 		// P2: the orchestrator gains the policy tool_call hook and a policy session_start seat
 		// on top of the pre-existing four (the UI session_start remains); P3's shim-PATH arm
 		// is a third session_start seat (the hook set otherwise stays put).
@@ -453,13 +453,13 @@ test("orchestrator liveness: session_start seeds the sidecar, tool_execution_* d
 			assert.equal(s!.sessionId, "sess-live");
 			assert.equal(s!.tool, null);
 
-			await fire("tool_execution_start", { toolCallId: "c1", toolName: "devloop.gate", args: {} });
+			await fire("tool_execution_start", { toolCallId: "c1", toolName: "devloop_gate", args: {} });
 			s = loadState(stDir);
-			assert.equal(s!.tool?.name, "devloop.gate");
+			assert.equal(s!.tool?.name, "devloop_gate");
 			assert.equal(s!.tool?.seq, 1, "the first tool call starts the sequence at 1");
 			assert.equal(s!.state, "active");
 
-			await fire("tool_execution_start", { toolCallId: "c2", toolName: "devloop.status", args: {} });
+			await fire("tool_execution_start", { toolCallId: "c2", toolName: "devloop_status", args: {} });
 			assert.equal(loadState(stDir)!.tool?.seq, 2, "seq increments on every start");
 
 			const evBefore = loadState(stDir)!.lastEventAt;
@@ -467,7 +467,7 @@ test("orchestrator liveness: session_start seeds the sidecar, tool_execution_* d
 			const evAfter = loadState(stDir)!.lastEventAt;
 			assert.ok(evAfter >= evBefore, "high-frequency events tick lastEventAt");
 
-			await fire("tool_execution_end", { toolCallId: "c2", toolName: "devloop.status" });
+			await fire("tool_execution_end", { toolCallId: "c2", toolName: "devloop_status" });
 			s = loadState(stDir);
 			assert.equal(s!.tool, null, "the tool is cleared on end");
 			assert.equal(s!.state, "idle", "back to idle with no tool in flight");
@@ -505,7 +505,7 @@ test("orchestrator liveness: shutdown makes the sidecar TERMINAL — the trailin
 
 			// The exact incident this ticket exists for: shutdown WHILE a tool is in flight.
 			await fire("session_start", { reason: "startup" });
-			await fire("tool_execution_start", { toolCallId: "c1", toolName: "devloop.gate", args: {} });
+			await fire("tool_execution_start", { toolCallId: "c1", toolName: "devloop_gate", args: {} });
 			assert.equal(loadState(stDir)!.state, "active");
 			await fire("session_shutdown", { reason: "quit" });
 			assert.equal(loadState(stDir)!.state, "ended", "shutdown writes the tombstone");
@@ -513,10 +513,10 @@ test("orchestrator liveness: shutdown makes the sidecar TERMINAL — the trailin
 			// The tombstone (in-flight tool snapshot included) must not be TOUCHED by any
 			// later event — byte-identical is the sharpest pin.
 			const tombstone = readFileSync(sidecarPath(stDir), "utf8");
-			await fire("tool_execution_end", { toolCallId: "c1", toolName: "devloop.gate" });
+			await fire("tool_execution_end", { toolCallId: "c1", toolName: "devloop_gate" });
 			assert.equal(loadState(stDir)!.state, "ended", "the trailing end does NOT rewrite the tombstone to idle");
 			// A late start and a late message tick are dead too.
-			await fire("tool_execution_start", { toolCallId: "c2", toolName: "devloop.status", args: {} });
+			await fire("tool_execution_start", { toolCallId: "c2", toolName: "devloop_status", args: {} });
 			await fire("message_update", {});
 			assert.equal(readFileSync(sidecarPath(stDir), "utf8"), tombstone, "late events never rewrite a shut-down doc");
 			assert.equal(loadState(stDir)!.state, "ended");
@@ -608,7 +608,7 @@ test("orchestrator liveness: an externally raised lastWakeSeq is never regressed
 			await fire("session_start", { reason: "startup" });
 			// The watchdog raised the watermark between two tool calls (it writes the sidecar too).
 			writeState(stDir, { ...loadState(stDir)!, lastWakeSeq: 3 });
-			await fire("tool_execution_start", { toolCallId: "c9", toolName: "devloop.gate", args: {} });
+			await fire("tool_execution_start", { toolCallId: "c9", toolName: "devloop_gate", args: {} });
 			assert.equal(loadState(stDir)!.lastWakeSeq, 3, "the persist adopted the higher watermark instead of regressing it");
 		});
 	} finally {

@@ -38,7 +38,7 @@ test("sidecarPath: the sidecar lives in the state dir as orchestrator-state.json
 test("writeState/loadState round-trip the full spec §1 shape", () => {
 	const d = mkdtemp();
 	try {
-		const s = base({ tool: { name: "devloop.gate", startedAt: 176, seq: 7 }, state: "idle", lastWakeSeq: 3 });
+		const s = base({ tool: { name: "devloop_gate", startedAt: 176, seq: 7 }, state: "idle", lastWakeSeq: 3 });
 		writeState(d, s);
 		assert.deepEqual(loadState(d), s, "every field survives the round trip");
 	} finally { rmSync(d, { recursive: true, force: true }); }
@@ -123,10 +123,10 @@ const render = (o: { state: LivenessState | null; now: number; staleMs: number; 
 	renderStatus({ state: o.state, now: o.now, staleMs: o.staleMs, processAlive: o.pidAlive });
 
 test("renderStatus rc 0: live — tool in flight, fresh heartbeat, process alive", () => {
-	const v = render({ state: base({ tool: { name: "devloop.gate", startedAt: 999_000, seq: 2 } }), now: 1_000_000, staleMs: 120_000, pidAlive: true });
+	const v = render({ state: base({ tool: { name: "devloop_gate", startedAt: 999_000, seq: 2 } }), now: 1_000_000, staleMs: 120_000, pidAlive: true });
 	assert.equal(v.rc, 0);
 	assert.match(v.line, /LIVE/);
-	assert.match(v.line, /devloop\.gate/);
+	assert.match(v.line, /devloop_gate/);
 });
 
 test("renderStatus rc 1: alive but idle (no in-flight tool, fresh heartbeat)", () => {
@@ -156,7 +156,7 @@ test("renderStatus rc 3: state ended is dead even with a fresh heartbeat", () =>
 });
 
 test("renderStatus rc 3: the sidecar process is gone ⇒ dead, even when state is active and the heartbeat looks fresh", () => {
-	const v = render({ state: base({ tool: { name: "devloop.gate", startedAt: 999_000, seq: 1 } }), now: 1_000_000, staleMs: 120_000, pidAlive: false });
+	const v = render({ state: base({ tool: { name: "devloop_gate", startedAt: 999_000, seq: 1 } }), now: 1_000_000, staleMs: 120_000, pidAlive: false });
 	assert.equal(v.rc, 3);
 	assert.match(v.line, /DEAD/i);
 });
@@ -175,7 +175,7 @@ test("renderStatus rc 1: no sidecar but a matching process runs (alive, no liven
 // Addendum 2026-11-15 21:20 — OOM root cause surfaced on the line -----------------------------
 
 test("renderStatus: meminfo figures (from /proc/meminfo via MULTIPI_STATUS_MEMINFO) ride on the line, human-readable", () => {
-	const v = renderStatus({ state: base({ tool: { name: "devloop.gate", startedAt: 999_000, seq: 2 } }), now: 1_000_000, staleMs: 120_000, processAlive: true, mem: { ramKib: 1_048_576, swapFreeKib: 524_288 } });
+	const v = renderStatus({ state: base({ tool: { name: "devloop_gate", startedAt: 999_000, seq: 2 } }), now: 1_000_000, staleMs: 120_000, processAlive: true, mem: { ramKib: 1_048_576, swapFreeKib: 524_288 } });
 	assert.match(v.line, /ram=1\.0G swapfree=512M/, "GiB renders with one decimal, MiB integral");
 	const idle = renderStatus({ state: base({ state: "idle" }), now: 1_000_000, staleMs: 120_000, processAlive: true, mem: { ramKib: 153_600, swapFreeKib: 0 } });
 	assert.match(idle.line, /ram=150M swapfree=0M/, "sub-GiB and zero swap stay in MiB");
@@ -184,7 +184,7 @@ test("renderStatus: meminfo figures (from /proc/meminfo via MULTIPI_STATUS_MEMIN
 });
 
 test("renderStatus rc 3: a vanished pid's dead text names the oom-kill journal check (confirmed root cause)", () => {
-	const v = render({ state: base({ tool: { name: "devloop.gate", startedAt: 999_000, seq: 1 } }), now: 1_000_000, staleMs: 120_000, pidAlive: false });
+	const v = render({ state: base({ tool: { name: "devloop_gate", startedAt: 999_000, seq: 1 } }), now: 1_000_000, staleMs: 120_000, pidAlive: false });
 	assert.equal(v.rc, 3);
 	assert.match(v.line, /journalctl --since <start> \| grep oom-kill/, "the likely cause is named with the exact check");
 });
@@ -238,16 +238,16 @@ test("withTimeout: an impl rejection still propagates (the timeout only bounds e
 
 test("timeoutText: the exact reconciliation text the spec pins", () => {
 	assert.equal(
-		timeoutText("devloop.gate", 2_700_000),
-		"devloop.gate timed out after 45m — external state (branch, worktree, child) is UNTOUCHED; check scripts/multipi-status.sh and devloop.status, then retry or devloop.cancel <ticket>.",
+		timeoutText("devloop_gate", 2_700_000),
+		"devloop_gate timed out after 45m — external state (branch, worktree, child) is UNTOUCHED; check scripts/multipi-status.sh and devloop_status, then retry or devloop_cancel <ticket>.",
 	);
 });
 
 test("timeoutText: a sub-minute bound renders <N>s — the agreed sub-minute variant of the spec's exact text (never 0m, whole seconds, minimum 1s)", () => {
-	const tail = " — external state (branch, worktree, child) is UNTOUCHED; check scripts/multipi-status.sh and devloop.status, then retry or devloop.cancel <ticket>.";
-	assert.equal(timeoutText("devloop.status", 30_000), `devloop.status timed out after 30s${tail}`);
-	assert.equal(timeoutText("devloop.status", 1_500), `devloop.status timed out after 2s${tail}`, "rounded to whole seconds");
-	assert.equal(timeoutText("devloop.status", 400), `devloop.status timed out after 1s${tail}`, "minimum 1s — never 0s/0m");
+	const tail = " — external state (branch, worktree, child) is UNTOUCHED; check scripts/multipi-status.sh and devloop_status, then retry or devloop_cancel <ticket>.";
+	assert.equal(timeoutText("devloop_status", 30_000), `devloop_status timed out after 30s${tail}`);
+	assert.equal(timeoutText("devloop_status", 1_500), `devloop_status timed out after 2s${tail}`, "rounded to whole seconds");
+	assert.equal(timeoutText("devloop_status", 400), `devloop_status timed out after 1s${tail}`, "minimum 1s — never 0s/0m");
 });
 
 // --- shared helpers -----------------------------------------------------------

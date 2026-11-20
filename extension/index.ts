@@ -13,12 +13,12 @@ import { loadConfig, mainRoot, resolveState } from "./src/config.ts";
 import * as liveness from "./src/liveness.ts";
 import { makeTools, evaluateSettle, formatEditedFile } from "./src/tools.ts";
 
-const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issue labels: open -> dl/in-progress (a child is working) -> dl/in-review (PR open) -> dl/approved (review VERDICT: APPROVE) -> dl/gated (batch gate green) -> dl/merged (squash-merged; then close the issue). dl/blocked marks tickets needing a human decision. Workflow: dispatch role agents with devloop.dispatch (one ticket per implementer; independent tickets in parallel, up to the slot cap); when reports land, review, then gate ALL dl/approved branches together with devloop.gate (in a deliberate merge order), and merge the green train with devloop.merge (same order). Check progress any time with devloop.status. When the operator asks to pause or stop the loop, call devloop.pause (it interrupts all children, writes HANDOFF.md, and comments the tickets), then settle. On a fresh session, step 0 of the devloop skill reads a HANDOFF.md if present and re-dispatches the interrupted children. Stop only when no open ticket is startable (unblocked with closed or in-flight dependencies) — the stop-gate enforces this for you.`;
+const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issue labels: open -> dl/in-progress (a child is working) -> dl/in-review (PR open) -> dl/approved (review VERDICT: APPROVE) -> dl/gated (batch gate green) -> dl/merged (squash-merged; then close the issue). dl/blocked marks tickets needing a human decision. Workflow: dispatch role agents with devloop_dispatch (one ticket per implementer; independent tickets in parallel, up to the slot cap); when reports land, review, then gate ALL dl/approved branches together with devloop_gate (in a deliberate merge order), and merge the green train with devloop_merge (same order). Check progress any time with devloop_status. When the operator asks to pause or stop the loop, call devloop_pause (it interrupts all children, writes HANDOFF.md, and comments the tickets), then settle. On a fresh session, step 0 of the devloop skill reads a HANDOFF.md if present and re-dispatches the interrupted children. Stop only when no open ticket is startable (unblocked with closed or in-flight dependencies) — the stop-gate enforces this for you.`;
 
 /**
  * multipi dev-loop extension.
  *
- * Orchestrator sessions register the devloop.* control-plane tools and hooks:
+ * Orchestrator sessions register the devloop_* control-plane tools and hooks:
  *  - agent_before_settle: the three-way stop gate (red fast check / dirty tree / startable tickets).
  *  - tool_result: format-on-edit after successful write/edit calls.
  *  - tool_call: the permission-policy tripwire (spec 2026-11-09-multipi-permission-policy.md
