@@ -1,7 +1,7 @@
-# multipi permission policy (draft for operator review)
+# multipi permission policy
 
 Date: 2026-11-09 · Status: CONFIRMED by operator 2026-11-09 ("go for it" — proposed ask list,
-`policy.repos: ["self"]`, 10-min token TTL accepted as drafted)
+`policy.repos: ["self"]`, 10-min token TTL accepted as drafted) — implemented and live
 References: `docs/permission-example.json` (operator's command sample),
 `docs/permissions.local.example.json` (original claude-dev-loop local permissions),
 incident: 2026-11-09 unauthorized upgrade of a foreign repo (the "oneshot" incident).

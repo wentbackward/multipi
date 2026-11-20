@@ -1,7 +1,7 @@
 # multipi — dev-loop extension for pi (design spec)
 
 Date: 2026-10-27
-Status: proposed — awaiting owner review
+Status: shipped — implemented, dogfooded and live (this repository is its own first installed instance; post-shipping changes land as the dated addenda below and in the sibling specs)
 Repo: `wentbackward/multipi` (this repository is both the product and the first loop-managed project)
 
 ## 1. Purpose
@@ -37,7 +37,7 @@ Three layers, each independently testable:
 
 ### 2.1 Skills (orchestrator brain)
 
-- `.pi/skills/devloop/SKILL.md` — the orchestrator workflow: ticketing, scheduling (≤3 implementers,
+- `.pi/skills/devloop/SKILL.md` — the orchestrator workflow: ticketing, scheduling (up to `heavy.slots` implementers,
   pair tickets that don't touch the same files), the review loop, gate/merge rules incl. red-train
   bisection, run-and-verify, decisions log discipline, stop conditions, plain-language reporting.
   Ported from the reference `dev-loop` skill, adapted to pi (no `CLAUDE_PLUGIN_ROOT`, no identity
@@ -49,12 +49,13 @@ Three layers, each independently testable:
 
 ### 2.2 Extension (`.pi/extensions/devloop/`, TypeScript)
 
-Five tools, grouped in a `devloop` namespace:
+Six tools, sharing the `devloop_` name prefix:
 
 | Tool | Parameters | Behaviour |
 |---|---|---|
-| `devloop_dispatch` | `{role: "implementer"|"code-reviewer"|"verifier", ticket?, branch?, worktree?, task?, notes?}` | Spawns the role as an isolated headless `pi -p --no-session --mode json` subprocess with the role's system prompt (`agents/<role>.md`) via `--append-system-prompt`, cwd = the ticket's worktree. Streams the child's tool calls and text via `onUpdate` (visible in the user's TUI). Returns the child's final report + usage. For `implementer`: deterministically computes the branch name (`<type>/<n>-<slug>`), creates the worktree on the latest base (or a dependency branch), allocates a port range outside the gate's range, resolves the notes file path, and assembles the full brief from the template + config. The orchestrator supplies the *ticket*, not the paths. Enforces ≤3 in-flight implementers via a state file (survives restarts): a fourth concurrent dispatch is **refused** with the list of in-flight tickets (the orchestrator re-issues once a report lands; children are blocking, so slots free as reports arrive). If the ticket's worktree/branch already exists (a re-dispatch after cancel or crash), dispatch reuses it instead of recreating it. |
+| `devloop_dispatch` | `{role: "implementer"|"code-reviewer"|"verifier", ticket?, branch?, worktree?, task?, notes?}` | Spawns the role as an isolated headless `pi -p --no-session --mode json` subprocess with the role's system prompt (`agents/<role>.md`) via `--append-system-prompt`, cwd = the ticket's worktree. Streams the child's tool calls and text via `onUpdate` (visible in the user's TUI). Returns the child's final report + usage. For `implementer`: deterministically computes the branch name (`<type>/<n>-<slug>`), creates the worktree on the latest base (or a dependency branch), allocates a port range outside the gate's range, resolves the notes file path, and assembles the full brief from the template + config. The orchestrator supplies the *ticket*, not the paths. Enforces at most `heavy.slots` in-flight implementers (default 2) via a state file (survives restarts): a further concurrent dispatch is **refused** with the list of in-flight tickets (the orchestrator re-issues once a report lands; children are blocking, so slots free as reports arrive). If the ticket's worktree/branch already exists (a re-dispatch after cancel or crash), dispatch reuses it instead of recreating it. |
 | `devloop_cancel` | `{ticket}` | Kills one running child (SIGTERM, SIGKILL after 5s) recorded in the dispatch state file (pid + worktree per ticket), frees its slot. The worktree and its commits survive; re-dispatch resumes. |
+| `devloop_pause` | — | Interrupts EVERY running child (SIGTERM to the whole process tree; bounded 15 s kill-wait, children that do not die are reported as laggards), writes `HANDOFF.md` to the notes dir (per-child positions + the open-board snapshot at that instant), and comments each interrupted ticket with a one-line operator note. Worktrees and branches survive; resume is a fresh session that reads the handoff and re-dispatches. Full contract in the 2026-11-01 addendum. |
 | `devloop_gate` | `{branches: string[]}` (merge order) | Wraps `scripts/gate-train.sh`. Stacks the approved branches on the latest base in the gate worktree, runs every configured check once (heavy ones through `heavy.sh`). Structured result: `{status: "green"|"red"|"conflict", branch?, failures[{check, summary}], logs: <path>}`. Script exit codes: 0 green, 1 red (incl. `gate_setup` failure, log kept), 2 usage/config, 3 rebase conflict (branch named in output). |
 | `devloop_merge` | `{branches: string[]}` (same order as the gate) | Wraps `scripts/merge-train.sh`. Replays each branch on the current base, verifies the replayed tree is *exactly* the gated tree, pushes, opens the PR from the notes file, squash-merges, deletes the branch. Structured per-branch outcome + exit-code meaning surfaced to the model. Script exit codes: 0 all merged, 2 usage/config, 3 replay conflict, 4 tree differs from the gated one (re-gate), 5 notes file missing, 6 branch changed since the gate, 7 PR not merged / gh failed, 8 not gated green. |
 | `devloop_status` | — | Derived snapshot, for restart-recovery and user reporting: open issues with phase labels, worktrees, in-flight dispatches (from the state file), last gate result. Everything is derivable from GitHub + git + state file; nothing is stored that cannot be reconstructed. |
@@ -77,7 +78,7 @@ Two hooks:
   and the file matches `format_extensions`, run the format command on that file (`{file}` = path).
 
 Extension hygiene: handlers report errors loudly (fail-closed where a safety decision is involved);
-no long-lived processes started in the factory; state file writes atomic; cleanup idempotent.
+no long-lived processes started in the factory — the ONE sanctioned exception being the liveness spec's auto-started `scripts/multipi-watch.sh --daemon` (spec `2026-11-15-orchestrator-liveness.md` §4: single-instance via pidfile + lockfile, TUI sessions only, idempotent spawn, serves the NEXT session, not a per-child process); state file writes atomic; cleanup idempotent.
 
 ### 2.3 Scripts (ported, shell, shellcheck-clean)
 
@@ -119,7 +120,7 @@ Flow (owned by the `devloop` skill):
 
 1. **Tickets.** One issue per work item of the spec's breakdown: acceptance criteria as a
    checklist, `Depends on #n`, labels. Spec lives in git (e.g. `docs/spec/`), committed and pushed.
-2. **Schedule.** ≤3 implementers at once, one ticket each; a ticket starts when its dependencies
+2. **Schedule.** Up to `heavy.slots` implementers at once (default 2), one ticket each; a ticket starts when its dependencies
    are merged (or may stack on a dependency's pushed branch). Pair tickets that touch different
    areas. After every merge or report, start the next ticket immediately — no pausing to report.
 3. **Implement.** `devloop_dispatch {role: implementer, ticket}` (parallel tool calls give the
@@ -134,7 +135,12 @@ Flow (owned by the `devloop` skill):
      a real flake.
    - CONFLICT at bn → drop it, gate/merge the rest, implementer rebases on the new base, re-gate.
 6. **Merge.** `devloop_merge [same branches, same order]`. Base moved (exit 4) → re-gate first.
-   Afterwards: remove merged worktrees, comment on issues, close via `Closes #n`, start next tickets.
+   Afterwards: remove merged worktrees, comment on issues, then CLOSE MANUALLY — the orchestrator runs
+   `gh issue close <n> --comment …` once the squash merge is confirmed. Closing is NOT automatic via the PR's
+   `Closes #n` body: the close keyword only fires on MERGE, while deleting the branch from the remote — the
+   delete-then-push rebase path, or the post-merge `git push --delete` cleanup — closes the branch's PR
+   WITHOUT merging; a PR closed that way must be reopened (or re-created) and re-merged before its issue is
+   closed (observed on #55). Start next tickets.
    Stacked branches rebase `--onto` after the lower merges, never carrying foreign commits.
 7. **Run & verify.** A merged ticket that adds/changes a job: run it for real (background if long),
    record result on the issue, `devloop_dispatch {role: verifier}` on the outputs. Deploy only when
@@ -158,8 +164,7 @@ Repo root, committed. Same keys/defaults as the reference (state dir renamed to
 `format_extensions`, `checks[]` (`{name, command, heavy, summary}` or plain string; required for
 the gate), `gate_setup`, `gate_worktree` (default `../<repo>-gate`), `notes_dir`, `logs_dir`,
 `heavy.{slots=2, memory_max, port_env, port_base=8600, port_step=10, clean_temp=[], clean_temp_minutes=120, poll_seconds=10}`,
-`stop_gate.{require_clean_tree=true, max_blocks=5}`, `merge.{method=squash, delete_branch=true}`,
-`github.repo` (default from remote URL), `deploy`.
+`stop_gate.{require_clean_tree=true, max_blocks=5}`, `merge.{method=squash, delete_branch=true}`, `worktree_dir` (default `<state_dir>/worktrees/<repo>`; relative resolves against the repo's parent), `child_silence_minutes` (default 30 — the child-output watchdog), `orchestrator.tool_timeout_minutes` (default 45 — the devloop_* tool-call bound; spec 2026-11-15 §2), `cleanup.stale_days` (default 14 — read by `scripts/cleanup-worktrees.sh`), `policy.{posture=allow, repos=["self"], secondaries=[], token_ttl_minutes=10}` (permission-policy spec §11-P1; the rule ARRAYS live in the sibling permissions.json), `factory` ("collaborative" | "dark", default collaborative — a preset that only sets defaults; an explicit option always wins), `scenarios` (block present ⇒ store on in any mode; `false` ⇒ off — the only off-switch; spec 2026-11-01 §1/§2), `github.repo` (default from remote URL), `deploy`.
 
 ## 6. Child-process protocol
 
@@ -261,7 +266,7 @@ or pi package; decided during implementation). This repo is its own first instal
   issues/PRs/labels to a JSON file) + `fake-pi` (emits scripted JSON events: tool calls, final
   report with STATUS line, usage; honours SIGTERM; configurable failure modes). Covers:
   - worktree/branch/port/notes-path computation in `dispatch`;
-  - concurrency cap: 4th simultaneous dispatch refused with the in-flight list; re-dispatch of a
+  - concurrency cap: the dispatch beyond `heavy.slots` refused with the in-flight list; re-dispatch of a
     cancelled ticket reuses the existing worktree (no duplicate branch error); state-file staleness
     pruning (dead pids pruned on read);
   - cancel kills the fake child and frees the slot;
