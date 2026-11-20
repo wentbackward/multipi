@@ -22,11 +22,12 @@ import { redactActionSummary, ACTION_SUMMARY_MAX } from "../../extension/src/pol
  * byte-wise vs code-point-wise matching is locale-insensitive there).
  *
  * KNOWN RESIDUALS — three accepted engine divergences outside the corpus. The
- * byte-identity above is total OVER THE CORPUS, not over the whole input space;
- * in every residual the shim scrubs AT LEAST as much as the TS engine, so the
- * literal token-dir core is removed by both and none of them is a leak. Each is
- * pinned by an exact-literal test below: if an engine is ever aligned, amend that
- * test AND this note in the same change.
+ * byte-identity above is total OVER THE CORPUS, not over the whole input space.
+ * In every residual the token-dir SCRUB itself is identical (the literal core is
+ * removed by both engines); where the divergence is asymmetric (residuals 2 and 3)
+ * the shim removes at least as much as the TS engine — never less. None of these is
+ * a leak. Each is pinned by an exact-literal test below: if an engine is ever
+ * aligned, amend that test AND this note in the same change.
  *
  * 1. ASTRAL-PLANE COUNTING (pre-existing, DECISIONS.md 2026-11-14): astral-plane
  *    characters count 1 in a UTF-8 bash but 2 UTF-16 units in TS, so the two engines
