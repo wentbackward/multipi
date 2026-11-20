@@ -4079,13 +4079,22 @@ BOARD_OUT=$(cd "$bdbase/nogit" && env MULTIPI_HOME="$bddir_home" bash "$plugin/s
 expect "board rc 4: not inside a git repository (unreadable state)" "4" "$BOARD_RC"
 
 # (b) rc 0: a green board with an EMPTY tracker renders "nothing needs you"
-git -C "$work/project" fetch -q origin   # refresh the LOCAL remote refs (the board never fetches itself)
+# Earlier sections' merge trains moved origin/main without the local main — sync the
+# LOCAL ref first (the board itself never fetches), then pin both header renderings.
+git -C "$work/project" fetch -q origin
+git -C "$work/project" checkout -q main 2>/dev/null || git -C "$work/project" checkout -qb main origin/main
+git -C "$work/project" reset -q --hard origin/main
 board
 expect "board rc 0: a green board with zero open tickets" "0" "$BOARD_RC"
 echo "$BOARD_OUT" | grep -qF "multipi board — owner/fixture @" && \
   pass "board: the seam MULTIPI_BOARD_REPO pins the header slug" || fail "board header: $(head -1 <<<"$BOARD_OUT")"
 echo "$BOARD_OUT" | grep -qF "(main synced)" && \
   pass "board: a fresh local main renders (main synced)" || fail "board main sync: $(head -1 <<<"$BOARD_OUT")"
+git -C "$work/project" reset -q --hard origin/main~1
+board
+echo "$BOARD_OUT" | grep -qF "(main behind 1)" && \
+  pass "board: a lagging local main renders (main behind 1)" || fail "board main behind: $(head -1 <<<"$BOARD_OUT")"
+git -C "$work/project" reset -q --hard origin/main
 echo "$BOARD_OUT" | grep -qF "in-flight: none" && \
   pass "board: no dispatch entries renders in-flight: none" || fail "board in-flight: $(grep -F in-flight <<<"$BOARD_OUT" || echo '<none>')"
 echo "$BOARD_OUT" | grep -qF "gate: never run" && \
