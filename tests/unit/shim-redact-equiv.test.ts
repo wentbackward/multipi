@@ -113,6 +113,42 @@ test("representative outputs are the LITERAL contract (the engines cannot drift 
 	assert.equal(shimRedact(CORPUS[20].input), "\u00e9".repeat(ACTION_SUMMARY_MAX) + "\u2026", "175 chars cut to 160 + ellipsis");
 });
 
+test("residual 1: NBSP stops the TS span (JS \\s) but not the shim span (POSIX [:space:]) — the shim OVER-scrubs (#55 review-tail)", () => {
+	// glibc puts U+00A0 in NO [:space:] (not even under C.utf8) while JS \\s matches it:
+	// the TS span halts AT the NBSP, the shim span swallows it and the tail with it.
+	// Pinned under the default locale AND a C-locale caller — the direction is the same
+	// everywhere: the shim removes MORE, never less (no raw token-dir core in either).
+	for (const extraEnv of [{}, { LC_ALL: "C", LANG: "C" }] as NodeJS.ProcessEnv[]) {
+		const input = "x ~/.m/dev-loop-tokens\u00A0tail";
+		assert.equal(redactActionSummary(input, null), "x <token-dir>\u00A0tail", "TS: \\s stops the span at NBSP");
+		assert.equal(shimRedact(input, extraEnv), "x <token-dir>", "shim: [:space:] lacks NBSP — the span eats the tail");
+	}
+});
+
+test("residual 1 (scope): U+2028 diverges ONLY for a C-locale caller, same over-scrub direction (#55 review-tail)", () => {
+	const input = "x ~/.m/dev-loop-tokens\u2028tail";
+	assert.equal(redactActionSummary(input, null), "x <token-dir>\u2028tail", "TS: \\s matches U+2028");
+	assert.equal(
+		shimRedact(input, { LC_ALL: "C", LANG: "C" }),
+		"x <token-dir>",
+		"C-locale caller: [:space:] is ASCII-only, the span eats the tail",
+	);
+	// NB: under a UTF-8 ambient locale glibc DOES put U+2028 in [:space:], so the engines
+	// agree there — the residual is C-locale-scoped by construction, which is why this
+	// test drives LC_ALL=C explicitly and makes no default-locale assertion.
+});
+
+test("residual 2: a trailing newline is stripped by the shim's $(…) substitutions but preserved by TS (#55 review-tail)", () => {
+	const input = "ls ~/.m/dev-loop-tokens/t\n";
+	const ts = redactActionSummary(input, null);
+	const sh = shimRedact(input);
+	assert.equal(ts, "ls <token-dir>\n", "TS preserves the trailing newline");
+	assert.equal(sh, "ls <token-dir>", "shim: the s=$(…) substitution eats it");
+	// Safe direction: the SCRUB is identical in both; only the line terminator differs,
+	// so the shim never prints material the TS engine would not have printed.
+	assert.ok(!ts.includes("dev-loop-tokens") && !sh.includes("dev-loop-tokens"), "raw token-dir core scrubbed by both");
+});
+
 test("a C-locale caller gets the same output, always valid UTF-8 (locale-pinned bound, #55 review SF1)", () => {
 	// The caller's locale must not decide the bound: under LC_ALL=C, bash's ${#s}/
 	// ${s:0:160} count BYTES and cut mid-sequence (a lone 0xB6 tail — undecodable audit
