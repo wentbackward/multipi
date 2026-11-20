@@ -144,11 +144,12 @@ test("representative outputs are the LITERAL contract (the engines cannot drift 
 	assert.equal(shimRedact(CORPUS[20].input), "\u00e9".repeat(ACTION_SUMMARY_MAX) + "\u2026", "175 chars cut to 160 + ellipsis");
 });
 
-test("residual 1: NBSP stops the TS span (JS \\s) but not the shim span (POSIX [:space:]) — the shim OVER-scrubs (#55 review-tail)", () => {
+test("residual 2 (NBSP): stops the TS span (JS \\s) but not the shim span (POSIX [:space:]) — the shim OVER-scrubs (#55 review-tail)", () => {
 	// glibc puts U+00A0 in NO [:space:] (not even under C.utf8) while JS \\s matches it:
 	// the TS span halts AT the NBSP, the shim span swallows it and the tail with it.
 	// Pinned under the default locale AND a C-locale caller — the direction is the same
 	// everywhere: the shim removes MORE, never less (no raw token-dir core in either).
+	// NB: the ambient-locale leg asserts the shim's DEFAULT output, so it leans on that "NBSP in no glibc [:space:]" premise (mirroring the U+2028 pin's scoping); the C-locale leg pins the direction regardless.
 	for (const extraEnv of [{}, { LC_ALL: "C", LANG: "C" }] as NodeJS.ProcessEnv[]) {
 		const input = "x ~/.m/dev-loop-tokens\u00A0tail";
 		assert.equal(redactActionSummary(input, null), "x <token-dir>\u00A0tail", "TS: \\s stops the span at NBSP");
@@ -156,7 +157,7 @@ test("residual 1: NBSP stops the TS span (JS \\s) but not the shim span (POSIX [
 	}
 });
 
-test("residual 1 (scope): U+2028 diverges ONLY for a C-locale caller, same over-scrub direction (#55 review-tail)", () => {
+test("residual 2 (scope: U+2028): diverges ONLY for a C-locale caller, same over-scrub direction (#55 review-tail)", () => {
 	const input = "x ~/.m/dev-loop-tokens\u2028tail";
 	assert.equal(redactActionSummary(input, null), "x <token-dir>\u2028tail", "TS: \\s matches U+2028");
 	assert.equal(
@@ -169,7 +170,7 @@ test("residual 1 (scope): U+2028 diverges ONLY for a C-locale caller, same over-
 	// test drives LC_ALL=C explicitly and makes no default-locale assertion.
 });
 
-test("residual 2: a trailing newline is stripped by the shim's $(…) substitutions but preserved by TS (#55 review-tail)", () => {
+test("residual 3 (trailing newline): stripped by the shim's $(…) substitutions but preserved by TS (#55 review-tail)", () => {
 	const input = "ls ~/.m/dev-loop-tokens/t\n";
 	const ts = redactActionSummary(input, null);
 	const sh = shimRedact(input);
@@ -274,4 +275,31 @@ test("the locale probe is lazy AND cached: sub-bound summaries never probe; once
 	} finally {
 		ctx.cleanup();
 	}
+});
+
+// #93 (the #91 review-tail polish): the KNOWN RESIDUALS note numbers the accepted
+// divergences 1 = astral-plane, 2 = span-class whitespace, 3 = trailing newline — a test
+// title's "residual N" prefix must cite the note's item N, not the pin's own sequence.
+// Pre-#93 the third pin was titled "residual 2" (the note's whitespace item) and the
+// NBSP pin "residual 1" (the note's astral item), so one grep hit two different facts.
+test("the residual-pin titles number themselves by the KNOWN RESIDUALS note's items, never their own sequence (#93)", () => {
+	// Re-derived from THIS file's own source: every test title cited as a pin must number
+	// itself after the note's item for the divergence it pins. The scanner is line-anchored
+	// and the corpus is small — if a test title ever spans lines, extend the pattern.
+	const src = fs.readFileSync(new URL(import.meta.url), "utf8");
+	const titles = [...src.matchAll(/^test\("(.*)", \(\)/gm)].map((m) => m[1]);
+	const residualTitles = titles.filter((t) => /^residual \d/.test(t));
+	for (const [topic, item] of [["NBSP", 2], ["U+2028", 2], ["trailing newline", 3]] as const) {
+		const pin = residualTitles.find((t) => t.toLowerCase().includes(topic.toLowerCase()));
+		assert.ok(pin, `a pin titled for ${topic} exists`);
+		assert.ok(
+			pin.startsWith(`residual ${item}`),
+			`${topic} is note item ${item}: the pin must be titled "residual ${item} …" (got ${JSON.stringify(pin)})`,
+		);
+	}
+	assert.equal(
+		residualTitles.length,
+		3,
+		`exactly the three noted divergences carry "residual N" titles, got: ${residualTitles.map((t) => JSON.stringify(t)).join(", ")}`,
+	);
 });
