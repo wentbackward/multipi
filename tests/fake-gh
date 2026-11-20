@@ -258,9 +258,12 @@ case "${1:-} ${2:-}" in
     if [ -n "${fields##*comments}" ]; then
       printf '{"title":"%s"}\n' "$(jesc "$title")"
     else
+      # Multi-line comments round-trip as VALID JSON: the real CLI never emits a raw
+      # newline inside a string — quote first, then encode newlines as \n (the
+      # issue-list idiom; ticket #103 found the board's jq reader rejecting the raw form).
       body=""
-      [ -f "$dir/comments/$n" ] && body=$(awk '{line=line (NR>1?"\n":"") $0} END{print line}' "$dir/comments/$n")
-      printf '{"title":"%s","comments":[{"body":"%s"}]}\n' "$(jesc "$title")" "$(jesc "$body")"
+      [ -f "$dir/comments/$n" ] && body=$(jesc "$(awk '{line=line (NR>1?"\n":"") $0} END{print line}' "$dir/comments/$n")" | awk '{printf "%s%s", (NR>1?"\\n":""), $0}')
+      printf '{"title":"%s","comments":[{"body":"%s"}]}\n' "$(jesc "$title")" "$body"
     fi
     ;;
   "issue edit")
