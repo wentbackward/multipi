@@ -286,6 +286,29 @@ test("status renders children, tickets and the gate record", async () => {
 	} finally { fx.cleanup(); }
 });
 
+test("status shows the per-ticket polish depth for in-review tickets (ticket #105)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Cache layer");
+		// no dl/ label: depth is not even queried ("-")
+		let res = await call(ctx, "devloop_status", {});
+		let t = textOf(res);
+		assert.match(t, /Cache layer \| - \| - \| - \|/m, `unlabelled ticket shows no depth:\n${t}`);
+		// one should-fix round in the review window: 1/2 under the default cap
+		execFileSync("gh", ["issue", "edit", String(n), "--add-label", "dl/in-review"], { cwd: fx.repo, stdio: "pipe" });
+		execFileSync("gh", ["issue", "comment", String(n), "--body", "should-fix follow-up: round one"], { cwd: fx.repo, stdio: "pipe" });
+		res = await call(ctx, "devloop_status", {});
+		t = textOf(res);
+		assert.match(t, /Cache layer \| dl\/in-review \| - \| 1\/2 /, `one round shows 1/2:\n${t}`);
+		// the second round puts the ticket AT the cap: flagged
+		execFileSync("gh", ["issue", "comment", String(n), "--body", "should-fix follow-up: round two"], { cwd: fx.repo, stdio: "pipe" });
+		res = await call(ctx, "devloop_status", {});
+		assert.match(textOf(res), /Cache layer \| dl\/in-review \| - \| 2\/2 cap /, `at the cap, the depth is flagged\n${textOf(res)}`);
+	} finally { fx.cleanup(); }
+});
+
 test("stop gate: red fast check blocks settlement (fake-gh offline)", async () => {
 	const fx = makeFixture(JSON.stringify({ base_branch: "main", fast_check: "false" }));
 	setupEnv(fx);
@@ -603,7 +626,7 @@ test("dispatch(scenario-writer) DONE posts the scenario TITLES (id, title, requi
 		].join("\n"));
 		const res = await call(ctx, "devloop_dispatch", { role: "scenario-writer", ticket: n });
 		assert.match(textOf(res), /scenario-writer #\d+ .* -> done/, textOf(res));
-		const commentFile = path.join(fx.dir, "gh", "comments", String(n));
+		const commentFile = path.join(fx.dir, "gh", "comments", String(n), "0001");
 		assert.ok(existsSync(commentFile), "a comment was posted on the ticket");
 		const comment = readFileSync(commentFile, "utf8");
 		for (const needle of [
