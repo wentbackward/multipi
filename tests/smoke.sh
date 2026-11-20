@@ -4055,7 +4055,7 @@ kill "$LVPID" 2>/dev/null || true
 bdbase="$work/bd"
 bddir_home="$bdbase/home"
 bddir_state="$bddir_home/project"   # DL_STATE = $MULTIPI_HOME/<repo basename "project">
-mkdir -p "$bddir_home" "$bdbase/nogit"
+mkdir -p "$bddir_home" "$bdbase/nogit" "$bdbase/noxbin"
 board() { # board [ENV_KV ...] — run in the fixture repo; sets BOARD_OUT / BOARD_RC
   local out rc
   out=$(cd "$work/project" && env MULTIPI_HOME="$bddir_home" FAKE_GH_DIR="$BDGH" \
@@ -4066,7 +4066,8 @@ BDGH="$bdbase/gh-0"
 mkdir -p "$BDGH"
 
 # (a) rc 4: bad usage / unreadable state / malformed seam (the pinned matrix, first arm)
-board --bogus
+# (--bogus goes AFTER the script: through env's "$@" slot it would BE the command)
+BOARD_OUT=$(cd "$work/project" && env MULTIPI_HOME="$bddir_home" FAKE_GH_DIR="$BDGH" bash "$plugin/scripts/multipi-board.sh" --bogus 2>&1); BOARD_RC=$?
 expect "board rc 4: bad usage (an argument)" "4" "$BOARD_RC"
 board MULTIPI_BOARD_CHILD_BOUND_MIN=09
 expect "board rc 4: a leading-zero MULTIPI_BOARD_CHILD_BOUND_MIN is refused (never read as octal)" "4" "$BOARD_RC"
@@ -4148,7 +4149,9 @@ git -C "$work/project" branch -q feat/2-parser origin/main && git -C "$work/proj
 FAKE_GH_DIR="$BDGH" gh pr create --head feat/2-parser --title "feat: parser (2)" >/dev/null
 # A dispatch record for the blocked ticket whose WORKTREE MTIME carries the blocked age.
 printf '{"1":{"pid":1,"role":"implementer","worktree":"%s/wt1","startedAt":1,"status":"blocked"}}\n' "$bddir_state" >"$bddir_state/dispatch.json"
-mkdir -p "$bddir_state/wt1" && touch -d '2 days ago' "$bddir_state/wt1/anchor"
+mkdir -p "$bddir_state/wt1" && : >"$bddir_state/wt1/anchor"
+touch -d '2 days ago' "$bddir_state/wt1"
+touch -d '2 days ago' "$bddir_state/wt1/anchor"
 board
 expect "board rc 1: a dl/blocked ticket is the bottleneck" "1" "$BOARD_RC"
 ln_blocked=$(grep -nF "[dl/blocked]" <<<"$BOARD_OUT" | head -1 | cut -d: -f1)
