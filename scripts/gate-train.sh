@@ -14,6 +14,9 @@
 # When the scenario store is on (dark-factory spec §5), the
 # scenario stage (scenario-stage.sh) then runs on the train top: a red stage is TRAIN RED (no record), the
 # stage's exit 2 propagates as the gate's exit 2, and a failed check prints `scenarios skipped` instead.
+# Every terminal path also records the LAST-GATE ARTIFACT <state>/gate-last.txt (one line:
+# `result=green|red ts=<ms> detail=<failing-checks|gate_setup|scenarios|-> logdir=<logs>`) — the
+# board's "last gate" source (ticket #103); additive, it carries no new exit-code contract.
 #
 # Exit: 0 TRAIN GREEN (recorded for merge-train.sh), 1 TRAIN RED (includes gate_setup failure),
 # 2 usage/config (includes a stage usage/config error), 3 rebase conflict (the output names the branch:
@@ -55,6 +58,14 @@ logs=$(dl_logs_dir)
 mkdir -p "$logs" "$DL_STATE" || dl_die "cannot create $logs"
 train_file=$(dl_train_file)
 rm -f "$train_file"
+last_file="$DL_STATE/gate-last.txt"
+# gate_record RESULT DETAIL — write the last-gate artifact (ticket #103): the board reads it,
+# nothing else consumes it. tmp+rename so a concurrent read never sees a torn line.
+gate_record() {
+  local ts
+  ts=$(date +%s%3N)
+  printf 'result=%s ts=%s detail=%s logdir=%s\n' "$1" "$ts" "$2" "$logs" >"$last_file.tmp.$$" && mv "$last_file.tmp.$$" "$last_file"
+}
 cd "$gate" || exit 2
 
 git fetch -q --prune "$DL_REMOTE" || dl_die "git fetch $DL_REMOTE failed"
@@ -83,6 +94,7 @@ for branch in "$@"; do
   if ! git rebase -q --onto "$base_ref" "$(upstream_of "$branch")" >/dev/null 2>&1; then
     git rebase --abort >/dev/null 2>&1
     git checkout -q --detach "$DL_REMOTE/$DL_BASE"
+    gate_record red "rebase-conflict-at-$branch"
     echo "TRAIN rebase conflict at $branch"
     exit 3
   fi
@@ -95,6 +107,7 @@ done
 setup=$(cfg gate_setup "")
 if [ -n "$setup" ]; then
   if ! bash -c "$setup" >"$logs/train-setup.log" 2>&1; then
+    gate_record red gate_setup
     echo "gate_setup failed (log: $logs/train-setup.log)"
     echo "TRAIN RED"
     exit 1
@@ -113,6 +126,7 @@ check_field() {
 
 all_green=yes
 summary=""
+failures=""
 count=$(cfg_len checks)
 for ((i = 0; i < count; i++)); do
   name=$(check_field "$i" name "check-$((i + 1))")
@@ -126,7 +140,7 @@ for ((i = 0; i < count; i++)); do
   fi
   rc=$?
   echo "$name rc=$rc (log: $log)"
-  [ "$rc" -eq 0 ] || all_green=""
+  [ "$rc" -eq 0 ] || { all_green=""; failures="${failures:+$failures,}$name"; }
   pattern=$(check_field "$i" summary "")
   if [ -n "$pattern" ]; then
     summary+="$(grep -E -- "$pattern" "$log" | tail -n 3)"$'\n'
@@ -174,6 +188,7 @@ if [ "$scen_on" = on ] && [ -n "$all_green" ]; then
   if [ "$scen_rc" -ne 0 ]; then
     git checkout -q --detach "$DL_REMOTE/$DL_BASE"
     [ "$scen_rc" -eq 2 ] && exit 2
+    gate_record red scenarios
     echo "TRAIN RED"
     exit 1
   fi
@@ -184,8 +199,10 @@ fi
 git checkout -q --detach "$DL_REMOTE/$DL_BASE"
 if [ -n "$all_green" ]; then
   printf '%s' "$records" >"$train_file"
+  gate_record green -
   echo "TRAIN GREEN"
   exit 0
 fi
+gate_record red "$failures"
 echo "TRAIN RED"
 exit 1
