@@ -332,7 +332,7 @@ bd_branch_for() {
 }
 # render_ticket I: one line per ticket (blocked carries its question line).
 render_ticket() {
-  local i=$1 n title bit lab prn sha
+  local i=$1 n title bit lab prn sha br d
   n=${T_NUM[i]}
   title=${T_TITLE[i]}
   if has_lbl dl/blocked "${T_LBL[i]}"; then
