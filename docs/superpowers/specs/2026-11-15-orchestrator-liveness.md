@@ -1,10 +1,11 @@
 # Spec — Orchestrator liveness, interrupt, and bounded tool calls (2026-11-15)
 
-**Trigger (reported, verbatim):** *"Clearly there's an issue with the devloop_gate. … 1. I
+**Trigger (reported, verbatim):** *"Clearly there's an issue with the devloop.gate. … 1. I
 need some way to see if anything is running or if you're just wedged and 2. some way to
 interrupt you with a message to unwedge the process. On top of that, would some kind of wake
 up interrupt help even if it's every 10 minutes or so — at least you won't be forever
-wedged."*
+wedged."* (then `devloop.gate`; now `devloop_gate` post-#99 — the quote is reproduced
+verbatim, spelling included)
 
 Observed incident (evidence in the #55 gate logs): a `devloop_gate` tool call spawned its
 child (train logs written 18:46), then the tool promise never resolved in the orchestrator
@@ -88,7 +89,7 @@ the tool name enters the timeout message via `timeoutText(name, ms)`:
   (absent ⇒ 45; gate trains run 5–15 min, implementers can run long). `MULTIPI_TOOL_TIMEOUT_MS`
   env seam overrides (integer ms; `0` = disabled) — documented, tests use it.
 - On expiry the tool **resolves with an error result** (never rejects, never hangs):
-  `devloop.<tool> timed out after <N>m — external state (branch, worktree, child) is
+  `devloop_<tool> timed out after <N>m — external state (branch, worktree, child) is
   UNTOUCHED; check scripts/multipi-status.sh and devloop_status, then retry or
   devloop_cancel <ticket>.` Bounds are rendered in whole minutes (`45m` for the
   default). A bound UNDER 60 000 ms (only reachable via the `MULTIPI_TOOL_TIMEOUT_MS`
