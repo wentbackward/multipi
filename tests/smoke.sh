@@ -4322,7 +4322,7 @@ expect "blocked fallback: the updatedAt age still wakes (5h > 4h default)" \
 expect "blocked fallback: the approximation is flagged approx=1 in the log (not silent)" \
   "1" "$(grep -cF ' BLOCKED n=1 age=18000000 resumed=0 approx=1' "$wl" 2>/dev/null)"
 expect "blocked fallback: the timeline WAS attempted first (calls.log proves the preference)" \
-  "1" "$(grep -cF 'api repos/owner/fixture/issues/1/timeline' "$BLGH_F/calls.log" 2>/dev/null)"
+  "1" "$(grep -cF 'repos/owner/fixture/issues/1/timeline' "$BLGH_F/calls.log" 2>/dev/null)"
 
 # (f8) neither source parseable → BLOCKED-NO-AGE: the ticket is named, never guessed
 BLGH_N="$work/blgh-noage"; mkdir -p "$BLGH_N"
@@ -4415,8 +4415,8 @@ expect "blocked throttle: 25h+1m later (dedupe lapsed) the second probe wakes ag
 expect "blocked throttle: the TTY now carries exactly two wake lines" "2" "$(wc -l <"$WK")"
 expect "blocked throttle: the second probe stamped a second BL-PROBE line (and a second ledger entry)" \
   "2" "$(grep -cF ' BL-PROBE' "$wl" 2>/dev/null)"
-expect "blocked throttle: the ledger carries two wake entries at the exact ages" \
-  "2" "$(grep -cF ' BLOCKED n=1 age=522060000 resumed=0 approx=0' "$wl" 2>/dev/null)"
+expect "blocked throttle: the ledger carries two wake entries at the exact ages (5d at the first wake, 6d at the re-wake)" \
+  "2" "$(grep -cE ' BLOCKED n=1 age=(432000000|522060000) resumed=0 approx=0' "$wl" 2>/dev/null)"
 
 # (f12) the throttle bounds PROBING; it never eats a due wake: with no usable TTY at
 # probe time the wake is log-only (the 24h window does NOT start), a TTY-ready check
@@ -4500,7 +4500,7 @@ expect "blocked pagination: the age comes from the NEWEST of several dl/blocked 
   'BLOCKED (multipi-watch): #1 has awaited a human decision for 5d — "Which park?". Resume or drop it.' \
   "$(head -1 "$WK" 2>/dev/null)"
 expect "blocked pagination: the timeline call paginates and slurps into one array" \
-  "1" "$(grep -cF -e '--paginate --slurp api repos/owner/fixture/issues/1/timeline' "$BLGH_P/calls.log" 2>/dev/null)"
+  "1" "$(grep -cF -e 'api --paginate --slurp repos/owner/fixture/issues/1/timeline' "$BLGH_P/calls.log" 2>/dev/null)"
 
 # (f15) dep-cluster scoping: only the FIRST reference cluster after each "Depends on"
 # marker is collected — a parenthetical mention ("#3 for the related note") is

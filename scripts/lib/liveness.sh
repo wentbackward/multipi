@@ -147,6 +147,14 @@ lv_last_blocked_ts() {
   awk -v n="$2" '$2 == "BLOCKED" { split($3, kv, "="); if (kv[2] == n) t = $1 } END { print t + 0 }' "$1" 2>/dev/null || echo 0
 }
 
+# lv_last_probe_ts LOG: the timestamp (ms) of the last BL-PROBE stamp (0 when none) —
+# the tracker-probe throttle ledger of the blocked-nudge (ticket #104 gate revision):
+# the probe (gh auth + issue list + per-ticket calls) runs at most once per
+# BLOCKED_PROBE_THROTTLE_MS. Same watch-log-ledger pattern as lv_last_wake_ts.
+lv_last_probe_ts() {
+  awk '$2 == "BL-PROBE" {t = $1} END {print t + 0}' "$1" 2>/dev/null || echo 0
+}
+
 # lv_bump_wake_seq FILE SEQ: atomically raise the sidecar's lastWakeSeq watermark
 # (read-modify-write through a tmp + rename, like the extension's own writer). The two
 # publishers race on the same file, so this closes the SAME lost-update window the
