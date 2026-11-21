@@ -185,11 +185,18 @@ export function unseenTerminals(state: DispatchState, seen: ReconcileSeen): Arra
 	return Object.entries(state).filter(([k, e]) => e.status !== "running" && seen[k] !== terminalTime(e));
 }
 
-/** Merge terminal generations into the seen ledger (under the ledger's own lock cycle). */
+/** Merge terminal generations into the seen ledger. Write-only-on-change: an all-known ack
+ * rewrites nothing (no mtime churn on the cursor file), mirroring reconcileState's discipline. */
 export function ackTerminals(stateDir: string, acks: ReconcileSeen): void {
 	lockedJson(stateDir, SEEN, () => readSeen(stateDir), (s) => writeSeen(stateDir, s), (s) => {
-		Object.assign(s, acks);
-		return { result: s, write: true };
+		let changed = false;
+		for (const [k, v] of Object.entries(acks)) {
+			if (s[k] !== v) {
+				s[k] = v;
+				changed = true;
+			}
+		}
+		return { result: s, write: changed };
 	});
 }
 
