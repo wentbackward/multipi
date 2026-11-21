@@ -1190,7 +1190,10 @@ test("status: late reports name non-numeric keys plainly (review-/analyst- keys 
 		const s = textOf(await call(ctx, "devloop_status", {}));
 		assert.match(s, /- review-5 code-reviewer /, `the review key names plainly:\n${s}`);
 		assert.match(s, /- analyst-feedback analyst /, `the analyst key names plainly:\n${s}`);
-		assert.ok(!s.includes("#review-5") && !s.includes("#analyst-feedback"), "no ticket-number prefix on non-numeric keys");
+		// Scope to the late-report section (the children table keeps its # prefix; only the
+		// late-report lines were asked to name non-numeric keys plainly).
+		const section = s.slice(s.indexOf("## Late reports"), s.indexOf("## Open tickets"));
+		assert.ok(!section.includes("#review-5") && !section.includes("#analyst-feedback"), `no ticket-number prefix on non-numeric keys:\n${section}`);
 	} finally { fx.cleanup(); }
 });
 
