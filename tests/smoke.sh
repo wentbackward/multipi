@@ -1156,7 +1156,11 @@ echo "$out" | grep -q "doctor: 1 problem(s)" &&
 
 # An UNKNOWN provider with a bad name is STILL a problem (the static check is
 # provider-agnostic; only the session_start warning seat is provider-gated).
-out=$(MULTIPI_PROBE_TOOL_NAMES="devloop.bad" bash "$plugin/scripts/doctor.sh" 2>&1)
+# Clear the provider seams: pi injects PI_PROVIDER into every shell-tool command
+# (this session included), so without clearing it doctor resolves the ambient
+# provider (e.g. local-llm) instead of "unknown" and the pin reds — an ambient-env
+# leak, not a product behaviour. MULTIPI_PROVIDER= forces the documented unknown.
+out=$(MULTIPI_PROVIDER= PI_PROVIDER= MULTIPI_PROBE_TOOL_NAMES="devloop.bad" bash "$plugin/scripts/doctor.sh" 2>&1)
 rc=$?
 echo "$out"
 expect "a bad name with an unknown provider is still a problem" "1" "$rc"
@@ -4088,7 +4092,25 @@ expect "watch daemon: a pidfile is held" "1" "$([ -f "$lvstate/watch.pid" ] && e
 dl_daemon_second=$(env MULTIPI_HOME="$lvhome" bash "$plugin/scripts/multipi-watch.sh" --daemon --interval 1 2>&1); dl_daemon_rc=$?
 expect "watch daemon: a second launch exits 0" "0" "$dl_daemon_rc"
 echo "$dl_daemon_second" | grep -qF "already running" && pass "watch daemon: the second launch says so" || fail "second-launch text: $dl_daemon_second"
-expect "watch daemon: exactly ONE loop runs (no doubling)" "1" "$(pgrep -fc 'multipi-watch.sh --daemon --interval 1' 2>/dev/null || echo 0)"
+# #104: the single-instance count is a process-table read with a multi-second transient —
+# the foreground second launch spawns a wrapper that lingers while it detects the held
+# pidfile, and the backgrounded daemon's own exec can briefly double-match. A single read
+# (or a first-1 poll) is racy under load. Require the count to hold at exactly 1 across
+# CONSECUTIVE reads inside a bound: the steady state is one persistent loop; anything else
+# is the startup/teardown transient, which consecutive-stable reads outlast.
+daemon_loop_count() { pgrep -fc 'multipi-watch.sh --daemon --interval 1' 2>/dev/null || echo 0; }
+settle_one_loop() { # settle_one_loop — 0 once the count is 1 for 5 consecutive 0.2s reads
+  local stable=0 i=0
+  while [ "$i" -lt 50 ]; do
+    if [ "$(daemon_loop_count)" = "1" ]; then stable=$((stable + 1)); else stable=0; fi
+    [ "$stable" -ge 5 ] && return 0
+    sleep 0.2; i=$((i + 1))
+  done
+  return 1
+}
+settle_one_loop \
+  && pass "watch daemon: exactly ONE loop runs (no doubling)" \
+  || fail "watch daemon: exactly ONE loop runs (no doubling) (settled count=$(daemon_loop_count))"
 # #82: the tick-completion pin — poll the HEALTHY log line (the first tick runs at
 # startup) instead of assuming it lands within a fixed 1.5 s of sleep.
 if wait_for 5000 grep -qF " HEALTHY" "$wl"; then
@@ -4637,18 +4659,22 @@ echo "$BOARD_OUT" | grep -qF "nothing needs you" && \
 # (c) rc 0 + the gate line: a GREEN record with its newest train log path
 BDGH="$bdbase/gh-1"; mkdir -p "$BDGH" "$bddir_state/logs"
 touch "$bddir_state/logs/train-smoke.log"
-GLTS=$(( $(date +%s%3N) - 5 * 3600 * 1000 ))
+# #104 NTP-slack: fabricate the gate age with slack (5h30m, not exactly 5h) — this box's
+# NTP steps backwards (observed up to -891ms/60s), and a step between the fixture write
+# and the board's `now` capture sinks an exactly-5h age to 4h59m, flaking the pin. 5h30m
+# renders 5h2[0-9]m or 5h30m regardless of a sub-second step.
+GLTS=$(( $(date +%s%3N) - (5 * 3600 + 1800) * 1000 ))
 printf 'result=green ts=%s detail=- logdir=%s\n' "$GLTS" "$bddir_state/logs" >"$bddir_state/gate-last.txt"
 board
 expect "board rc 0: a green gate alone needs no human" "0" "$BOARD_RC"
-echo "$BOARD_OUT" | grep -qE "gate: GREEN 5h.*train-smoke\.log" && \
+echo "$BOARD_OUT" | grep -qE "gate: GREEN 5h(2[0-9]|30)m.*train-smoke\.log" && \
   pass "board: GREEN carries the human age and the newest train log path" || fail "board gate: $(grep -F 'gate:' <<<"$BOARD_OUT" || echo '<none>')"
 
 # (d) rc 2: the last gate RED names the failing check(s)
 printf 'result=red ts=%s detail=smoke,shellcheck logdir=%s\n' "$GLTS" "$bddir_state/logs" >"$bddir_state/gate-last.txt"
 board
 expect "board rc 2: a RED last gate" "2" "$BOARD_RC"
-echo "$BOARD_OUT" | grep -qE "gate: RED 5h[0-1]m? — smoke,shellcheck" && \
+echo "$BOARD_OUT" | grep -qE "gate: RED 5h(2[0-9]|30)m — smoke,shellcheck" && \
   pass "board: RED names the failing checks" || fail "board gate: $(grep -F 'gate:' <<<"$BOARD_OUT" || echo '<none>')"
 rm -f "$bddir_state/gate-last.txt"
 
