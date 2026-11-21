@@ -34,6 +34,11 @@ export interface StopGateInputs {
 	scenariosOn?: boolean;
 	/** Ticket numbers covered by at least one valid `t<n>-` scenario (only effective when scenariosOn). */
 	covered?: number[];
+	/** Ticket numbers whose implementer child delivered a branch (entry `done`) but whose ticket
+	 * still sits at `dl/in-progress`/`dl/in-review` with no reviewer dispatched — the late-report
+	 * loop drive (ticket #121): a bounded dispatch can resolve with the child still running, and
+	 * the delivered branch must not settle silently. Computed by the caller (open issues only). */
+	pendingReviews?: number[];
 }
 
 /** Store state for the startability rule (spec §4); omitted store means off. */
@@ -91,12 +96,19 @@ export function evaluateStopGate(i: StopGateInputs): StopGateDecision {
 		on: i.scenariosOn === true,
 		covered: i.covered ?? [],
 	});
+	// The loop drive: work that is startable or already delivered-but-unreviewed. Both clauses are
+	// unbounded (the harness invariant) and never bump the bounded counter; with a single clause
+	// the message is byte-identical to its pre-#121 shape.
+	const drive: string[] = [];
 	if (startable > 0 && i.running < i.cap) {
-		return {
-			action: "block",
-			bumpCounter: false,
-			message: `${startable} ticket(s) are startable (unblocked, dependencies closed) and a dispatch slot is free (running ${i.running}/${i.cap}). Keep going: dispatch them with devloop_dispatch, gate and merge what is dl/gated.`,
-		};
+		drive.push(`${startable} ticket(s) are startable (unblocked, dependencies closed) and a dispatch slot is free (running ${i.running}/${i.cap}). Keep going: dispatch them with devloop_dispatch, gate and merge what is dl/gated.`);
+	}
+	const pending = i.pendingReviews ?? [];
+	if (pending.length > 0) {
+		drive.push(`${pending.length} delivered branch(es) await the reviewer (the implementer child finished, but no review has been dispatched): ${pending.map((n) => `#${n}`).join(", ")}. Keep going: dispatch the code-reviewer for each (devloop_dispatch), then gate and merge what is dl/gated.`);
+	}
+	if (drive.length > 0) {
+		return { action: "block", bumpCounter: false, message: drive.join("\n") };
 	}
 	return { action: "pass" };
 }
