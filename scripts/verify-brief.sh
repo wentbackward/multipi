@@ -67,7 +67,11 @@ classify_range() {
 		return 2
 	}
 	VB_COUNT=0
-	VB_TOUCHED=""
+	# Seeded with a leading newline sentinel so the *"$NL$cat$NL"* containment test
+	# below rejects a repeat of the FIRST entry too (an unseeded accumulator has no
+	# newline before its first category — the #129 double-render); both ends are
+	# trimmed before joining.
+	VB_TOUCHED="$NL"
 	while IFS= read -r f; do
 		[ -n "$f" ] || continue
 		VB_COUNT=$((VB_COUNT + 1))
@@ -129,7 +133,8 @@ classify_range "$range" || exit 2
 template=$(verify_template) || exit 3
 url=$(git remote get-url origin 2>/dev/null) || url=""
 [ -n "$url" ] || url=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-touched=${VB_TOUCHED%$'\n'}
+touched=${VB_TOUCHED#$'\n'}
+touched=${touched%$'\n'}
 touched=${touched//$'\n'/, }
 if [ -z "$touched" ]; then
 	echo "VERIFY SKIP: no contract paths in $range ($VB_COUNT files changed) — docs/test-only train, no verifier (threshold: skill §7, DECISIONS.md #108)."
