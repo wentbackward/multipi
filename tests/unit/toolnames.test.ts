@@ -71,6 +71,21 @@ test("resolveProvider: MULTIPI_PROVIDER wins, PI_PROVIDER is the fallback, empty
 	assert.equal(resolveProvider({}), undefined);
 });
 
+test("resolveProvider: the session model sits BETWEEN the seam and the ambient env (review round 1: MULTIPI_PROVIDER > ctx.model > PI_PROVIDER)", () => {
+	// pi injects PI_PROVIDER only into shell-tool CHILDREN, not the extension's own
+	// process env — so in a plain orchestrator session the SESSION'S CONFIGURED MODEL
+	// (ctx.model.provider) is the primary ambient source, with PI_PROVIDER kept only
+	// for surfaces that really do run inside a child (doctor's one-shot).
+	assert.equal(resolveProvider({ PI_PROVIDER: "anthropic" }, "openai"), "openai", "the session model outranks the ambient env");
+	assert.equal(resolveProvider({ MULTIPI_PROVIDER: "kimi", PI_PROVIDER: "anthropic" }, "openai"), "kimi", "the operator seam still wins outright (the what-if probe stays operator-controlled)");
+	assert.equal(resolveProvider({ PI_PROVIDER: "anthropic" }, undefined), "anthropic", "no model: the ambient env still resolves");
+	assert.equal(resolveProvider({ MULTIPI_PROVIDER: "kimi" }, undefined), "kimi");
+	assert.equal(resolveProvider({}, "moonshot"), "moonshot", "a model alone resolves the provider");
+	assert.equal(resolveProvider({}, ""), undefined, "an EMPTY model provider means unset");
+	assert.equal(resolveProvider({}, undefined), undefined);
+	assert.equal(resolveProvider({}), undefined);
+});
+
 // --- the name list seam (what-if probes without shipping a rename) ---------------
 
 test("toolNamesFromEnv: unset and EMPTY fall back to the registered list (empty = unset)", () => {
