@@ -4819,6 +4819,7 @@ git -C "$work/project" branch -q -D feat/2-open feat/2-parser 2>/dev/null || tru
 # stand untouched elsewhere in this suite).
 DISP_FIX="$work/disp"
 mkdir -p "$DISP_FIX"
+cp -f "$plugin/scripts/multipi" "$DISP_FIX/multipi"
 for dl_stub in multipi-status.sh multipi-board.sh multipi-interrupt.sh multipi-watch.sh doctor.sh; do
   {
     echo '#!/usr/bin/env bash'
@@ -4829,32 +4830,34 @@ for dl_stub in multipi-status.sh multipi-board.sh multipi-interrupt.sh multipi-w
 done
 
 # Each subcommand execs its own script and passes the rc through (distinct non-zero
-# values keep a swapped mapping red in both directions).
-for dl_pair in status:7 board:8 interrupt:11 watch:13 doctor:17; do
+# values keep a swapped mapping red in both directions; SUB:UNDERLYING_BARENAME:RC).
+for dl_pair in status:multipi-status:7 board:multipi-board:8 interrupt:multipi-interrupt:11 watch:multipi-watch:13 doctor:doctor:17; do
   dl_sub=${dl_pair%%:*}
-  dl_rc=${dl_pair##*:}
+  dl_rest=${dl_pair#*:}
+  dl_stubname=${dl_rest%%:*}
+  dl_rc=${dl_rest##*:}
   dl_out=$(env DV_STUB_RC="$dl_rc" bash "$DISP_FIX/multipi" "$dl_sub" 2>&1); dl_r=$?
   expect "multipi $dl_sub: passes the underlying script's rc through" "$dl_rc" "$dl_r"
-  expect "multipi $dl_sub: execs the right sibling with no extra args" "STUB=$dl_sub argc=0" "$(head -n 1 <<<"$dl_out")"
+  expect "multipi $dl_sub: execs $dl_stubname.sh with no extra args" "STUB=$dl_stubname argc=0" "$(head -n 1 <<<"$dl_out")"
 done
 
 # Argument forwarding: what follows the subcommand reaches the script verbatim.
 dl_out=$(bash "$DISP_FIX/multipi" interrupt --dry-run "hello world" 2>&1); dl_r=$?
 expect "multipi interrupt: forwards its args verbatim (rc 0)" "0" "$dl_r"
-expect "multipi interrupt: argv intact" "$(printf 'STUB=interrupt argc=2\nARG=--dry-run\nARG=hello world')" "$dl_out"
+expect "multipi interrupt: argv intact" "$(printf 'STUB=multipi-interrupt argc=2\nARG=--dry-run\nARG=hello world')" "$dl_out"
 dl_out=$(bash "$DISP_FIX/multipi" watch --daemon --interval 5 2>&1); dl_r=$?
 expect "multipi watch: forwards its flags verbatim (rc 0)" "0" "$dl_r"
-expect "multipi watch: argv intact" "$(printf 'STUB=watch argc=3\nARG=--daemon\nARG=--interval\nARG=5')" "$dl_out"
+expect "multipi watch: argv intact" "$(printf 'STUB=multipi-watch argc=3\nARG=--daemon\nARG=--interval\nARG=5')" "$dl_out"
 
 # Zero-arg default: the board when present, the status when not (the ticket's
 # recommendation — DECISIONS.md 2026-11-21, #109).
 dl_out=$(bash "$DISP_FIX/multipi" 2>&1); dl_r=$?
 expect "bare multipi: defaults to the board (rc 0)" "0" "$dl_r"
-expect "bare multipi: the board is what runs" "STUB=board argc=0" "$(head -n 1 <<<"$dl_out")"
+expect "bare multipi: the board is what runs" "STUB=multipi-board argc=0" "$(head -n 1 <<<"$dl_out")"
 rm -f "$DISP_FIX/multipi-board.sh"
 dl_out=$(bash "$DISP_FIX/multipi" 2>&1); dl_r=$?
 expect "bare multipi: falls back to status when the board is absent (rc 0)" "0" "$dl_r"
-expect "bare multipi: the fallback runs status" "STUB=status argc=0" "$(head -n 1 <<<"$dl_out")"
+expect "bare multipi: the fallback runs status" "STUB=multipi-status argc=0" "$(head -n 1 <<<"$dl_out")"
 
 # Bad usage is the dispatcher's own error (rc 2 + a usage line on the offender).
 dl_out=$(bash "$DISP_FIX/multipi" bogus 2>&1); dl_r=$?
