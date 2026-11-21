@@ -139,6 +139,14 @@ lv_last_wake_ts() {
   awk '$2 == "WAKE" || $2 == "WEDGE" {t = $1} END {print t + 0}' "$1" 2>/dev/null || echo 0
 }
 
+# lv_last_blocked_ts LOG N: the timestamp (ms) of the last `BLOCKED n=N` entry (0 when
+# none) — the per-ticket 24h ledger of the blocked-nudge (ticket #104), the same watch-
+# log-ledger pattern as lv_last_wake_ts. BLOCKED-SKIP/NO-TTY/NO-AGE entries do not count
+# (only a DELIVERED wake starts the window).
+lv_last_blocked_ts() {
+  awk -v n="$2" '$2 == "BLOCKED" { split($3, kv, "="); if (kv[2] == n) t = $1 } END { print t + 0 }' "$1" 2>/dev/null || echo 0
+}
+
 # lv_bump_wake_seq FILE SEQ: atomically raise the sidecar's lastWakeSeq watermark
 # (read-modify-write through a tmp + rename, like the extension's own writer). The two
 # publishers race on the same file, so this closes the SAME lost-update window the

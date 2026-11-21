@@ -276,26 +276,9 @@ for i in $idx_other; do
 done
 
 # bd_question I: the first line of the blocking question of ticket index I. The report
-# lands as the NEWEST comment (it supersedes the body); the question is the first line
-# of the "## Questions" section, else the "STATUS: BLOCKED — reason" line, else the
-# first line ending in "?".
-bd_extract_q() {
-  local t=$1 q
-  q=$(printf '%s\n' "$t" | awk '
-    /^## Questions[[:space:]]*$/ {f = 1; next}
-    f {sub(/^[[:space:]]+/, ""); if (length($0) > 0) {print; exit}}')
-  [ -n "$q" ] && { printf '%s' "$q"; return 0; }
-  q=$(printf '%s\n' "$t" | grep -m1 -E '^STATUS:[[:space:]]*BLOCKED' || true)
-  if [ -n "$q" ]; then
-    printf '%s\n' "$q" \
-      | sed -E 's/^STATUS:[[:space:]]*BLOCKED[[:space:]]*[-—–][[:space:]]*//' \
-      | sed -E 's/^STATUS:[[:space:]]*BLOCKED[[:space:]]*//'
-    return 0
-  fi
-  q=$(printf '%s\n' "$t" | grep -m1 -E '\?[[:space:]]*$' || true)
-  [ -n "$q" ] && { printf '%s' "$q"; return 0; }
-  printf '(no question found in issue)'
-}
+# lands as the NEWEST comment (it supersedes the body); extraction is the shared
+# dl_blocked_question (lib/common.sh) — the watch's blocked-nudge (ticket #104) uses the
+# same rule, so both operator surfaces show the same question.
 bd_question() {
   local i=$1 n ctext="" cview cc
   n=${T_NUM[i]}
@@ -306,7 +289,7 @@ bd_question() {
       [ "$cc" -gt 0 ] && ctext=$(json_get "comments.$((cc - 1)).body" <<<"$cview")
     fi
   fi
-  bd_extract_q "${ctext:-${T_BODY[i]}}"
+  dl_blocked_question "${ctext:-${T_BODY[i]}}"
 }
 # bd_branch_for N: the branch of ticket N, from the LOCAL remote refs (no fetch). A
 # candidate is a branch whose slug starts with "<N>[-_.]"; the candidate carrying an
