@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync, unlinkSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn as cpSpawn } from "node:child_process";
-import { spawnPi, resolvePiInvocation, killGroup, groupAlive, groupMemberCount } from "../../extension/src/child.ts";
+import { spawnPi, resolvePiInvocation, killGroup, groupAlive, groupMemberCount, parentModelArg } from "../../extension/src/child.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_PI = path.join(HERE, "..", "fake-pi");
@@ -137,6 +137,42 @@ test("spawnPi omits MULTIPI_CHILD_ROLE when no role is given", async () => {
 	const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "multi-pi-role-")), "role.txt");
 	await spawnPi({ task: "x", cwd: process.cwd(), env: { MULTIPI_PI_BIN: FAKE_PI, FAKE_PI_ECHO_ROLE: f } });
 	assert.equal(fs.readFileSync(f, "utf8"), "unset");
+});
+
+// --- model inheritance (#130): a child rides the parent session's model ------
+//
+// fake-pi's FAKE_PI_ECHO_TASK writes the child's ENTIRE argv (joined with spaces)
+// to a file, so the composed child command is assertable as plain text.
+
+async function composedArgs(task: string, opts: Record<string, unknown>): Promise<string> {
+	const f = path.join(mkdtempSync(path.join(tmpdir(), "fake-pi-argv-")), "argv");
+	await spawnPi({ task, cwd: process.cwd(), ...opts, env: { MULTIPI_PI_BIN: FAKE_PI, FAKE_PI_ECHO_TASK: f } });
+	return readFileSync(f, "utf8");
+}
+
+test("spawnPi renders the parent session's model when no role model is given (--model inheritance, #130)", async () => {
+	const argv = await composedArgs("the child task", { parentModel: "prov/inherited-id" });
+	assert.match(argv, /\s--model prov\/inherited-id(\s|$)/, `composed args: ${argv}`);
+	assert.ok(argv.endsWith("the child task"), "the task stays the trailing argument");
+});
+
+test("spawnPi: a role-declared model beats the parent session's model (frontmatter override, #130)", async () => {
+	const argv = await composedArgs("the child task", { model: "prov/role-model", parentModel: "prov/inherited-id" });
+	assert.match(argv, /\s--model prov\/role-model(\s|$)/, `composed args: ${argv}`);
+	assert.ok(!argv.includes("inherited-id"), `the parent model must not ride along: ${argv}`);
+});
+
+test("spawnPi omits --model when neither role nor parent model is set (settings-default fallback, #130)", async () => {
+	const argv = await composedArgs("the child task", {});
+	assert.ok(!/(^|\s)--model(\s|$)/.test(argv), `no --model flag: ${argv}`);
+});
+
+test("parentModelArg renders provider/id and yields undefined on gaps", () => {
+	assert.equal(parentModelArg({ provider: "prov", id: "model-id" }), "prov/model-id");
+	assert.equal(parentModelArg(undefined), undefined);
+	assert.equal(parentModelArg(null), undefined);
+	assert.equal(parentModelArg({ provider: "", id: "model-id" }), undefined);
+	assert.equal(parentModelArg({ provider: "prov", id: "" }), undefined);
 });
 
 // --- watchdog: a silent child is killed, not waited on -----------------------
