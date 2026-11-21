@@ -6,6 +6,7 @@ import { Type, type TSchema } from "typebox";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult, AgentToolUpdateCallback, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { loadConfig, resolvePaths, resolveState, repoSlugFromRemote, scenariosOn, type DevloopConfig, type Paths } from "./config.ts";
+import { TOOL_NAMES } from "./toolnames.ts";
 import { readState, updateState, pruneDead, runningCount, type DispatchEntry, type DispatchState } from "./state.ts";
 import {
 	branchSlug,
@@ -873,21 +874,10 @@ export async function formatEditedFile(cwd: string, filePath: string): Promise<v
 // ---------------------------------------------------------------------------
 // Tool registrations
 // ---------------------------------------------------------------------------
-/** The registered control-plane tool names — the single source of truth (one name per tool,
- * no aliases). Underscored, not dotted: the OpenAI function-name grammar
- * (`^[A-Za-z][A-Za-z0-9_-]*$`) rejects a dot, so a dot makes the whole request
- * fail on every grammar-validating provider (observed: Kimi 400). The
- * `tests/unit/tools.test.ts` grammar pin keeps this list portable. Used verbatim in every
- * `name:` field AND every `runBounded(...)` label below — the labels are operator-visible
- * log/reconciliation text and must agree with the registered name. */
-export const TOOL_NAMES = {
-	dispatch: "devloop_dispatch",
-	cancel: "devloop_cancel",
-	pause: "devloop_pause",
-	gate: "devloop_gate",
-	merge: "devloop_merge",
-	status: "devloop_status",
-} as const;
+// The registered control-plane tool names live in ./toolnames.ts (the single
+// source of truth shared with the provider tool-name grammar probe, #107)
+// and are re-exported verbatim below for existing importers.
+export { TOOL_NAMES } from "./toolnames.ts";
 
 const DispatchSchema = Type.Object({
 	role: Type.String({ description: "implementer | code-reviewer | verifier | analyst | scenario-writer" }),
