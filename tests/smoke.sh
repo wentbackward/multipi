@@ -3940,7 +3940,7 @@ lvfresh() { rm -f "$wl" "$WK"; : >"$WK"; }
 # header) cites must be a REAL seam — the header once cited a phantom MULTIPI_TOOL_MS
 # that operators and tests key off.
 expect "watch script: every MULTIPI_* token cited is a real seam (no phantom names)" \
-  "$(printf '%s\n' MULTIPI_APPROVE_NOW_MS MULTIPI_INTERRUPT_TTY MULTIPI_STATUS_STALE_MS MULTIPI_WATCH_NOW_MS MULTIPI_WATCH_TOOL_MS)" \
+  "$(printf '%s\n' MULTIPI_APPROVE_NOW_MS MULTIPI_INTERRUPT_TTY MULTIPI_STATUS_STALE_MS MULTIPI_WATCH_BLOCKED_MS MULTIPI_WATCH_NOW_MS MULTIPI_WATCH_TOOL_MS | sort -u)" \
   "$(grep -oE 'MULTIPI_[A-Z0-9_]+' "$plugin/scripts/multipi-watch.sh" | sort -u)"
 lvfresh
 mkstate idle 1000 0 0
@@ -4144,6 +4144,240 @@ wait "$WD2_PID" 2>/dev/null || true
 [ -f "$lvstate/watch.pid" ] && fail "watch daemon (bad clock): the pidfile leaked" || pass "watch daemon (bad clock): the pidfile is released on exit"
 pkill -f 'multipi-watch.sh --daemon --interval 2' 2>/dev/null || true
 rm -f "$DERR"
+
+# (f) blocked-ticket surfacing (ticket #104): the blocked-age wake — an open dl/blocked
+# ticket older than MULTIPI_WATCH_BLOCKED_MS (default 4h) is woken once per ticket per
+# 24h, naming the ticket and its question; "now resumable" when every Depends-on is
+# verifiably CLOSED; timeline preferred, updatedAt fallback flagged approx=1; offline
+# (no gh / failing list) skips silently. Separate fake trackers keep the global one
+# pristine; the blocked start is the fixture's OWN ISO (epoch derived on this box).
+bgh_issue() { # bgh_issue DIR TITLE BODY — create it in a private tracker, label it dl/blocked,
+#            and print its number (the fake allocates the lowest free number; post-create
+#            max is it).
+  local d=$1 t=$2 b=$3 n=0 f cand
+  FAKE_GH_DIR="$d" gh issue create "$t" "$b" >/dev/null
+  for f in "$d/issues"/*; do
+    [ -e "$f" ] || continue
+    cand=$((10#$(basename "$f")))
+    [ "$cand" -gt "$n" ] && n=$cand
+  done
+  FAKE_GH_DIR="$d" gh issue edit "$n" --add-label dl/blocked >/dev/null
+  printf '%s\n' "$n"
+}
+BLGH="$work/blgh-1"; mkdir -p "$BLGH"
+LV_BISO="2026-11-14T00:00:00Z"
+TB=$(date -d "$LV_BISO" +%s%3N)
+n1=$(bgh_issue "$BLGH" "Awaiting a human call" "Implementer report; the loop parked.
+
+## Questions
+Keep or delete the old snapshots?")
+printf '%s dl/blocked\n' "$LV_BISO" >"$BLGH/timeline/$n1"
+lvfresh
+
+# (f1) older than the 4h default (5 days here) → the exact wake line, rc 0, one log line
+LV_NOW=$((TB + 5 * 86400000))
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH" GH_REPO=owner/fixture
+expect "blocked rc 0: a 5-day dl/blocked ticket is woken (a healthy sidecar still rc 0)" "0" "$LV_RC"
+expect "blocked: the exact wake line (ticket, human age, the question's first line)" \
+  'BLOCKED (multipi-watch): #1 has awaited a human decision for 5d — "Keep or delete the old snapshots?". Resume or drop it.' \
+  "$(head -1 "$WK" 2>/dev/null)"
+expect "blocked log: the wake is recorded with the exact age, no resumable/approx flags" \
+  "1" "$(grep -cF ' BLOCKED n=1 age=432000000 resumed=0 approx=0' "$wl" 2>/dev/null)"
+expect "blocked: exactly ONE line hit the TTY (the healthy core added no WAKE/WEDGE)" \
+  "1" "$(wc -l <"$WK")"
+expect "blocked: the healthy core still logs its HEALTHY line (existing contract untouched)" \
+  "1" "$(grep -cF ' HEALTHY' "$wl" 2>/dev/null)"
+echo "$LV_LINE" | grep -qF "watch: injected BLOCKED n=1" && pass "blocked: the one-shot announces the injection" \
+  || fail "blocked announce line: $LV_LINE"
+
+# (f2) younger than the default (3h < 4h) → silent
+LV_NOW=$((TB + 3 * 3600000))
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH" GH_REPO=owner/fixture
+expect "blocked rc 0: a 3h ticket under the 4h default is a clean no-op" "0" "$LV_RC"
+[ -s "$WK" ] && fail "a young blocked ticket woke anyway" \
+  || pass "blocked: a young ticket is silent (the threshold is not crossed)"
+[ -n "$(grep -F ' BLOCKED' "$wl" 2>/dev/null)" ] && fail "a young ticket left a BLOCKED log line: $(grep -F ' BLOCKED' "$wl")" \
+  || pass "blocked: a young ticket leaves no BLOCKED log line"
+
+# (f3) the seam is honoured; a MALFORMED value (08 — invalid octal bait) falls back to the
+# DEFAULT silently (same posture as the other runtime thresholds). Private tracker: at this
+# clock the main tracker's ticket 1 would be due and muddy the absence assert.
+BLGH_M="$work/blgh-mal"; mkdir -p "$BLGH_M"
+LBISO="2026-11-13T00:00:00Z"; TB2=$(date -d "$LBISO" +%s%3N)
+mn=$(bgh_issue "$BLGH_M" "Quick park" "Parked on a review.
+
+## Questions
+Is the bound right?")
+printf '%s dl/blocked\n' "$LBISO" >"$BLGH_M/timeline/$mn"
+LV_NOW=$((TB2 + 61000))
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_M" GH_REPO=owner/fixture MULTIPI_WATCH_BLOCKED_MS=60000
+expect "blocked seam: MULTIPI_WATCH_BLOCKED_MS=60000 wakes a 61 s ticket (exact age in the log)" \
+  "1" "$(grep -cF ' BLOCKED n=1 age=61000 resumed=0 approx=0' "$wl" 2>/dev/null)"
+BLGH_M2="$work/blgh-mal2"; mkdir -p "$BLGH_M2"
+bgh_issue "$BLGH_M2" "Under default" "Still inside the default window.
+
+## Questions
+Wait or nudge?" >/dev/null
+LBISO2="2026-11-13T06:00:00Z"; TB2B=$(date -d "$LBISO2" +%s%3N)
+printf '%s dl/blocked\n' "$LBISO2" >"$BLGH_M2/timeline/1"
+LV_NOW=$((TB2B + 3 * 3600000))
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_M2" GH_REPO=owner/fixture MULTIPI_WATCH_BLOCKED_MS=08
+expect "blocked seam: 08 does not crash the check (invalid octal), rc 0" "0" "$LV_RC"
+[ -n "$(grep -F ' BLOCKED' "$wl" 2>/dev/null)" ] && \
+  fail "a leading-zero seam honoured 08 as 8 ms and woke a ticket under the 4h default" || \
+  pass "blocked: a leading-zero MULTIPI_WATCH_BLOCKED_MS fell back to the default (silently, no crash)"
+
+# (f4) dedupe: at most one wake per ticket per 24h (ledger: the watch log), then re-arm.
+# The three steps SHARE the ledger (no lvfresh between them): wake → +1h skip → +25h re-wake.
+LV_NOW=$((TB2 + 61000))
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_M" GH_REPO=owner/fixture MULTIPI_WATCH_BLOCKED_MS=60000
+expect "blocked dedupe step 1: the first wake lands (exact line, age 1m)" \
+  'BLOCKED (multipi-watch): #1 has awaited a human decision for 1m — "Is the bound right?". Resume or drop it.' \
+  "$(head -1 "$WK" 2>/dev/null)"
+expect "blocked dedupe step 1: exactly one wake entry in the ledger" "1" "$(grep -cF ' BLOCKED n=1 ' "$wl" 2>/dev/null)"
+LV_NOW=$((TB2 + 61000 + 3600000))
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_M" GH_REPO=owner/fixture MULTIPI_WATCH_BLOCKED_MS=60000
+expect "blocked dedupe step 2: still within 24h of the wake → rc 0, no second TTY line" "0" "$LV_RC"
+expect "blocked dedupe step 2: the TTY still carries exactly one line" "1" "$(wc -l <"$WK")"
+expect "blocked dedupe step 2: the suppression is logged with its reason" "1" "$(grep -cF ' BLOCKED-SKIP n=1' "$wl" 2>/dev/null)"
+expect "blocked dedupe step 2: the ledger still holds a single wake entry" "1" "$(grep -cF ' BLOCKED n=1 ' "$wl" 2>/dev/null)"
+LV_NOW=$((TB2 + 61000 + 25 * 3600000))
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_M" GH_REPO=owner/fixture MULTIPI_WATCH_BLOCKED_MS=60000
+expect "blocked dedupe step 3: 25h after the wake the window lapsed → woken again" \
+  'BLOCKED (multipi-watch): #1 has awaited a human decision for 25h1m — "Is the bound right?". Resume or drop it.' \
+  "$(tail -1 "$WK" 2>/dev/null)"
+expect "blocked dedupe step 3: the ledger now carries TWO wake entries for the ticket" \
+  "2" "$(grep -cF ' BLOCKED n=1 ' "$wl" 2>/dev/null)"
+
+# (f5) resumable: every "Depends on #k" verifiably CLOSED → the explicit now-resumable line
+BLGH_R="$work/blgh-resum"; mkdir -p "$BLGH_R"
+FAKE_GH_DIR="$BLGH_R" gh issue create "Parser follow-up (unblocked)" "Waiting on the parser ticket to land.
+Depends on #2
+
+## Questions
+May we proceed now?" >/dev/null
+FAKE_GH_DIR="$BLGH_R" gh issue create "parser ticket" "the dependency" >/dev/null
+FAKE_GH_DIR="$BLGH_R" gh issue close 2 >/dev/null
+FAKE_GH_DIR="$BLGH_R" gh issue edit 1 --add-label dl/blocked >/dev/null
+LRISO="2026-11-15T00:00:00Z"; TL=$(date -d "$LRISO" +%s%3N)
+printf '%s dl/blocked\n' "$LRISO" >"$BLGH_R/timeline/1"
+LV_NOW=$((TL + 5 * 86400000))
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_R" GH_REPO=owner/fixture
+expect "blocked resumable: the now-resumable wording (every Depends-on CLOSED)" \
+  'BLOCKED (multipi-watch): #1 has awaited a human decision for 5d — "May we proceed now?". Its dependencies are all closed — now resumable. Resume or drop it.' \
+  "$(head -1 "$WK" 2>/dev/null)"
+expect "blocked resumable: the log flags resumed=1" "1" "$(grep -cF ' BLOCKED n=1 age=432000000 resumed=1 approx=0' "$wl" 2>/dev/null)"
+
+# (f6) mixed deps: one dep still OPEN → NOT claimed (the plain line, resumed=0)
+BLGH_X="$work/blgh-mixed"; mkdir -p "$BLGH_X"
+FAKE_GH_DIR="$BLGH_X" gh issue create "Two dependencies" "Waiting on two tickets.
+Depends on #2, #4
+
+## Questions
+Can we start either?" >/dev/null
+FAKE_GH_DIR="$BLGH_X" gh issue create "dependency A" "done" >/dev/null
+FAKE_GH_DIR="$BLGH_X" gh issue create "dependency B" "still open" >/dev/null
+FAKE_GH_DIR="$BLGH_X" gh issue close 2 >/dev/null
+FAKE_GH_DIR="$BLGH_X" gh issue edit 1 --add-label dl/blocked >/dev/null
+printf '%s dl/blocked\n' "$LRISO" >"$BLGH_X/timeline/1"
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_X" GH_REPO=owner/fixture
+expect "blocked mixed deps: an OPEN dependency keeps the plain line (no resumable claim)" \
+  'BLOCKED (multipi-watch): #1 has awaited a human decision for 5d — "Can we start either?". Resume or drop it.' \
+  "$(head -1 "$WK" 2>/dev/null)"
+expect "blocked mixed deps: the log keeps resumed=0 (never claimed on partial closure)" \
+  "1" "$(grep -cF ' BLOCKED n=1 age=432000000 resumed=0 approx=0' "$wl" 2>/dev/null)"
+
+# (f7) fallback: no timeline file → updatedAt is used AND flagged approx=1 (the timeline
+# call itself is provable in the fake's calls.log — the preference is real, not guessed)
+BLGH_F="$work/blgh-fall"; mkdir -p "$BLGH_F"
+FAKE_GH_DIR="$BLGH_F" gh issue create "No timeline" "Parked; the timeline is missing.
+
+## Questions
+Which one?" >/dev/null
+FAKE_GH_DIR="$BLGH_F" gh issue edit 1 --add-label dl/blocked >/dev/null
+FLISO="2026-11-16T00:00:00Z"; TF=$(date -d "$FLISO" +%s%3N)
+printf '%s\n' "$FLISO" >"$BLGH_F/ts/1"
+LV_NOW=$((TF + 5 * 3600000))
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_F" GH_REPO=owner/fixture
+expect "blocked fallback: the updatedAt age still wakes (5h > 4h default)" \
+  'BLOCKED (multipi-watch): #1 has awaited a human decision for 5h0m — "Which one?". Resume or drop it.' \
+  "$(head -1 "$WK" 2>/dev/null)"
+expect "blocked fallback: the approximation is flagged approx=1 in the log (not silent)" \
+  "1" "$(grep -cF ' BLOCKED n=1 age=18000000 resumed=0 approx=1' "$wl" 2>/dev/null)"
+expect "blocked fallback: the timeline WAS attempted first (calls.log proves the preference)" \
+  "1" "$(grep -cF 'api repos/owner/fixture/issues/1/timeline' "$BLGH_F/calls.log" 2>/dev/null)"
+
+# (f8) neither source parseable → BLOCKED-NO-AGE: the ticket is named, never guessed
+BLGH_N="$work/blgh-noage"; mkdir -p "$BLGH_N"
+FAKE_GH_DIR="$BLGH_N" gh issue create "No age at all" "Parked; no parseable time anywhere.
+
+## Questions
+When?" >/dev/null
+FAKE_GH_DIR="$BLGH_N" gh issue edit 1 --add-label dl/blocked >/dev/null
+printf 'not-a-date\n' >"$BLGH_N/ts/1"
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_N" GH_REPO=owner/fixture
+expect "blocked no-age: rc 0 (an unreadable timestamp never fails the check)" "0" "$LV_RC"
+[ -s "$WK" ] && fail "an age-less ticket woke with a guessed age" \
+  || pass "blocked no-age: nothing is injected (no guessed age)"
+expect "blocked no-age: the skip is logged with the ticket named" "1" "$(grep -cF ' BLOCKED-NO-AGE n=1' "$wl" 2>/dev/null)"
+
+# (f9) offline: no usable gh (dead stub — auth fails) and a failing issue list are
+# SILENT SKIPS — rc 0, no wake, no daemon-fatal error
+BLGH_O="$work/blgh-off"; mkdir -p "$BLGH_O"
+FAKE_GH_DIR="$BLGH_O" gh issue create "Old and blocked" "Parked.
+
+## Questions
+Why?" >/dev/null
+FAKE_GH_DIR="$BLGH_O" gh issue edit 1 --add-label dl/blocked >/dev/null
+printf '%s dl/blocked\n' "$LV_BISO" >"$BLGH_O/timeline/1"
+mkdir -p "$work/blgh-nox"; printf '#!/bin/sh\nexit 1\n' >"$work/blgh-nox/gh"; chmod +x "$work/blgh-nox/gh"
+LV_NOW=$((TB + 5 * 86400000))
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_O" GH_REPO=owner/fixture PATH="$work/blgh-nox:$PATH"
+expect "blocked offline: an unusable gh degrades to a silent skip (rc 0)" "0" "$LV_RC"
+[ -s "$WK" ] && fail "a wake fired while gh was unreachable" \
+  || pass "blocked offline: no wake when gh is unavailable"
+[ -n "$(grep -F ' BLOCKED' "$wl" 2>/dev/null)" ] && fail "an offline check left BLOCKED log lines" \
+  || pass "blocked offline: the skip leaves no BLOCKED log line (silent by design)"
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_O" GH_REPO=owner/fixture FAKE_GH_FAIL_ISSUE_LIST=1
+expect "blocked offline: a failing issue list is a silent skip too (rc 0)" "0" "$LV_RC"
+[ -s "$WK" ] && fail "a wake fired despite the failing list" \
+  || pass "blocked offline: no wake when the tracker list fails"
+
+# (f10) a tracker with NO dl/blocked ticket: the check is a no-op (the list call only)
+BLGH_E="$work/blgh-empty"; mkdir -p "$BLGH_E"
+FAKE_GH_DIR="$BLGH_E" gh issue create "Plain open ticket" "nothing blocked here" >/dev/null
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_E" GH_REPO=owner/fixture
+expect "blocked empty: a tracker without dl/blocked tickets is a quiet no-op (rc 0)" "0" "$LV_RC"
+[ -s "$WK" ] && fail "a wake fired with no blocked ticket" \
+  || pass "blocked empty: no wake, no log line, the healthy no-op stands"
+
+rm -rf "$BLGH" "$BLGH_M" "$BLGH_M2" "$BLGH_R" "$BLGH_X" "$BLGH_F" "$BLGH_N" "$BLGH_O" "$BLGH_E" "$work/blgh-nox"
+
 # Doc agreement (round-3 fold 4): the spec's --daemon sentence and the script header must
 # tell the same story — the script does NOT self-daemonize; the extension's detached spawn
 # IS the detach, manual launches need the operator's setsid.
