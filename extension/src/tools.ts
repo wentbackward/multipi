@@ -165,8 +165,11 @@ function lateReportsBlock(late: Array<[string, DispatchEntry]>): string[] {
 	if (late.length === 0) return ["(none)"];
 	const lines: string[] = [];
 	for (const [k, e] of late) {
+		// Numeric keys are tickets; ad-hoc keys (review-/analyst-/verifier-/scenario-writer-)
+		// are not ticket numbers and name plainly (#121 review round 2).
+		const id = /^\d+$/.test(k) ? `#${k}` : k;
 		const when = e.endedAt ? new Date(e.endedAt).toISOString().slice(0, 16).replace("T", " ") : "?";
-		lines.push(`- #${k} ${e.role} (${e.branch ?? e.worktree}) -> ${e.status} — ended ${when}`);
+		lines.push(`- ${id} ${e.role} (${e.branch ?? e.worktree}) -> ${e.status} — ended ${when}`);
 		for (const l of reportTail(e.report).split("\n")) lines.push(`  ${l}`);
 	}
 	return lines;
@@ -581,7 +584,13 @@ function spawnAndTrack(
 /** Record a freshly-created dispatch entry as running (idempotent per key). */
 function persistEntry(ctx: ToolContext, key: string, entry: DispatchEntry): void {
 	updateState(ctx.stateDir, (state) => {
-		state[key] = { ...state[key], ...entry };
+		// (#121 review M1) The fresh entry is the entry: every caller passes a complete one,
+		// and the old merge carried the PREVIOUS generation's terminal fields (stale
+		// endedAt/report/error/stopReason) into the new running entry — when that generation
+		// was itself reaped, reapDead's `endedAt ??= now` kept the stale value, terminalTime
+		// equaled the already-acked time, and the second orphan never resurfaced. The pid
+		// stamp is a separate updateState, so the merge bought nothing.
+		state[key] = { ...entry };
 	});
 }
 
@@ -1022,9 +1031,6 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 				// ack them (a re-terminal of the same child carries a new endedAt and resurfaces).
 				const { state } = reconcileState(ctx.stateDir);
 				const late = unseenTerminals(state, readSeen(ctx.stateDir));
-				if (late.length > 0) {
-					ackTerminals(ctx.stateDir, Object.fromEntries(late.map(([k, e]) => [k, terminalTime(e)])));
-				}
 				const kids = Object.entries(state)
 					.map(([k, e]) => `| #${k} | ${e.role} | ${e.branch ?? "-"} | ${e.status} | ${new Date(e.startedAt).toISOString().slice(0, 16).replace("T", " ")} |`)
 					.join("\n");
@@ -1055,6 +1061,13 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 					train = readFileSync(trainFile, "utf8").trim().replaceAll("\n", " | ");
 				} catch {
 					/* no record */
+				}
+				// (#121 review M2) The ack is the LAST fallibility-free step: the tracker calls
+				// above can error the tool after the report is rendered — if the ledger were
+				// updated first, a gh blip would consume the late report and it would never
+				// surface again. Building the text first means an errored status re-lists it next.
+				if (late.length > 0) {
+					ackTerminals(ctx.stateDir, Object.fromEntries(late.map(([k, e]) => [k, terminalTime(e)])));
 				}
 				return text(
 					[`# devloop status`, "", `Implementers in flight: ${running}/${ctx.cfg.heavy.slots}`, "", "## Children", "| ticket | role | branch | status | since |", "|---|---|---|---|---|", kids || "| - | - | - | (none) | - |", "", "## Late reports (terminal since your last status)", ...lateReportsBlock(late), "", "## Open tickets", "| # | title | dl/ labels | depends | polish |", "|---|---|---|---|---|", issues || "| - | (none) | - | - | - |", "", `## Last green gate`, train, ""].join("\n"),
