@@ -67,6 +67,16 @@ Label note: the `dl/*` labels (`dl/in-progress`, `dl/in-review`, `dl/approved`, 
 ## 6. Verify
 
 1. `<target>/scripts/doctor.sh` — must print `doctor: ready` with zero MISSING.
+   Its **provider tool-name grammar** line (offline, no live API call) checks the
+   registered `devloop_*` tool names against the strictest common provider grammar
+   (`^[A-Za-z][A-Za-z0-9_-]*$`): `ok provider tool-name grammar (N tools)` means the
+   names are portable; `PROBLEM provider <X> rejects tool name <Y> (grammar …)` means
+   provider <X> (identified via `MULTIPI_PROVIDER`, falling back to pi's `PI_PROVIDER`)
+   will 400 the session's first real API call — fix the name in `extension/src/
+   toolnames.ts` (the single source), rerun. `MULTIPI_PROBE_TOOL_NAMES`
+   (colon-separated; empty = unset) what-ifs a rename without shipping it, and the
+   orchestrator's session start prints the same warning (non-blocking) on a known
+   grammar-strict (OpenAI-completions shape) provider.
 2. `bash <target>/tests/smoke.sh` when the plugin's own tests are present (dogfood) — offline proof.
 3. In a fresh pi session in the target: `devloop_status` answers, and `devloop_dispatch` refuses a
    bogus role with the list of real ones. (Both are cheap; no tickets are created.)
