@@ -22,7 +22,7 @@ import {
 	buildScenarioComment,
 } from "./brief.ts";
 import * as childreg from "./childreg.ts";
-import { spawnPi, type ChildResult } from "./child.ts";
+import { spawnPi, parentModelArg, type ChildResult } from "./child.ts";
 import { discoverRoles, findRole } from "./roles.ts";
 import { listOpenIssues, listClosedIssueNumbers, addLabel, latestComment, issueComments, addComment, type Issue } from "./issues.ts";
 import { countShouldFixRounds, acceptTailDue } from "./polish.ts";
@@ -238,7 +238,7 @@ interface DispatchParams {
 	focus?: string;
 }
 
-async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback<unknown> | undefined): Promise<AgentToolResult<DispatchDetails | undefined>> {
+async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback<unknown> | undefined, parentModel?: string): Promise<AgentToolResult<DispatchDetails | undefined>> {
 	const role = findRole(ctx.bundledAgentsDir, params.role, ctx.projectAgentsDir);
 	if (!role) {
 		return { ...text(`Unknown role '${params.role}'. Available roles: ${findRoleNames(ctx).join(", ") || "(none)"}`), isError: true };
@@ -264,6 +264,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			signal,
 			onUpdate,
 			ticket: params.ticket,
+			parentModel,
 		});
 		const res = await ac.promise;
 		finishEntry(ctx, key, entry, res, signal);
@@ -294,6 +295,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			worktree: ctx.cfg.root,
 			signal,
 			onUpdate,
+			parentModel,
 		});
 		const res = await ac.promise;
 		finishEntry(ctx, key, analystEntry, res, signal);
@@ -330,7 +332,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			storeDir: ctx.paths.scenariosDir,
 			repoRoot: ctx.cfg.root,
 		});
-		const ac = spawnAndTrack(ctx, key, role, { task: brief, worktree: ctx.cfg.root, signal, onUpdate, ticket });
+		const ac = spawnAndTrack(ctx, key, role, { task: brief, worktree: ctx.cfg.root, signal, onUpdate, ticket, parentModel });
 		const res = await ac.promise;
 		finishEntry(ctx, key, entry, res, signal);
 
@@ -397,6 +399,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			onUpdate,
 			ticket,
 			branch,
+			parentModel,
 		});
 		const res = await ac.promise;
 		finishEntry(ctx, key, reviewEntry, res, signal);
@@ -468,7 +471,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 		reviewNote,
 	});
 	persistEntry(ctx, key, entry);
-	const ac = spawnAndTrack(ctx, key, role, { task: brief, worktree, signal, onUpdate });
+	const ac = spawnAndTrack(ctx, key, role, { task: brief, worktree, signal, onUpdate, parentModel });
 	const res = await ac.promise;
 	finishEntry(ctx, key, entry, res, signal);
 	git(["fetch", "-q", ctx.cfg.remote], ctx.cfg.root); // child pushed; refresh the main repo's view
@@ -510,7 +513,7 @@ function spawnAndTrack(
 	ctx: ToolContext,
 	key: string,
 	role: { name: string; filePath: string; tools?: string[]; model?: string },
-	opts: { task: string; worktree: string; signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback<unknown>; ticket?: number; branch?: string },
+	opts: { task: string; worktree: string; signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback<unknown>; ticket?: number; branch?: string; parentModel?: string },
 ): { promise: Promise<ChildResult>; controller: AbortController } {
 	const controller = new AbortController();
 	if (opts.signal) {
@@ -538,6 +541,9 @@ function spawnAndTrack(
 		appendSystemPrompt: role.filePath,
 		tools: role.tools,
 		model: role.model,
+		// #130 / spec §6.1: without a role model the child rides the parent session's
+		// model; neither set ⇒ no --model (the settings-default fast path).
+		parentModel: opts.parentModel,
 		role: role.name,
 		cwd: opts.worktree,
 		signal: controller.signal,
@@ -971,7 +977,7 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 		description:
 			"Dispatch one role agent (implementer / code-reviewer / verifier / analyst / scenario-writer) as an isolated headless child. Implementer runs in its own git worktree; analyst and scenario-writer run at the repo root (no worktree, no capacity slot). For implementer and scenario-writer pass the ticket; everything else (branch, worktree, ports, notes path, brief) is computed deterministically. Blocks until the child reports. At most N implementers run concurrently (N = heavy.slots); a further dispatch is refused with the in-flight list.",
 		parameters: DispatchSchema,
-		execute: (_id, params: Params<typeof DispatchSchema>, signal, onUpdate, toolCtx) => runBounded(TOOL_NAMES.dispatch, toolCtx, (c) => dispatchImpl(c, params, signal, onUpdate)),
+		execute: (_id, params: Params<typeof DispatchSchema>, signal, onUpdate, toolCtx) => runBounded(TOOL_NAMES.dispatch, toolCtx, (c) => dispatchImpl(c, params, signal, onUpdate, parentModelArg(toolCtx.model))),
 	});
 
 	const cancelSchema = Type.Object({
