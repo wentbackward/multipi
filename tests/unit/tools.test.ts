@@ -309,6 +309,70 @@ test("status shows the per-ticket polish depth for in-review tickets (ticket #10
 	} finally { fx.cleanup(); }
 });
 
+// Structural guard (review round 2, must-fix 2): GFM derives the table's column COUNT from the
+// delimiter row — a header, separator or data row with a different cell count silently degrades
+// the operator board from a table to raw pipes. Every pipe row in the status output must agree
+// with its table's delimiter row. Byte-level inspection of the reviewed HEAD found the
+// Open-tickets table consistent (5/5/5/5; renders as a real table under a GFM parser); this pin
+// keeps it that way whenever the columns change again.
+function pipeTables(md: string): string[][][] {
+	const tables: string[][][] = [];
+	let cur: string[][] = [];
+	for (const line of md.split("\n")) {
+		const s = line.trim();
+		if (s.startsWith("|") && s.endsWith("|") && s.length > 1) cur.push(s.slice(1, -1).split("|"));
+		else {
+			if (cur.length) tables.push(cur);
+			cur = [];
+		}
+	}
+	if (cur.length) tables.push(cur);
+	return tables;
+}
+
+test("status board tables stay structurally renderable: header, separator and rows agree on cell count", async () => {
+	const checkTables = (t: string, expectTables: number): void => {
+		const tables = pipeTables(t);
+		assert.equal(tables.length, expectTables, `expected ${expectTables} pipe tables:\n${t}`);
+		for (const tb of tables) {
+			assert.ok(tb.length >= 3, `every table has a header, a separator and at least one row:\n${tb.map((r) => r.join(" | ")).join("\n")}`);
+			assert.ok(tb[1].every((c) => /^:?-+:?$/.test(c.trim())), `row 2 is the delimiter row:\n${tb[1].join(" | ")}`);
+			const width = tb[1].length;
+			for (const [i, row] of tb.entries()) {
+				assert.equal(row.length, width, `table row ${i} has ${row.length} cells, the delimiter has ${width}:\n${row.join(" | ")}\n${tb[1].join(" | ")}`);
+			}
+		}
+	};
+	// populated board: a child row and a ticket row carrying polish depth
+	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Cache layer");
+		mkdirSync(ctx.stateDir, { recursive: true });
+		writeFileSync(
+			path.join(ctx.stateDir, "dispatch.json"),
+			JSON.stringify({ [String(n)]: { pid: process.pid, role: "implementer", branch: "feat/x", worktree: "/wt", startedAt: 1, status: "running" } }),
+		);
+		execFileSync("gh", ["issue", "edit", String(n), "--add-label", "dl/in-review"], { cwd: fx.repo, stdio: "pipe" });
+		execFileSync("gh", ["issue", "comment", String(n), "--body", "should-fix follow-up: round one"], { cwd: fx.repo, stdio: "pipe" });
+		const res = await call(ctx, "devloop_status", {});
+		assert.equal(res.isError ?? false, false);
+		checkTables(textOf(res), 2);
+	} finally { fx.cleanup(); }
+	// empty board: both (none) fallback rows render
+	const fx0 = makeFixture(JSON.stringify({ base_branch: "main" }));
+	setupEnv(fx0);
+	try {
+		const ctx = ctxWithAgents(fx0);
+		const res = await call(ctx, "devloop_status", {});
+		assert.equal(res.isError ?? false, false);
+		const t = textOf(res);
+		assert.match(t, /\(none\)/, "the empty board carries the fallback rows");
+		checkTables(t, 2);
+	} finally { fx0.cleanup(); }
+});
+
 test("stop gate: red fast check blocks settlement (fake-gh offline)", async () => {
 	const fx = makeFixture(JSON.stringify({ base_branch: "main", fast_check: "false" }));
 	setupEnv(fx);
