@@ -7,7 +7,7 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult, AgentToolUpdateCallback, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { loadConfig, resolvePaths, resolveState, repoSlugFromRemote, scenariosOn, type DevloopConfig, type Paths } from "./config.ts";
 import { TOOL_NAMES } from "./toolnames.ts";
-import { readState, updateState, pruneDead, runningCount, type DispatchEntry, type DispatchState } from "./state.ts";
+import { readState, updateState, pruneDead, reconcileState, runningCount, unseenTerminals, ackTerminals, readSeen, terminalTime, type DispatchEntry, type DispatchState } from "./state.ts";
 import {
 	branchSlug,
 	worktreePath,
@@ -150,6 +150,31 @@ function inFlightList(state: DispatchState): string {
 	return rows.length ? rows.join("; ") : "(none)";
 }
 
+/** Report tail for the late-report surface: the last few non-empty lines, bounded, the
+ * terminal line (STATUS/VERDICT) at the end is what the orchestrator acts on. */
+function reportTail(report: string | undefined, maxLines = 4, maxChars = 400): string {
+	if (!report) return "(no report)";
+	const lines = report.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() !== "");
+	const tail = lines.slice(-maxLines).join("\n");
+	return tail.length > maxChars ? `…${tail.slice(-maxChars)}` : tail;
+}
+
+/** Render the late-report section (non-table on purpose: the structural pin keeps the
+ * operator board to its pipe tables). Empty input yields the (none) fallback line. */
+function lateReportsBlock(late: Array<[string, DispatchEntry]>): string[] {
+	if (late.length === 0) return ["(none)"];
+	const lines: string[] = [];
+	for (const [k, e] of late) {
+		// Numeric keys are tickets; ad-hoc keys (review-/analyst-/verifier-/scenario-writer-)
+		// are not ticket numbers and name plainly (#121 review round 2).
+		const id = /^\d+$/.test(k) ? `#${k}` : k;
+		const when = e.endedAt ? new Date(e.endedAt).toISOString().slice(0, 16).replace("T", " ") : "?";
+		lines.push(`- ${id} ${e.role} (${e.branch ?? e.worktree}) -> ${e.status} — ended ${when}`);
+		for (const l of reportTail(e.report).split("\n")) lines.push(`  ${l}`);
+	}
+	return lines;
+}
+
 function git(args: string[], cwd: string): void {
 	execFileSync("git", args, { cwd, stdio: "pipe" });
 }
@@ -248,7 +273,8 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 	// ---- analyst: spec/feedback -> ticket plan (no ticket, no capacity slot) --
 	if (params.role === "analyst") {
 		if (!params.spec && !params.focus) return { ...text("analyst requires `spec` (a spec path) or `focus` (operator feedback)"), isError: true };
-		const state = pruneDead(readState(ctx.stateDir));
+		const state = readState(ctx.stateDir);
+		pruneDead(state);
 		const slug = branchSlug(params.spec ? path.basename(params.spec) : "operator-feedback") || "analysis";
 		const key = `analyst-${slug}`;
 		if (state[key]?.status === "running") {
@@ -282,7 +308,8 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			return { ...text("the scenario store is off in this repo's config (a `scenarios` block or `factory: dark` turns it on) — there is nowhere to write the ticket's scenarios"), isError: true };
 		}
 		const key = `scenario-writer-${ticket}`; // distinct from the implementer's <ticket> key
-		const state = pruneDead(readState(ctx.stateDir));
+		const state = readState(ctx.stateDir);
+		pruneDead(state);
 		if (state[key]?.status === "running") {
 			return { ...text(`a scenario-writer for #${ticket} is already running. In-flight: ${inFlightList(state)}`), isError: true };
 		}
@@ -338,7 +365,8 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 
 	// ---- code-reviewer: reviews an existing pushed branch -------------------
 	if (params.role === "code-reviewer") {
-		const state = pruneDead(readState(ctx.stateDir));
+		const state = readState(ctx.stateDir);
+		pruneDead(state);
 		const ticket = params.ticket;
 		if (ticket === undefined) return { ...text("code-reviewer requires `ticket` (the branch defaults to the ticket's dispatch branch)"), isError: true };
 		const entry = state[String(ticket)];
@@ -380,11 +408,11 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 	if (ticket === undefined) return { ...text("implementer requires `ticket`"), isError: true };
 
 	// Local refusals first (no GitHub dependency): busy ticket, then capacity.
-	// Locked read-modify-write: the prune is persisted and concurrent dispatches can't lose entries.
-	const state = updateState(ctx.stateDir, (s) => {
-		pruneDead(s);
-		return s;
-	});
+	// Persisted read-modify-write: dead running entries are reclaimed to crashed (with
+	// endedAt) BEFORE the busy check, so an orphaned child (the dispatch tool bound resolved
+	// while the child kept running, then died) frees its ticket and slot — the stale-
+	// "already running" refusal of ticket #121 can no longer happen.
+	const state = reconcileState(ctx.stateDir).state;
 	const prev = state[String(ticket)];
 	if (prev?.status === "running") {
 		return { ...text(`ticket #${ticket} already has an implementer running. In-flight: ${inFlightList(state)}`), isError: true };
@@ -556,13 +584,25 @@ function spawnAndTrack(
 /** Record a freshly-created dispatch entry as running (idempotent per key). */
 function persistEntry(ctx: ToolContext, key: string, entry: DispatchEntry): void {
 	updateState(ctx.stateDir, (state) => {
-		state[key] = { ...state[key], ...entry };
+		// (#121 review M1) The fresh entry is the entry: every caller passes a complete one,
+		// and the old merge carried the PREVIOUS generation's terminal fields (stale
+		// endedAt/report/error/stopReason) into the new running entry — when that generation
+		// was itself reaped, reapDead's `endedAt ??= now` kept the stale value, terminalTime
+		// equaled the already-acked time, and the second orphan never resurfaced. The pid
+		// stamp is a separate updateState, so the merge bought nothing.
+		state[key] = { ...entry };
 	});
 }
 
 /** Record the terminal state of a dispatch entry (state key = ticket or ad-hoc). */
 export function finishEntry(ctx: ToolContext, key: string, entry: DispatchEntry, res: { exitCode: number; finalText: string; aborted: boolean; stopReason?: string; errorMessage?: string; stderr: string }, signal?: AbortSignal): void {
 	updateState(ctx.stateDir, (state) => {
+		// Generation guard (#121): the reap-then-re-dispatch race. This entry belongs to the
+		// generation that STARTED with this startedAt; if the key now carries a different
+		// startedAt, a re-dispatch took over while the old child's finish was in flight, and a
+		// stale terminal would stomp the new child's running entry.
+		const cur = state[key];
+		if (cur && cur.startedAt !== entry.startedAt) return;
 		entry.report = res.finalText || res.stderr || res.errorMessage || "";
 		entry.stopReason = res.stopReason;
 		if (res.errorMessage) entry.error = res.errorMessage;
@@ -570,6 +610,7 @@ export function finishEntry(ctx: ToolContext, key: string, entry: DispatchEntry,
 		// contract (STATUS for implementer/analyst/verifier/scenario-writer, VERDICT for the
 		// reviewer). Marker quotes in the body never decide; no terminal marker -> crashed (#22).
 		entry.status = res.aborted || signal?.aborted ? "interrupted" : classifyReport(entry.role, res.finalText);
+		entry.endedAt = Date.now();
 		// Keep the live pid recorded at spawn time (the entry object still carries the 0 placeholder).
 		state[key] = { ...entry, pid: state[key]?.pid ?? entry.pid };
 	});
@@ -626,7 +667,8 @@ function ensureWorktree(ctx: ToolContext, branch: string, worktree: string, fres
 // Cancel
 // ---------------------------------------------------------------------------
 export function cancelImpl(ctx: ToolContext, key: string): AgentToolResult<undefined> {
-	const state = pruneDead(readState(ctx.stateDir));
+	const state = readState(ctx.stateDir);
+	pruneDead(state);
 	const entry = state[key];
 	if (!entry) return { ...text(`no dispatch known for '${key}'`), isError: true };
 	if (entry.status !== "running") return { ...text(`dispatch '${key}' is ${entry.status}, not running`), isError: true };
@@ -641,7 +683,10 @@ export function cancelImpl(ctx: ToolContext, key: string): AgentToolResult<undef
 	}
 	updateState(ctx.stateDir, (s) => {
 		const e = s[key];
-		if (e) e.status = "interrupted";
+		if (e && e.status === "running") {
+			e.status = "interrupted";
+			e.endedAt = Date.now();
+		}
 	});
 	return { ...text(`cancel sent for '${key}' (pid ${entry.pid || "?"}); the worktree is kept for a re-dispatch`) };
 }
@@ -723,7 +768,8 @@ function gitHeadAndDirty(worktree: string): { head?: string; dirty?: number } {
 const PAUSE_EXIT_GRACE_MS = 15_000;
 
 export async function pauseImpl(ctx: ToolContext): Promise<AgentToolResult<undefined>> {
-	const state = pruneDead(readState(ctx.stateDir));
+	const state = readState(ctx.stateDir);
+	pruneDead(state);
 	const runningKeys = Object.keys(state).filter((k) => state[k]?.status === "running");
 	const now = Date.now();
 
@@ -742,7 +788,10 @@ export async function pauseImpl(ctx: ToolContext): Promise<AgentToolResult<undef
 	for (const key of runningKeys) {
 		updateState(ctx.stateDir, (s) => {
 			const e = s[key];
-			if (e && e.status === "running") e.status = "interrupted";
+			if (e && e.status === "running") {
+				e.status = "interrupted";
+				e.endedAt = Date.now();
+			}
 		});
 	}
 
@@ -754,7 +803,8 @@ export async function pauseImpl(ctx: ToolContext): Promise<AgentToolResult<undef
 	const laggards = childreg.runningChildren().map((c) => c.key);
 
 	// 3) Per-child forensics (re-read: statuses are now 'interrupted') + board snapshot.
-	const after = pruneDead(readState(ctx.stateDir));
+	const after = readState(ctx.stateDir);
+	pruneDead(after);
 	const interruptedKeys = Object.keys(after).filter((k) => after[k]?.status === "interrupted");
 	const children: HandoffChild[] = interruptedKeys.map((key) => {
 		const e = after[key]!;
@@ -813,8 +863,21 @@ export async function evaluateSettle(cwd: string): Promise<{ entries: { type: "c
 		const ctx = buildContext(cwd);
 		const cfg = ctx.cfg;
 		const [fc, issues, closed] = await Promise.all([runFastCheck(cfg.fastCheck ?? null, ctx.cfg.root), listOpenIssues(ctx.repoSlug), listClosedIssueNumbers(ctx.repoSlug)]);
-		const state = pruneDead(readState(ctx.stateDir));
+		// Reclaimed (persisted) state: a child that died out from under a bounded dispatch is
+		// crashed here, not phantom-running — its slot and its ticket free for the drive below.
+		const { state } = reconcileState(ctx.stateDir);
 		const running = Object.values(state).filter((e) => e.status === "running" && e.role === "implementer").length;
+		// Late-report loop drive (#121): an implementer that DELIVERED (entry done) but whose
+		// ticket still sits at dl/in-progress/dl/in-review with no reviewer dispatched is
+		// work-to-do. Open issues only — a merged/closed ticket is not pending.
+		const openByNumber = new Map(issues.map((i) => [i.number, i] as const));
+		const pendingReviews = Object.entries(state)
+			.filter(([k, e]) => e.role === "implementer" && e.status === "done" && /^\d+$/.test(k))
+			.map(([k]) => Number(k))
+			.filter((n) => {
+				const issue = openByNumber.get(n);
+				return issue && (issue.labels.includes("dl/in-progress") || issue.labels.includes("dl/in-review")) && !state[`review-${n}`];
+			});
 		// Startability rule (spec §4): with the store on, only tickets covered by a valid
 		// t<ticket>- scenario drive the loop; a missing store dir scans to [] (nothing covered)
 		// and an unreadable store likewise covers nothing (fail-closed).
@@ -838,6 +901,7 @@ export async function evaluateSettle(cwd: string): Promise<{ entries: { type: "c
 				.filter((n) => Number.isFinite(n)),
 			running,
 			cap: cfg.heavy.slots,
+			pendingReviews,
 			scenariosOn: storeOn,
 			covered: storeOn ? coveredTicketsFromScan(scanStore(ctx.paths.scenariosDir)) : [],
 		});
@@ -957,11 +1021,16 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 	const status = defineTool({
 		name: TOOL_NAMES.status,
 		label: "Dev-loop status",
-		description: "Show the loop's current state: in-flight children, open tickets with dl/ labels, capacity, and the last green gate record.",
+		description: "Show the loop's current state: in-flight children, open tickets with dl/ labels, capacity, and the last green gate record. Reclaims orphaned children (a dead pid reclassifies running -> crashed, freeing the slot and allowing a re-dispatch) and lists the children that reached a terminal state since the last status (late reports, with their report tail).",
 		parameters: Type.Object({}),
 		execute: (_id: string, _p: unknown, _s: AbortSignal | undefined, _u: unknown, toolCtx: { cwd: string }): Promise<AgentToolResult<undefined>> =>
 			runBounded(TOOL_NAMES.status, toolCtx, async (ctx) => {
-				const state = pruneDead(readState(ctx.stateDir));
+				// The reconcile pass: dead running entries are reclassified crashed WITH endedAt
+				// and persisted, so this status (and the board, and the next dispatch) all agree
+				// the slot is free. Late reports surface the terminals since the last status, then
+				// ack them (a re-terminal of the same child carries a new endedAt and resurfaces).
+				const { state } = reconcileState(ctx.stateDir);
+				const late = unseenTerminals(state, readSeen(ctx.stateDir));
 				const kids = Object.entries(state)
 					.map(([k, e]) => `| #${k} | ${e.role} | ${e.branch ?? "-"} | ${e.status} | ${new Date(e.startedAt).toISOString().slice(0, 16).replace("T", " ")} |`)
 					.join("\n");
@@ -993,8 +1062,15 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 				} catch {
 					/* no record */
 				}
+				// (#121 review M2) The ack is the LAST fallibility-free step: the tracker calls
+				// above can error the tool after the report is rendered — if the ledger were
+				// updated first, a gh blip would consume the late report and it would never
+				// surface again. Building the text first means an errored status re-lists it next.
+				if (late.length > 0) {
+					ackTerminals(ctx.stateDir, Object.fromEntries(late.map(([k, e]) => [k, terminalTime(e)])));
+				}
 				return text(
-					[`# devloop status`, "", `Implementers in flight: ${running}/${ctx.cfg.heavy.slots}`, "", "## Children", "| ticket | role | branch | status | since |", "|---|---|---|---|---|", kids || "| - | - | - | (none) | - |", "", "## Open tickets", "| # | title | dl/ labels | depends | polish |", "|---|---|---|---|---|", issues || "| - | (none) | - | - | - |", "", `## Last green gate`, train, ""].join("\n"),
+					[`# devloop status`, "", `Implementers in flight: ${running}/${ctx.cfg.heavy.slots}`, "", "## Children", "| ticket | role | branch | status | since |", "|---|---|---|---|---|", kids || "| - | - | - | (none) | - |", "", "## Late reports (terminal since your last status)", ...lateReportsBlock(late), "", "## Open tickets", "| # | title | dl/ labels | depends | polish |", "|---|---|---|---|---|", issues || "| - | (none) | - | - | - |", "", `## Last green gate`, train, ""].join("\n"),
 				);
 		}),
 	});

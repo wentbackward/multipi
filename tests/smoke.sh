@@ -1203,9 +1203,10 @@ mv .devloop.json.bak .devloop.json
 # Splice factory/scenarios keys into the fixture config (keeping checks/remote/
 # AGENTS.md intact, so the assertions are about the factory lines alone).
 mkcfg() { # mkcfg [EXTRA-JSON]  — base fixture config plus EXTRA before the closing brace
-  local sep=,  # the heavy line ends with a comma only when EXTRA follows it
-  [ -n "$1" ] || sep=''
-  cat >.devloop.json <<EOF
+  # The no-extra form must be byte-identical to the committed fixture config (a stray blank
+  # line would leave `M .devloop.json` behind after every restore — tracked dirt).
+  if [ -n "$1" ]; then
+    cat >.devloop.json <<EOF
 {
   "base_branch": "main",
   "fast_check": "test ! -e fast-fail",
@@ -1215,10 +1216,25 @@ mkcfg() { # mkcfg [EXTRA-JSON]  — base fixture config plus EXTRA before the cl
     {"name": "unit", "command": "./check.sh", "summary": "passed|failed"},
     {"name": "lint", "command": "test -x check.sh", "heavy": false}
   ],
-  "heavy": {"slots": 2, "port_env": "SMOKE_PORT", "port_base": 9100, "port_step": 10, "poll_seconds": 1}$sep
+  "heavy": {"slots": 2, "port_env": "SMOKE_PORT", "port_base": 9100, "port_step": 10, "poll_seconds": 1},
 $1
 }
 EOF
+  else
+    cat >.devloop.json <<'EOF'
+{
+  "base_branch": "main",
+  "fast_check": "test ! -e fast-fail",
+  "format": "echo formatted {file} >> fmt.log",
+  "format_extensions": [".txt"],
+  "checks": [
+    {"name": "unit", "command": "./check.sh", "summary": "passed|failed"},
+    {"name": "lint", "command": "test -x check.sh", "heavy": false}
+  ],
+  "heavy": {"slots": 2, "port_env": "SMOKE_PORT", "port_base": 9100, "port_step": 10, "poll_seconds": 1}
+}
+EOF
+  fi
 }
 doct() { bash "$plugin/scripts/doctor.sh" 2>&1; }
 store_dir="$work/home/project/scenarios"
@@ -3022,6 +3038,119 @@ grep -qF "$ASK_SECRET" "$AUDIT_LOG" &&
 grep -qF "$H_ORIG" "$AUDIT_LOG" &&
   fail "a token's hmac leaked into the audit log" || pass "the audit log carries no token hmac"
 unset POLICY_SIGNING_SECRET
+# --- reclaiming orphaned children (ticket #121): stale-running reconcile + late report ----
+# A real live process plays the child under the loop; killing it out from under the loop
+# reproduces the incident (a dispatch that resolved at the 45-min bound leaves the child
+# running, and the child's fate never reaches the orchestrator). The extension's tools are
+# driven through a node driver, as in the P2 section (offline: fake-gh tracker, fake-pi
+# child, its own state home + tracker + branch).
+RECBASE="$work/reclaim"
+REC_GH="$RECBASE/gh"
+REC_HOME="$RECBASE/home"
+REC_WT="$REC_HOME/project/worktrees/project/issue-1"
+if ! command -v node >/dev/null 2>&1; then
+  echo "SKIP reclaim section (node not found; the extension tools cannot be driven)"
+elif [ -n "$(git -C "$work/project" status --porcelain)" ]; then
+  fail "reclaim precondition: the fixture tree is dirty — a prior section leaked work: $(git -C "$work/project" status --porcelain | head -5 | tr '\n' '; ') :: $(git -C "$work/project" diff .devloop.json | head -12 | tr '\n' '|')"
+else
+  pass "reclaim precondition: the fixture tree is clean"
+  mkdir -p "$REC_GH" "$REC_HOME/project"
+  FAKE_GH_DIR="$REC_GH" gh issue create "Orphaned child reclaim" "the child died out from under the loop" >/dev/null
+  REC_N=1
+  # The orphan's branch exists locally (the child pushed before dying); the re-dispatch reuses it.
+  git -C "$work/project" branch -q "feat/$REC_N-orphaned" origin/main
+  # A real live process is the child; the entry plants it at its pid, aged past the spawn grace.
+  sleep 120 & REC_LIVE=$!
+  printf '{"1":{"pid":%s,"role":"implementer","branch":"feat/%s-orphaned","worktree":"%s","startedAt":%s,"status":"running"}}\n' \
+    "$REC_LIVE" "$REC_N" "$REC_WT" "$(( $(date +%s%3N) - 10 * 60 * 1000 ))" >"$REC_HOME/project/dispatch.json"
+  recdriver() { # recdriver CMD — drive the extension's tools from the fixture repo
+    (cd "$work/project" && env MULTIPI_HOME="$REC_HOME" FAKE_GH_DIR="$REC_GH" \
+      MULTIPI_PI_BIN="$plugin/tests/fake-pi" MULTIPI_PLUGIN_DIR="$plugin" REC_CMD="$1" \
+      node --input-type=module -e '
+const { makeTools, evaluateSettle } = await import(process.env.MULTIPI_PLUGIN_DIR + "/extension/src/tools.ts");
+const tools = makeTools();
+const call = async (name, args) => {
+  const t = tools.find((x) => x.name === name);
+  return t.execute("smoke-" + name, args, new AbortController().signal, undefined, { cwd: process.cwd() });
+};
+const txt = (r) => (r.content ?? []).map((c) => c.text ?? "").join("");
+switch (process.env.REC_CMD) {
+  case "status": {
+    const r = await call("devloop_status", {});
+    process.stdout.write("ERR=" + (r.isError ? "1" : "0") + "\n" + txt(r));
+    break;
+  }
+  case "dispatch": {
+    const r = await call("devloop_dispatch", { role: "implementer", ticket: 1 });
+    const t = txt(r);
+    process.stdout.write("ERR=" + (r.isError ? "1" : "0") + "\n" + t.split("\n")[0]);
+    break;
+  }
+  case "settle": {
+    const d = await evaluateSettle(process.cwd());
+    if (!d) { process.stdout.write("SETTLE=pass"); break; }
+    const c = d.entries[0].content.split("\n");
+    const rev = c.find((l) => l.includes("await the reviewer"));
+    const sta = c.find((l) => l.includes("startable"));
+    process.stdout.write("SETTLE=block\n" + (rev ?? "") + "\n" + (sta ?? ""));
+    break;
+  }
+}
+' 2>"$RECBASE/driver.err")
+  }
+  # 1) While the child is alive: in flight.
+  recdriver status >"$RECBASE/s1.out"
+  grep -q "Implementers in flight: 1/2" "$RECBASE/s1.out" && \
+    pass "reclaim: a live child renders in flight (1/2)" || \
+    fail "reclaim live: $(head -3 "$RECBASE/s1.out" | tr '\n' ' ')"
+  # 2) KILL the child out from under the loop; the NEXT STATUS reconciles it and persists it.
+  kill -9 "$REC_LIVE" 2>/dev/null || true
+  wait "$REC_LIVE" 2>/dev/null || true
+  recdriver status >"$RECBASE/s2.out"
+  grep -q "crashed" "$RECBASE/s2.out" && \
+    pass "reclaim: the next status reconciles the dead child to crashed" || \
+    fail "reclaim crashed: $(head -8 "$RECBASE/s2.out" | tr '\n' ' ') | $(head -3 "$RECBASE/driver.err" | tr '\n' ' ')"
+  grep -q '"status": "crashed"' "$REC_HOME/project/dispatch.json" && \
+    pass "reclaim: the reclassification is persisted (crashed on disk)" || \
+    fail "reclaim persist: $(head -c 300 "$REC_HOME/project/dispatch.json")"
+  grep -q '"endedAt":' "$REC_HOME/project/dispatch.json" && \
+    pass "reclaim: endedAt is stamped in the state file" || \
+    fail "reclaim endedAt: $(head -c 300 "$REC_HOME/project/dispatch.json")"
+  # 3) The #104 dead end is gone: the re-dispatch PROCEEDS (was: refused, "already running").
+  recdriver dispatch >"$RECBASE/d1.out"
+  grep -q "^ERR=0" "$RECBASE/d1.out" && grep -q "implementer #1 .* -> done" "$RECBASE/d1.out" && \
+    pass "reclaim: the re-dispatch is no longer refused — the child runs to done" || \
+    fail "reclaim redispatch: $(cat "$RECBASE/d1.out") | $(head -3 "$RECBASE/driver.err" | tr '\n' ' ')"
+  # 4) The late-report surface: the finished child (terminal since the last status) is listed with its tail.
+  recdriver status >"$RECBASE/s3.out"
+  grep -q "## Late reports" "$RECBASE/s3.out" && grep -q "STATUS: DONE" "$RECBASE/s3.out" && \
+    pass "reclaim: the late report surfaces with its report tail (STATUS: DONE)" || \
+    fail "reclaim late: $(sed -n '/Late reports/,/Open tickets/p' "$RECBASE/s3.out" | tr '\n' ' ')"
+  # 5) The stop gate drives on the delivered, unreviewed branch (the loop re-engages).
+  recdriver settle >"$RECBASE/set1.out"
+  grep -q "SETTLE=block" "$RECBASE/set1.out" && grep -q "await the reviewer" "$RECBASE/set1.out" && \
+    pass "reclaim: the stop gate refuses to settle while the delivered branch awaits the reviewer" || \
+    fail "reclaim settle: $(cat "$RECBASE/set1.out") | $(head -3 "$RECBASE/driver.err" | tr '\n' ' ')"
+  # A reviewer entry retires the review clause; the open ticket still drives the startable clause.
+  printf '{"1":{"pid":1,"role":"implementer","branch":"feat/1-orphaned","worktree":"%s","startedAt":1,"status":"done","report":"STATUS: DONE","endedAt":2},"review-1":{"pid":%s,"role":"code-reviewer","branch":"feat/1-orphaned","worktree":"%s","startedAt":%s,"status":"running"}}\n' \
+    "$REC_WT" "$$" "$REC_WT" "$(date +%s%3N)" >"$REC_HOME/project/dispatch.json"
+  recdriver settle >"$RECBASE/set2.out"
+  if grep -q "await the reviewer" "$RECBASE/set2.out"; then
+    fail "reclaim: the review clause must retire once a reviewer is dispatched: $(cat "$RECBASE/set2.out")"
+  else
+    pass "reclaim: the review clause retires once the reviewer is dispatched"
+  fi
+  grep -q "startable" "$RECBASE/set2.out" && \
+    pass "reclaim: the open ticket still drives the startable clause" || \
+    fail "reclaim startable: $(cat "$RECBASE/set2.out")"
+  # Teardown: my branch, worktree, tracker and state home (all created by this section).
+  FAKE_GH_DIR="$REC_GH" gh issue close 1 >/dev/null 2>&1 || true
+  git -C "$work/project" worktree remove --force "$REC_WT" 2>/dev/null || true
+  git -C "$work/project" push -q origin :"feat/$REC_N-orphaned" 2>/dev/null || true
+  git -C "$work/project" branch -q -D "feat/$REC_N-orphaned" 2>/dev/null || true
+  rm -rf "$RECBASE"
+fi
+
 # --- permission policy P3: the git/gh shims — the full Layer-2 matrix (ticket #41) ----
 # The loop is productized-installed into the fixture project, then the shim dir is prepended
 # to PATH for each probed invocation. The real `git` is the system git; `gh` is tests/fake-gh
