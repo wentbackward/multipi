@@ -71,10 +71,12 @@ export function issueComments(repo: string, number: number): string[] {
 	return (rows[0]?.comments ?? []).map((c) => c.body ?? "");
 }
 
-/** Create an issue; returns its number, parsed from the tracker's issue-URL reply. */
+/** Create an issue; returns its number, parsed from the tracker's issue-URL reply.
+ * Speaks the REAL CLI's contract — `issue create --title <t> --body <b>`: positional
+ * title/body is rejected by `gh` ("unknown arguments"), which a positional fake had masked. */
 export function createIssue(repo: string, title: string, body = ""): number {
-	const args = repo ? ["--repo", repo, "issue", "create", title, body] : ["issue", "create", title, body];
-	const out = execFileSync("gh", args, { env: process.env, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
+	const args = ["issue", "create", "--title", title, "--body", body];
+	const out = execFileSync("gh", repo ? ["--repo", repo, ...args] : args, { env: process.env, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
 	const m = out.match(/issues\/(\d+)\s*$/);
 	if (!m) throw new Error(`cannot parse the issue number from the tracker reply: ${out.slice(0, 120)}`);
 	return Number(m[1]);

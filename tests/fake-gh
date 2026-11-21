@@ -32,7 +32,9 @@
 #     unless the caller asks for all (or merged).
 #   pr create --head B --title T [--body-file F]
 #   pr merge|squash-merge <branch> [--match-head-commit SHA]
-#   issue create <title> [body]            prints issue URL
+#   issue create (--title T [--body B]|<title> [body])   prints issue URL (both forms:
+#     the FLAG form is the real CLI's contract (positionals are rejected by `gh`);
+#     the positional form is kept for the shell-driven smoke lines)
 #   issue list --state open|closed --json <fields>
 #     the REQUESTED fields are honoured: of number/title/labels/body, only the
 #     ones named in --json are emitted (unknown fields are ignored), so a body
@@ -170,8 +172,25 @@ case "${1:-} ${2:-}" in
     printf '%s\n' "$body" >"$dir/comments/$n/$(printf '%04d' "$seq")"
     ;;
   "issue create")
-    title=$3
-    body=${4:-}
+    title=""
+    body=""
+    if [ "${3:-}" = "--title" ]; then
+      # Flag form (the real CLI's contract): --title T [--body B].
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --title|--body)
+            [ $# -ge 2 ] || { echo "fake-gh: $1 requires an argument" >&2; exit 1; }
+            if [ "$1" = "--title" ]; then title=$2; else body=$2; fi
+            shift 2
+            ;;
+          *) shift ;;
+        esac
+      done
+    else
+      # Positional form, kept for the shell-driven smoke (the real gh rejects it).
+      title=$3
+      body=${4:-}
+    fi
     n=1
     for d in "$dir/issues" "$dir/issues-closed"; do
       for f in "$d"/*; do
