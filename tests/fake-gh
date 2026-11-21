@@ -11,6 +11,11 @@
 #
 # Issues live in $FAKE_GH_DIR/issues (open) and issues-closed, one file per
 # number (line 1 title, line 2 body); labels in labels/<n>.
+# Comments live in comments/<n>/<seq> (seq zero-padded, one file per message):
+# `issue view <n> --json …comments` emits the REAL shape — one array entry per
+# comment, oldest first, [] when the issue has none (the pre-#105 blob form
+# collapsed the whole history into a single comment, which made per-comment
+# bookkeeping like the should-fix round count untestable).
 #
 # Test seam: while $FAKE_GH_DIR/<slug>.merge-hold exists, `pr merge` refuses the
 # merge and the PR stays OPEN (a temporarily blocked PR, e.g. failing CI) — this
@@ -27,7 +32,9 @@
 #     unless the caller asks for all (or merged).
 #   pr create --head B --title T [--body-file F]
 #   pr merge|squash-merge <branch> [--match-head-commit SHA]
-#   issue create <title> [body]            prints issue URL
+#   issue create (--title T [--body B]|<title> [body])   prints issue URL (both forms:
+#     the FLAG form is the real CLI's contract (positionals are rejected by `gh`);
+#     the positional form is kept for the shell-driven smoke lines)
 #   issue list --state open|closed --json <fields>
 #     the REQUESTED fields are honoured: of number/title/labels/body, only the
 #     ones named in --json are emitted (unknown fields are ignored), so a body
@@ -155,12 +162,35 @@ case "${1:-} ${2:-}" in
         *) shift ;;
       esac
     done
-    mkdir -p "$dir/comments"
-    printf '%s\n' "$body" >>"$dir/comments/$n"
+    mkdir -p "$dir/comments/$n"
+    seq=1
+    for f in "$dir/comments/$n"/*; do
+      [ -e "$f" ] || continue
+      cand=$((10#$(basename "$f")))
+      [ "$cand" -ge "$seq" ] && seq=$((cand + 1))
+    done
+    printf '%s\n' "$body" >"$dir/comments/$n/$(printf '%04d' "$seq")"
     ;;
   "issue create")
-    title=$3
-    body=${4:-}
+    title=""
+    body=""
+    if [ "${3:-}" = "--title" ]; then
+      # Flag form (the real CLI's contract): --title T [--body B].
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --title|--body)
+            [ $# -ge 2 ] || { echo "fake-gh: $1 requires an argument" >&2; exit 1; }
+            if [ "$1" = "--title" ]; then title=$2; else body=$2; fi
+            shift 2
+            ;;
+          *) shift ;;
+        esac
+      done
+    else
+      # Positional form, kept for the shell-driven smoke (the real gh rejects it).
+      title=$3
+      body=${4:-}
+    fi
     n=1
     for d in "$dir/issues" "$dir/issues-closed"; do
       for f in "$d"/*; do
@@ -258,12 +288,21 @@ case "${1:-} ${2:-}" in
     if [ -n "${fields##*comments}" ]; then
       printf '{"title":"%s"}\n' "$(jesc "$title")"
     else
-      # Multi-line comments round-trip as VALID JSON: the real CLI never emits a raw
-      # newline inside a string — quote first, then encode newlines as \n (the
-      # issue-list idiom; ticket #103 found the board's jq reader rejecting the raw form).
-      body=""
-      [ -f "$dir/comments/$n" ] && body=$(jesc "$(awk '{line=line (NR>1?"\n":"") $0} END{print line}' "$dir/comments/$n")" | awk '{printf "%s%s", (NR>1?"\\n":""), $0}')
-      printf '{"title":"%s","comments":[{"body":"%s"}]}\n' "$(jesc "$title")" "$body"
+      cmts="[]"
+      if [ -d "$dir/comments/$n" ]; then
+        cmts="["
+        first=1
+        for f in $(find "$dir/comments/$n" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort); do
+          # Newlines are encoded as literal \n AFTER the quote/backslash escaping: a comment
+          # is a SINGLE JSON string, the same contract the issue BODY in `issue list` follows.
+          body_nl=$(jesc "$(cat "$dir/comments/$n/$f")" | awk '{printf "%s%s", (NR>1?"\\n":""), $0}')
+          [ "$first" = 1 ] || cmts="$cmts,"
+          cmts="$cmts{\"body\":\"$body_nl\"}"
+          first=0
+        done
+        cmts="$cmts]"
+      fi
+      printf '{"title":"%s","comments":%s}\n' "$(jesc "$title")" "$cmts"
     fi
     ;;
   "issue edit")

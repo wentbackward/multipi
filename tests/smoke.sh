@@ -703,6 +703,76 @@ grep -q "Closes #1" "$FAKE_GH_DIR/feat_1-first.body" && pass "PR body is the res
 expect "open-pr is idempotent when the PR exists" "0" \
   "$(bash "$plugin/scripts/open-pr.sh" feat/1-first >/dev/null 2>&1; echo $?)"
 
+# --- polish-tail.sh: the accept-tail brake (ticket #105) -----------------------
+# review.max_followup_depth defaults to 2: a ticket with TWO "should-fix follow-up"
+# comments is AT the cap — the next should-fix tail is accepted (findings parked in
+# the single per-area "Polish backlog — <area>" ticket, verdict commented, ticket
+# labelled dl/approved) instead of re-dispatching. Below the cap the script exits 10
+# and changes nothing. fake-gh offline; node runs the pure decision modules.
+if ! command -v node >/dev/null 2>&1; then
+  echo "SKIP polish-tail section (node not found; the decision modules cannot run)"
+else
+  printf 'rename the hot path\nassert the eviction order\n' >"$work/findings-105.txt"
+  pt_n=$(gh issue create "Cache layer" "acceptance body" | sed 's|.*/issues/||')
+  gh issue comment "$pt_n" --body "should-fix follow-up: round 1 finding"
+  gh issue comment "$pt_n" --body "should-fix follow-up: round 2 finding"
+  out=$(bash "$plugin/scripts/polish-tail.sh" "$pt_n" cache "$work/findings-105.txt" 2>&1); rc=$?
+  echo "$out"
+  expect "accept-tail at the cap parks the tail and approves (rc 0)" "0" "$rc"
+  echo "$out" | grep -qF "ACCEPT-TAIL" && pass "the accept-tail verdict is announced" ||
+    fail "no ACCEPT-TAIL line: $out"
+  echo "$out" | grep -qF "Polish backlog — cache" && pass "the backlog title is named" ||
+    fail "backlog title missing: $out"
+  echo "$out" | grep -qF "created" && pass "the first tail creates the backlog" ||
+    fail "creation not announced: $out"
+  pt_backlog=$(gh issue list --state open --json number,title | grep -oE '\{"number":[0-9]+,"title":"Polish backlog — cache"\}' | grep -oE '[0-9]+' | head -1)
+  [ -n "$pt_backlog" ] && [ "$pt_backlog" != "$pt_n" ] && pass "the area backlog ticket was created" ||
+    fail "no distinct backlog ticket (pt=$pt_n backlog=${pt_backlog:-none})"
+  gh issue list --state open --json number,title,body | grep -qF "rename the hot path" &&
+    pass "the findings landed verbatim" || fail "findings missing from the tracker"
+  gh issue view "$pt_n" --json title,comments | grep -qF "accept-tail" &&
+    pass "the verdict was commented on the ticket" || fail "no verdict comment on the ticket"
+  gh issue list --state open --json number,labels | grep -F "\"number\":$pt_n," | grep -qF '"dl/approved"' &&
+    pass "the ticket is dl/approved (gate-ready)" || fail "dl/approved not applied"
+  # An explicit smaller cap is honoured: the same ticket (three rounds planted) is
+  # accepted under review.max_followup_depth = 1, into the SAME backlog (append).
+  cp .devloop.json "$work/.smoke-pt-backup"
+  printf '{"base_branch":"main","review":{"max_followup_depth":1},"fast_check":"test ! -e fast-fail"}' >.devloop.json
+  printf 'second-round finding\n' >"$work/findings-105b.txt"
+  out=$(bash "$plugin/scripts/polish-tail.sh" "$pt_n" cache "$work/findings-105b.txt" 2>&1); rc=$?
+  echo "$out"
+  expect "an explicit cap of 1 trips at one round (rc 0)" "0" "$rc"
+  echo "$out" | grep -qF "appended" && pass "the second tail appends to the existing backlog" ||
+    fail "append not announced: $out"
+  expect "still exactly one backlog ticket for the area" "1" \
+    "$(gh issue list --state open --json title | grep -oF "Polish backlog — cache" | wc -l | tr -d ' ')"
+  mv "$work/.smoke-pt-backup" .devloop.json
+  # Below the cap: re-dispatch stands, nothing is parked, labelled or commented.
+  pt_n2=$(gh issue create "Auth expiry" "acceptance body" | sed 's|.*/issues/||')
+  gh issue comment "$pt_n2" --body "should-fix follow-up: only one round so far"
+  out=$(bash "$plugin/scripts/polish-tail.sh" "$pt_n2" auth "$work/findings-105.txt" 2>&1); rc=$?
+  echo "$out"
+  expect "below the cap the script exits 10 (re-dispatch stands)" "10" "$rc"
+  echo "$out" | grep -qF "BELOW-CAP" && pass "the below-cap verdict is announced" ||
+    fail "no BELOW-CAP line: $out"
+  gh issue view "$pt_n2" --json title,comments | grep -qF "accept-tail" &&
+    fail "a verdict comment appeared on a below-cap ticket" || pass "no verdict comment below the cap"
+  [ ! -f "$FAKE_GH_DIR/labels/$pt_n2" ] && pass "no label applied below the cap" ||
+    fail "a label was applied below the cap"
+  expect "the below-cap run created no backlog of its own" "1" \
+    "$(gh issue list --state open --json title | grep -oF "Polish backlog —" | wc -l | tr -d ' ')"
+  # Usage: no args is a named usage error (rc 2).
+  out=$(bash "$plugin/scripts/polish-tail.sh" 2>&1); rc=$?
+  expect "polish-tail with no args is a usage error" "2" "$rc"
+  echo "$out" | grep -qF "usage: polish-tail.sh" && pass "the usage line is printed" ||
+    fail "no usage line: $out"
+  # Close the section's tickets: later sections count the OPEN issues (the worktree-cleanup
+  # board expects exactly its own four), so this section must leave the tracker as it found it.
+  gh issue close "$pt_n" >/dev/null
+  gh issue close "$pt_backlog" >/dev/null
+  gh issue close "$pt_n2" >/dev/null
+fi
+
 # --- merge-train.sh -----------------------------------------------------------
 out=$(bash "$plugin/scripts/merge-train.sh" feat/1-first feat/2-second 2>&1)
 expect "merge-train refuses a train that was not gated green" "8" "$?"
@@ -4126,10 +4196,14 @@ dispatch_entry() { # dispatch_entry KEY PID STARTED_AGO_MS [ROLE] — one entry 
   printf '{"%s":{"pid":%s,"role":"%s","worktree":"%s/wt-%s","startedAt":%s,"status":"running"}}\n' \
     "$1" "$2" "${4:-implementer}" "$bddir_state" "$1" "$(( $(date +%s%3N) - $3 ))"
 }
-dispatch_entry 88 "$BD_LIVE" $((10 * 3600 * 1000)) >"$bddir_state/dispatch.json"
+# Fabricate the over-bound child with slack (10h30m ago, not exactly 10h): this box's NTP
+# takes backwards steps (observed up to -891ms/60s), and a step inside the ~50ms window
+# between the fixture write and the board's own `now` capture sinks an exactly-10h age below
+# 10h, flaking the pin. 10h30m renders 10h2[0-9]m or 10h30m regardless of a sub-second step.
+dispatch_entry 88 "$BD_LIVE" $(( (10 * 3600 + 1800) * 1000 )) >"$bddir_state/dispatch.json"
 board MULTIPI_BOARD_CHILD_BOUND_MIN=60
 expect "board rc 2: an in-flight child past its bound" "2" "$BOARD_RC"
-echo "$BOARD_OUT" | grep -qE "in-flight: 1/2 implementers — #88 \(10h[0-1]m?, OVER BOUND\)" && \
+echo "$BOARD_OUT" | grep -qE "in-flight: 1/2 implementers — #88 \(10h(2[0-9]|30)m, OVER BOUND\)" && \
   pass "board: the over-bound child tags OVER BOUND (age + capacity from heavy.slots)" || \
   fail "board in-flight: $(grep -F in-flight <<<"$BOARD_OUT" || echo '<none>')"
 dispatch_entry 88 "$BD_LIVE" $((5 * 60 * 1000)) >"$bddir_state/dispatch.json"

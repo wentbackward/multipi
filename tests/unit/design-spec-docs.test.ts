@@ -102,9 +102,9 @@ test("the §4 merge step documents the actual close mechanism and the PR-closed-
 
 // --- item 6: the §5 key list is complete --------------------------------------
 
-test("the §5 config key list carries the keys that exist (worktree_dir, orchestrator.tool_timeout_minutes, child_silence_minutes, cleanup.stale_days, policy, scenarios, factory)", () => {
+test("the §5 config key list carries the keys that exist (worktree_dir, orchestrator.tool_timeout_minutes, child_silence_minutes, cleanup.stale_days, policy, scenarios, factory, review.max_followup_depth)", () => {
 	const sec5 = designSection("5.");
-	for (const key of ["worktree_dir", "orchestrator.tool_timeout_minutes", "child_silence_minutes", "cleanup.stale_days", "policy", "scenarios", "factory"]) {
+	for (const key of ["worktree_dir", "orchestrator.tool_timeout_minutes", "child_silence_minutes", "cleanup.stale_days", "policy", "scenarios", "factory", "review.max_followup_depth"]) {
 		assert.ok(sec5.includes(key), `the §5 key list is missing ${key}`);
 	}
 });

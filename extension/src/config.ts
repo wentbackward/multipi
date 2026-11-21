@@ -24,6 +24,15 @@ export interface OrchestratorConfig {
 	toolTimeoutMinutes: number;
 }
 
+/** Review-loop budget (ticket #105): the per-ticket should-fix follow-up cap. */
+export interface ReviewConfig {
+	/** Max should-fix re-dispatches per ticket before the tail is accepted (accept-tail, skill §4). */
+	maxFollowupDepth: number;
+}
+
+/** The polish budget default (ticket #105): two should-fix rounds, then the tail is accepted. */
+export const DEFAULT_MAX_FOLLOWUP_DEPTH = 2;
+
 /** Permission-policy posture (permission-policy spec §3): what an UNMATCHED call does. */
 export type PolicyPosture = "allow" | "ask";
 
@@ -90,6 +99,8 @@ export interface DevloopConfig {
 	policy: PolicyConfig;
 	/** Tool-call bound (spec 2026-11-15 §2); always present, defaults when the block is absent. */
 	orchestrator: OrchestratorConfig;
+	/** Per-ticket should-fix budget (ticket #105); always present, defaults when the block is absent. */
+	review: ReviewConfig;
 	deploy?: string;
 }
 
@@ -134,6 +145,22 @@ export function parsePolicyBlock(raw: unknown): PolicyConfig {
 		: [];
 	const ttl = typeof o.token_ttl_minutes === "number" && Number.isFinite(o.token_ttl_minutes) && o.token_ttl_minutes > 0 ? o.token_ttl_minutes : 10;
 	return { posture: o.posture === "ask" ? "ask" : "allow", repos, secondaries, tokenTtlMinutes: ttl };
+}
+
+/** Parse the `review` block (ticket #105). Absent block or absent key ⇒ the default, silently
+ * (the default is a sane floor, not a complaint). A PRESENT but invalid max_followup_depth
+ * (negative, non-integer, non-numeric) falls back to the default WITH a warning — the operator
+ * wrote a value and it must be heard as rejected, not silently lost. A malformed block (not an
+ * object) coerces to the default silently — the same discipline as the policy block. */
+export function parseReviewBlock(raw: unknown): ReviewConfig & { warning: string | null } {
+	const o = (typeof raw === "object" && raw !== null && !Array.isArray(raw)) ? (raw as Record<string, unknown>) : null;
+	if (o === null || !("max_followup_depth" in o)) return { maxFollowupDepth: DEFAULT_MAX_FOLLOWUP_DEPTH, warning: null };
+	const v = o.max_followup_depth;
+	if (typeof v === "number" && Number.isInteger(v) && v >= 0) return { maxFollowupDepth: v, warning: null };
+	return {
+		maxFollowupDepth: DEFAULT_MAX_FOLLOWUP_DEPTH,
+		warning: `review.max_followup_depth: ${JSON.stringify(v)} is not a non-negative integer — falling back to ${DEFAULT_MAX_FOLLOWUP_DEPTH}`,
+	};
 }
 
 /** Root of the main worktree containing cwd (mirrors scripts/lib/common.sh dl_main_root). */
@@ -183,6 +210,10 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): D
 	// honoured — 0/negative/string would become a bogus bound (an instant or imaginary timeout).
 	const oc = (raw.orchestrator ?? {}) as Record<string, unknown>;
 	const toolTimeout = num(oc.tool_timeout_minutes, -1);
+	// review.max_followup_depth (ticket #105): a bad VALUE warns (the operator's value is heard
+	// and rejected); an absent key or malformed block falls back silently (parseReviewBlock).
+	const rb = parseReviewBlock(raw.review);
+	if (rb.warning) console.warn(`devloop config: ${rb.warning}`);
 	const checks: CheckSpec[] = checksRaw.map((c, i) => {
 		if (typeof c === "string") return { name: `check-${i + 1}`, command: c, heavy: true };
 		const o = (c ?? {}) as Record<string, unknown>;
@@ -223,6 +254,7 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): D
 		merge: { method: str(mg.method, "squash"), deleteBranch: bool(mg.delete_branch, true) },
 		policy: parsePolicyBlock(raw.policy),
 		orchestrator: { toolTimeoutMinutes: toolTimeout > 0 ? toolTimeout : 45 },
+		review: { maxFollowupDepth: rb.maxFollowupDepth },
 		deploy: str(raw.deploy) || undefined,
 	};
 }
