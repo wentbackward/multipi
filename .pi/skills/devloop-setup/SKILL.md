@@ -75,8 +75,9 @@ Label note: the `dl/*` labels (`dl/in-progress`, `dl/in-review`, `dl/approved`, 
    will 400 the session's first real API call — fix the name in `extension/src/
    toolnames.ts` (the single source), rerun. `MULTIPI_PROBE_TOOL_NAMES`
    (colon-separated; empty = unset) what-ifs a rename without shipping it, and the
-   orchestrator's session start prints the same warning (non-blocking) on a known
-   grammar-strict (OpenAI-completions shape) provider.
+   orchestrator's session start prints the same warning (non-blocking; its provider is
+   the session's configured model) on a known grammar-strict (OpenAI-completions shape)
+   provider.
 2. `bash <target>/tests/smoke.sh` when the plugin's own tests are present (dogfood) — offline proof.
 3. In a fresh pi session in the target: `devloop_status` answers, and `devloop_dispatch` refuses a
    bogus role with the list of real ones. (Both are cheap; no tickets are created.)

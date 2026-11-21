@@ -92,10 +92,15 @@ bootstrap another project, the **`devloop-setup` skill**.
   `^[A-Za-z][A-Za-z0-9_-]*$` (single source `extension/src/toolnames.ts`, shared with the #99
   unit pin) and prints `ok provider tool-name grammar (N tools)` or
   `PROBLEM provider <X> rejects tool name <Y> (grammar …)` (counted in the ready count).
-  The provider comes from `MULTIPI_PROVIDER` (fallback: pi's `PI_PROVIDER` session env), and
+  The provider resolves `MULTIPI_PROVIDER` (the what-if seam) → the session's
+  configured model (`ctx.model.provider` — the seat's primary ambient source,
+  because pi injects `PI_PROVIDER` only into shell-tool children, provably not
+  the extension's own process env) → pi's `PI_PROVIDER` shell-tool session env
+  (the residue, which is doctor's only ambient source — doctor has no ctx), and
   `MULTIPI_PROBE_TOOL_NAMES` (colon-separated; empty = unset) what-ifs a rename without
-  shipping it; the orchestrator's `session_start` hook emits the same warning (non-blocking)
-  whenever the active provider is a known grammar-strict one (OpenAI-completions shape).
+  shipping it; the orchestrator's `session_start` hook emits the same warning (non-blocking,
+  the provider JSON-encoded so one line stays one line) whenever the active
+  provider is a known grammar-strict one (OpenAI-completions shape).
 
 ## Dark factory (seams and guard limits)
 
@@ -151,8 +156,11 @@ is a seam; never introduce undocumented ones.
   (DECISIONS.md 2026-11-20, #103).
 - `MULTIPI_PROVIDER` / `MULTIPI_PROBE_TOOL_NAMES` — provider tool-name grammar
   probe (ticket #107), NOT child seams: `MULTIPI_PROVIDER` names the active
-  provider/model for the probe (wins over pi's `PI_PROVIDER` shell-tool session
-  env; empty = unset) — known grammar-strict (OpenAI-completions shape) providers
+  provider/model for the probe (wins outright in the resolution chain — the
+  seat's is `MULTIPI_PROVIDER` → the session's configured model
+  `ctx.model.provider` → pi's `PI_PROVIDER` shell-tool session env, which the
+  extension's own process env provably never carries — set = wins, empty =
+  unset) — known grammar-strict (OpenAI-completions shape) providers
   are the openai-named family (case-insensitive substring) plus the pinned
   `kimi`/`moonshot`, and they gate the session_start warning; doctor's static
   check reports a bad name under ANY provider, unknown included. Both surfaces
