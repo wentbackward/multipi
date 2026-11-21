@@ -36,6 +36,10 @@ if [ "$(realpath "$plugin_root/scripts")" != "$(realpath "$target/scripts" 2>/de
 	# multipi-approve.
 	cp -f "$plugin_root"/scripts/multipi "$target/scripts/"
 	chmod +x "$target/scripts/multipi"
+	# The standard post-merge verify brief (ticket #108): verify-brief.sh resolves the
+	# template beside its own scripts dir when no templates/ dir exists (installed
+	# targets) — the source repo's templates/verify-brief.md stays the single source.
+	cp -f "$plugin_root/templates/verify-brief.md" "$target/scripts/verify-brief.template.md"
 	# policy shims (ticket #41): the Layer-2 git/gh wrappers + shared helper. Kept OUT of the
 	# scripts/*.sh trusted set on purpose: they are not loop programs, and the §5 identity
 	# check keys on both the checkout's scripts dir and the .sh suffix.
