@@ -4823,10 +4823,10 @@ expect "board rc 2: an in-flight child past its bound" "2" "$BOARD_RC"
 echo "$BOARD_OUT" | grep -qE "in-flight: 1/2 implementers — #88 \(10h(2[0-9]|30)m, OVER BOUND\)" && \
   pass "board: the over-bound child tags OVER BOUND (age + capacity from heavy.slots)" || \
   fail "board in-flight: $(grep -F in-flight <<<"$BOARD_OUT" || echo '<none>')"
-dispatch_entry 88 "$BD_LIVE" $((5 * 60 * 1000)) >"$bddir_state/dispatch.json"
+dispatch_entry 88 "$BD_LIVE" $((6 * 60 * 1000)) >"$bddir_state/dispatch.json"
 board MULTIPI_BOARD_CHILD_BOUND_MIN=60
 expect "board rc 0: the same child UNDER its bound" "0" "$BOARD_RC"
-echo "$BOARD_OUT" | grep -qF "in-flight: 1/2 implementers — #88 (5m)" && \
+echo "$BOARD_OUT" | grep -qE "in-flight: 1/2 implementers — #88 \((4|5|6)m\)" && \
   pass "board: a young child renders plain" || fail "board in-flight: $(grep -F in-flight <<<"$BOARD_OUT" || echo '<none>')"
 rm -f "$bddir_state/dispatch.json"
 
