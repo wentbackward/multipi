@@ -5,8 +5,11 @@
 # ticket's "should-fix follow-up" comments against review.max_followup_depth
 # (default 2) and decides:
 #   BELOW CAP (rc 10) — re-dispatch the implementer for the should-fixes; its
-#     re-dispatch comment must BEGIN WITH "should-fix follow-up" (that comment
-#     IS the round the next call counts).
+#     re-dispatch comment must open its FIRST non-empty line with the marker
+#     "should-fix follow-up" (alone, or followed by a colon — the boundary keeps prose
+#     like "should-fix follow-ups are welcome" from counting). THAT comment is the round
+#     the next call counts; a re-dispatch comment that forgets the marker is invisible to
+#     the counter and the brake never trips (an unbudgeted extra round).
 #   AT/OVER CAP (rc 0) — the tail is ACCEPTED: the findings are parked verbatim
 #     in the single "Polish backlog — <area>" ticket (created on first use,
 #     appended thereafter), the verdict is commented on the ticket, the ticket
@@ -92,7 +95,7 @@ case "$action" in
     exit 0
     ;;
   below-cap)
-    echo "BELOW-CAP: #${ticket} has ${rounds} should-fix round(s) < cap ${cap} — re-dispatch the implementer; its re-dispatch comment must begin with \"should-fix follow-up\"."
+    echo "BELOW-CAP: #${ticket} has ${rounds} should-fix round(s) < cap ${cap} — re-dispatch the implementer; its re-dispatch comment must open its first line with the marker \"should-fix follow-up\" (alone, or followed by a colon)."
     exit 10
     ;;
   *)
