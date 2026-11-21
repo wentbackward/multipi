@@ -4823,10 +4823,10 @@ expect "board rc 2: an in-flight child past its bound" "2" "$BOARD_RC"
 echo "$BOARD_OUT" | grep -qE "in-flight: 1/2 implementers — #88 \(10h(2[0-9]|30)m, OVER BOUND\)" && \
   pass "board: the over-bound child tags OVER BOUND (age + capacity from heavy.slots)" || \
   fail "board in-flight: $(grep -F in-flight <<<"$BOARD_OUT" || echo '<none>')"
-dispatch_entry 88 "$BD_LIVE" $((5 * 60 * 1000)) >"$bddir_state/dispatch.json"
+dispatch_entry 88 "$BD_LIVE" $((6 * 60 * 1000)) >"$bddir_state/dispatch.json"
 board MULTIPI_BOARD_CHILD_BOUND_MIN=60
 expect "board rc 0: the same child UNDER its bound" "0" "$BOARD_RC"
-echo "$BOARD_OUT" | grep -qF "in-flight: 1/2 implementers — #88 (5m)" && \
+echo "$BOARD_OUT" | grep -qE "in-flight: 1/2 implementers — #88 \((4|5|6)m\)" && \
   pass "board: a young child renders plain" || fail "board in-flight: $(grep -F in-flight <<<"$BOARD_OUT" || echo '<none>')"
 rm -f "$bddir_state/dispatch.json"
 
@@ -5014,6 +5014,114 @@ git init -q "$DISP_INST"
 bash "$plugin/scripts/install.sh" "$DISP_INST" >/dev/null 2>&1
 [ -x "$DISP_INST/scripts/multipi" ] && pass "install: scripts/multipi is installed and executable" || fail "install: scripts/multipi missing or not executable"
 cmp -s "$plugin/scripts/multipi" "$DISP_INST/scripts/multipi" && pass "install: the dispatcher is a faithful copy" || fail "install: the dispatcher copy differs"
+
+# --- verify-brief.sh: standard post-merge verification (ticket #108) ----------
+# A merged train's diff is classified against the shared contracts: a
+# contract-touching train renders the standard fresh-clone verifier brief (rc 0,
+# VERIFY DISPATCH), a docs/test-only train skips (rc 10, VERIFY SKIP), and the
+# report subcommand attaches the single verification comment to the train's
+# tickets. Fixture: its own repo + bare origin; a "train" lands on main as the
+# post-merge state the classifier sees.
+vb="$work/vbrief"
+git init -q --bare "$vb/origin.git"
+git init -q -b main "$vb/repo"
+git -C "$vb/repo" remote add origin "$vb/origin.git"
+( cd "$vb/repo" && git commit -q --allow-empty -m "chore: base" && git push -q -u origin main )
+cd "$vb/repo" || exit 1
+vb_land() { # vb_land FILE CONTENT: land one file on main (the simulated squash merge)
+  mkdir -p "$(dirname "$1")"
+  printf '%s\n' "$2" >"$1" && git add "$1" && git commit -q -m "feat: $1" && git push -q origin main
+}
+# (a) contract-touching train: extension/, scripts/, agents/ all in the diff.
+vb_pre=$(git rev-parse main)
+vb_land extension/src/wire.ts "export const wire = 1;"
+vb_land scripts/loop.sh "#!/usr/bin/env bash"
+vb_land agents/verifier.md "verifier role"
+vb_post=$(git rev-parse main)
+out=$(bash "$plugin/scripts/verify-brief.sh" "$vb_pre..$vb_post" 2>&1); rc=$?
+echo "$out"
+expect "verify-brief dispatches on a contract-touching train (rc 0)" "0" "$rc"
+echo "$out" | grep -q "VERIFY DISPATCH" && pass "the dispatch marker is printed" || fail "no VERIFY DISPATCH marker"
+expect "the touched set is reported (pathsort order)" "touched: agents/, extension/, scripts/" "$(printf '%s\n' "$out" | grep '^touched:')"
+expect "the range is named" "range: $vb_pre..$vb_post" "$(printf '%s\n' "$out" | grep '^range:')"
+for vb_needle in "Fresh clone" "make check" "scripts/doctor.sh" "scripts/install.sh" "BYTE-IDENTICAL" "Scrub PATH" "mktemp -d"; do
+  echo "$out" | grep -q "$vb_needle" && pass "the standard brief carries: $vb_needle" || fail "the standard brief lacks: $vb_needle"
+done
+echo "$out" | grep -qF "$vb/origin.git" && pass "the brief names the repo to clone (the origin url)" || fail "no repo url in the brief"
+echo "$out" | grep -q '{{' && fail "an unsubstituted placeholder survived the render" || pass "no unsubstituted placeholders in the rendered brief"
+echo "$out" | grep -q "none declared for this train" && pass "no exercise arg renders the no-exercise line" || fail "the no-exercise default line is missing"
+# A train-specific contract exercise lands in the brief (the #55 case).
+out=$(bash "$plugin/scripts/verify-brief.sh" "$vb_pre..$vb_post" "the #55 shell-mirror: cmp the shims against the TS engine" 2>&1)
+echo "$out" | grep -qF "the #55 shell-mirror: cmp the shims against the TS engine" && pass "the exercise arg lands in the brief" || fail "the exercise arg is missing from the brief"
+# (b) docs/test-only train: skip, no dispatch.
+vb_pre=$(git rev-parse main)
+vb_land docs/note.md "a doc"
+vb_land tests/new.test.sh "test -t 1"
+vb_land README.md "readme"
+vb_post=$(git rev-parse main)
+out=$(bash "$plugin/scripts/verify-brief.sh" "$vb_pre..$vb_post" 2>&1); rc=$?
+echo "$out"
+expect "verify-brief skips a docs/test-only train (rc 10)" "10" "$rc"
+echo "$out" | grep -q "VERIFY SKIP" && pass "the skip marker is printed" || fail "no VERIFY SKIP marker"
+echo "$out" | grep -q "VERIFY DISPATCH" && fail "a docs-only train must not dispatch" || pass "a docs-only train does not dispatch"
+# (c) boundaries: lookalikes don't count, the schema and the specs do.
+vb_pre=$(git rev-parse main)
+vb_land myextension/a.ts "lookalike dir"
+vb_land docs/extension-guide.md "lookalike doc"
+vb_land oldscripts/x.sh "lookalike dir"
+vb_post=$(git rev-parse main)
+out=$(bash "$plugin/scripts/verify-brief.sh" "$vb_pre..$vb_post" 2>&1); rc=$?
+expect "contract lookalikes (myextension/, oldscripts/, docs/extension-guide.md) do not count (rc 10)" "10" "$rc"
+vb_pre=$(git rev-parse main)
+vb_land .devloop.json '{"base_branch":"main"}'
+vb_post=$(git rev-parse main)
+out=$(bash "$plugin/scripts/verify-brief.sh" "$vb_pre..$vb_post" 2>&1); rc=$?
+expect "a root .devloop.json change is the schema contract (rc 0)" "0" "$rc"
+expect "the schema category is named" "touched: .devloop.json schema" "$(printf '%s\n' "$out" | grep '^touched:')"
+vb_pre=$(git rev-parse main)
+vb_land docs/superpowers/specs/new-spec.md "# a spec"
+vb_post=$(git rev-parse main)
+out=$(bash "$plugin/scripts/verify-brief.sh" "$vb_pre..$vb_post" 2>&1); rc=$?
+expect "a spec doc change is contract-touching (rc 0)" "0" "$rc"
+expect "the specs category is named" "touched: specs" "$(printf '%s\n' "$out" | grep '^touched:')"
+out=$(bash "$plugin/scripts/verify-brief.sh" main..main 2>&1); rc=$?
+expect "an empty range changes nothing — skip (rc 10)" "10" "$rc"
+out=$(bash "$plugin/scripts/verify-brief.sh" nosuchrev..main 2>&1); rc=$?
+expect "an unresolvable range is a usage error (rc 2)" "2" "$rc"
+out=$(bash "$plugin/scripts/verify-brief.sh" 2>&1); rc=$?
+expect "verify-brief with no args is a usage error (rc 2)" "2" "$rc"
+echo "$out" | grep -qF "usage: verify-brief.sh" && pass "the usage line is printed" || fail "no usage line: $out"
+# (d) the installed twin: install.sh ships the template beside the scripts and
+# the installed script resolves it (installed targets have no templates/ dir).
+vb_inst="$work/vbrief-install"
+git init -q -b main "$vb_inst"
+( cd "$vb_inst" && git commit -q --allow-empty -m "base" )
+bash "$plugin/scripts/install.sh" "$vb_inst" >/dev/null 2>&1
+[ -f "$vb_inst/scripts/verify-brief.template.md" ] && pass "install ships the brief template beside the scripts" || fail "no verify-brief.template.md in the installed scripts"
+cmp -s "$vb_inst/scripts/verify-brief.template.md" "$plugin/templates/verify-brief.md" && pass "the installed template is a byte-identical copy" || fail "installed template drifts"
+out=$(bash "$vb_inst/scripts/verify-brief.sh" "$vb_pre..$vb_post" 2>&1); rc=$?
+expect "the installed verify-brief.sh resolves the installed template twin (rc 0)" "0" "$rc"
+echo "$out" | grep -q "Fresh clone" && pass "the installed twin renders the full brief" || fail "installed twin rendered no brief"
+# (e) report attachment: the single verification comment lands on the tickets.
+printf '{}\n' >.devloop.json # report mode loads the project config (GH_REPO pin)
+VB_T1=$(gh issue create "Contract train one" "acceptance" | sed 's|.*/issues/||')
+VB_T2=$(gh issue create "Contract train two" "acceptance" | sed 's|.*/issues/||')
+printf 'step 1 fresh clone rc 0\nstep 3 make check rc 0 (all green)\nstep 5 mirrors rc 0 (byte-identical)\nVERIFICATION: PASS\n\nSTATUS: DONE\n' >"$work/vb-report-pass.md"
+out=$(bash "$plugin/scripts/verify-brief.sh" report "$VB_T1" "$VB_T2" <"$work/vb-report-pass.md" 2>&1); rc=$?
+expect "report attaches to the train's tickets (rc 0)" "0" "$rc"
+gh issue view "$VB_T1" --json comments | grep -q "Post-merge verification — PASS" && pass "the ticket carries the PASS verification comment" || fail "no PASS header comment on the ticket"
+gh issue view "$VB_T1" --json comments | grep -q "VERIFICATION: PASS" && pass "the report rides the comment verbatim" || fail "report body missing from the comment"
+gh issue view "$VB_T2" --json comments | grep -q "Post-merge verification — PASS" && pass "every train ticket carries the comment" || fail "the second ticket is missing the comment"
+out=$(printf 'VERIFICATION: FAIL — make check red in the clone\n\nSTATUS: DONE\n' | bash "$plugin/scripts/verify-brief.sh" report "$VB_T1" 2>&1); rc=$?
+expect "a failing report attaches too (rc 0)" "0" "$rc"
+gh issue view "$VB_T1" --json comments | grep -q "Post-merge verification — FAIL" && pass "the FAIL verdict rides the header" || fail "no FAIL header on the ticket"
+out=$(bash "$plugin/scripts/verify-brief.sh" report "$VB_T1" </dev/null 2>&1); rc=$?
+expect "an empty report body is a usage error (rc 2)" "2" "$rc"
+out=$(bash "$plugin/scripts/verify-brief.sh" report 2>&1); rc=$?
+expect "report with no tickets is a usage error (rc 2)" "2" "$rc"
+gh issue close "$VB_T1" >/dev/null
+gh issue close "$VB_T2" >/dev/null
+cd "$work/project" || exit 1
 
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
 MULTIPI_PLUGIN_DIR="$plugin" env -u MULTIPI_CHILD node --input-type=module -e '

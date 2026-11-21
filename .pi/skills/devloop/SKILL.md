@@ -147,10 +147,31 @@ When the set of `dl/approved` branches stabilises (nothing new expected this pas
 
 ## 7. Verify and close
 
-After a meaningful train lands, `devloop_dispatch {role: "verifier", worktree: <where the real output
-lives>, task: <precise, checkable expectations with the commands to run>}`. The verifier's anomalies
-become new tickets (broken expectation = P1 ticket before the loop continues). When the spec section
-is done: mark its issues closed, summarise what shipped and where, and stop ONLY then.
+**Automatic post-merge verification (default ON).** After `devloop_merge` lands a train,
+run `scripts/verify-brief.sh <pre>..<post> [exercise]` (pre = the base the train stacked
+on, post = the merged head; `[exercise]` = the train-specific contract exercise, one
+line). It classifies the train's diff against the shared contracts and is the threshold:
+a train touches one iff its diff carries any of `extension/` (incl. the `.pi/extensions/`
+mirror), `scripts/`, `agents/` (incl. `.pi/agents/`), `skills/` (incl. `.pi/skills/`),
+the `.devloop.json` schema (root `.devloop.json`, `templates/devloop.json`,
+`.pi/templates/devloop.json`), or a spec doc under `docs/superpowers/specs/`.
+- **rc 0, prints `VERIFY DISPATCH`:** the train is contract-touching — dispatch the
+  verifier with the rendered brief verbatim:
+  `devloop_dispatch {role: "verifier", worktree: <repo root>, task: <brief>}`. The brief is
+  the standard clean-environment proof (fresh clone in a temp dir, scrubbed PATH, full
+  `make check` with every rc, doctor, install-into-throwaway with byte-identical mirrors,
+  the train's exercise) — single-sourced in `templates/verify-brief.md`, never
+  re-improvised per train (DECISIONS.md 2026-11-21, #108).
+- **rc 10, prints `VERIFY SKIP`:** docs/test-only train — no verifier, no verification
+  comment. That is the one sanctioned skip of the default-ON direction.
+- The verifier concludes with exactly one `VERIFICATION: PASS|FAIL` line; anomalies become
+  new tickets (broken expectation = P1 ticket before the loop continues). When the report
+  lands, attach it to the train: `scripts/verify-brief.sh report <ticket>… < report.md`
+  (one "Post-merge verification" comment per ticket; the header verdict rides the report's
+  own verdict line — the script never re-judges it).
+
+Afterwards, when the spec section is done: mark its issues closed, summarise what shipped
+and where, and stop ONLY then.
 
 ## 8. Interruptions, steering and the user
 
