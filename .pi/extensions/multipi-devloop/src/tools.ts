@@ -870,13 +870,21 @@ export async function evaluateSettle(cwd: string): Promise<{ entries: { type: "c
 		// Late-report loop drive (#121): an implementer that DELIVERED (entry done) but whose
 		// ticket still sits at dl/in-progress/dl/in-review with no reviewer dispatched is
 		// work-to-do. Open issues only — a merged/closed ticket is not pending.
+		// Count ONLY a `running` review entry as "review dispatched" (ticket #124):
+		// reapDead permanently keeps the terminal `crashed`/`interrupted` review entry in the
+		// state, so any historical entry would suppress the review drive forever and leave
+		// a delivered branch unreviewed. A terminal entry re-arms the clause instead.
 		const openByNumber = new Map(issues.map((i) => [i.number, i] as const));
 		const pendingReviews = Object.entries(state)
 			.filter(([k, e]) => e.role === "implementer" && e.status === "done" && /^\d+$/.test(k))
 			.map(([k]) => Number(k))
 			.filter((n) => {
 				const issue = openByNumber.get(n);
-				return issue && (issue.labels.includes("dl/in-progress") || issue.labels.includes("dl/in-review")) && !state[`review-${n}`];
+				return (
+					issue &&
+					(issue.labels.includes("dl/in-progress") || issue.labels.includes("dl/in-review")) &&
+					state[`review-${n}`]?.status !== "running"
+				);
 			});
 		// Startability rule (spec §4): with the store on, only tickets covered by a valid
 		// t<ticket>- scenario drive the loop; a missing store dir scans to [] (nothing covered)
