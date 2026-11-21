@@ -11,7 +11,7 @@ missing() {
   echo "MISSING $*"
   problems=$((problems + 1))
 }
-problem() { echo "PROBLEM $*"; problems=$((problems + 1)); }
+problem() { printf 'PROBLEM %s\n' "$*"; problems=$((problems + 1)); }
 optional() { echo "note    $*"; }
 
 if command -v git >/dev/null 2>&1; then ok "git $(git --version | cut -d' ' -f3)"; else missing "git"; fi
@@ -306,7 +306,7 @@ fi
 # one-shot never drags the pi runtime in — the same compute-then-tally discipline as
 # the factory and policy reports: node prints one JSON object, doctor applies the lines.
 probe_src=""
-for cand in ${DL_ROOT:+$DL_ROOT/.pi/extensions/multipi-devloop/src} "$scripts_dir/../extension/src"; do
+for cand in "$DL_ROOT/.pi/extensions/multipi-devloop/src" "$scripts_dir/../extension/src"; do
   if [ -f "$cand/toolnames.ts" ]; then probe_src=$cand; break; fi
 done
 if [ -z "$probe_src" ]; then
