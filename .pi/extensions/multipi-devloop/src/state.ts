@@ -29,7 +29,9 @@ const SEEN = "reconcile-seen.json";
  * Within the grace a pid-less entry reads as "spawning", never dead — reaping it would free
  * the slot mid-spawn and a concurrent dispatch would start a SECOND child for the same
  * ticket. Past the grace, a pid-less entry is exactly the #104 shape (the pid never arrived)
- * and is reclaimed like a dead pid.
+ * and is reclaimed like a dead pid — the direction is asymmetric (skill §9): if the
+ * pid-report invariant ever breaks, too EARLY a reap is a double-child for the same ticket,
+ * too late merely delays the reclaim.
  */
 const RECONCILE_GRACE_MS = 60_000;
 
