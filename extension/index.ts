@@ -12,6 +12,7 @@ import { createPolicyEnforcer } from "./src/policyhook.ts";
 import { loadConfig, mainRoot, resolveState } from "./src/config.ts";
 import * as liveness from "./src/liveness.ts";
 import { makeTools, evaluateSettle, formatEditedFile } from "./src/tools.ts";
+import { probeToolNameGrammar, resolveProvider, toolNamesFromEnv } from "./src/toolnames.ts";
 
 const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issue labels: open -> dl/in-progress (a child is working) -> dl/in-review (PR open) -> dl/approved (review VERDICT: APPROVE) -> dl/gated (batch gate green) -> dl/merged (squash-merged; then close the issue). dl/blocked marks tickets needing a human decision. Workflow: dispatch role agents with devloop_dispatch (one ticket per implementer; independent tickets in parallel, up to the slot cap); when reports land, review, then gate ALL dl/approved branches together with devloop_gate (in a deliberate merge order), and merge the green train with devloop_merge (same order). Check progress any time with devloop_status. When the operator asks to pause or stop the loop, call devloop_pause (it interrupts all children, writes HANDOFF.md, and comments the tickets), then settle. On a fresh session, step 0 of the devloop skill reads a HANDOFF.md if present and re-dispatches the interrupted children. Stop only when no open ticket is startable (unblocked with closed or in-flight dependencies) — the stop-gate enforces this for you.`;
 
@@ -30,6 +31,11 @@ const DEVLOOP_INSTRUCTIONS = `Manage tickets as a pipeline driven by GitHub issu
  *    the model's git/gh calls then run through the policy wrapper. Children never register
  *    either — spawnPi spreads the process env, so a child's bash tools inherit the shims
  *    (and the loop scripts' /proc ancestry carries the §5 identity exemption into theirs).
+ *  - session_start (the grammar probe, #107): one non-blocking warning line when the
+ *    ACTIVE provider is grammar-strict (OpenAI-completions shape) and a registered
+ *    control-plane tool name would be rejected — the 400-coming-at-dispatch seen
+ *    BEFORE dispatch (permissive/unknown providers stay silent; doctor carries the
+ *    static, provider-agnostic half).
  * Child sessions (MULTIPI_CHILD) register NOTHING — except a child of a guarded role with the
  * scenario store on, which registers the guard-only mode: exactly ONE block-capable tool_call
  * hook refusing calls that touch the store (spec §3). No tools, no stop-gate, no policy hook
@@ -101,6 +107,7 @@ export default function devloopExtension(pi: ExtensionAPI): void {
 	registerAgentVisibility(pi);
 	registerPolicyEnforcer(pi);
 	registerLiveness(pi);
+	registerToolNameProbe(pi);
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +273,36 @@ function registerStoreGuard(pi: ExtensionAPI, childCwd: string): void {
 		// Fail closed: an unknowable store dir refuses EVERY guarded call.
 		if (!g.storeDir || callTouchesStore(g.storeDir, ctx.cwd, name, input)) {
 			return { block: true, reason: GUARD_REFUSAL };
+		}
+	});
+}
+
+/**
+ * Provider tool-name grammar probe (ticket #107, the #99 pin as an operational
+ * surface): ONE non-blocking line at session_start when the active provider is
+ * grammar-strict (OpenAI-completions API shape) and a registered control-plane
+ * tool name falls outside the strictest common grammar — the operator sees the
+ * 400-coming-at-dispatch BEFORE dispatch, not with it. Permissive or UNKNOWN
+ * providers stay silent (there the failure is hypothetical; scripts/doctor.sh
+ * carries the static, provider-agnostic check for every provider). The name
+ * list honours the documented MULTIPI_PROBE_TOOL_NAMES diagnostic seam (empty =
+ * unset) so a candidate rename trips at startup on purpose. The provider
+ * resolves MULTIPI_PROVIDER (the what-if seam) → ctx.model.provider (the
+ * session's CONFIGURED model — pi's own session env provably never carries
+ * PI_PROVIDER, which is injected into shell-tool children only) → PI_PROVIDER
+ * (harmless, present only for in-child callers); the provider is
+ * JSON-encoded in the line so a hostile seam value cannot smuggle a newline
+ * into the one-line warning. Offline: a static validation, never a live API
+ * call.
+ */
+function registerToolNameProbe(pi: ExtensionAPI): void {
+	pi.on("session_start", (_event, ctx: ExtensionContext) => {
+		try {
+			const report = probeToolNameGrammar(toolNamesFromEnv(process.env), resolveProvider(process.env, ctx.model?.provider));
+			if (!report.strict || report.bad.length === 0) return;
+			console.error(`devloop: provider ${JSON.stringify(report.provider)} is grammar-strict and will reject tool name ${report.bad.map((n) => JSON.stringify(n)).join(", ")} at the first API call (grammar ^[A-Za-z][A-Za-z0-9_-]*$) — dispatch is unusable until the names comply`);
+		} catch {
+			// Advisory surface: the probe must never block a session start.
 		}
 	});
 }

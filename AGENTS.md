@@ -86,6 +86,21 @@ bootstrap another project, the **`devloop-setup` skill**.
   1 ≥1 `dl/blocked` · 2 ≥1 over-bound child OR last gate RED (2 shadows 1) · 4 bad usage/
   unreadable state (seams `MULTIPI_BOARD_REPO`, `MULTIPI_BOARD_CHILD_BOUND_MIN`).
 - `scripts/doctor.sh` diagnoses; `scripts/install.sh <repo>` installs the loop into a project.
+  Doctor also runs the **provider tool-name grammar probe** offline (static validation, no
+  live API call — ticket #107, the #99 pin generalized): it checks the registered `devloop_*`
+  control-plane tool names against the strictest common provider grammar
+  `^[A-Za-z][A-Za-z0-9_-]*$` (single source `extension/src/toolnames.ts`, shared with the #99
+  unit pin) and prints `ok provider tool-name grammar (N tools)` or
+  `PROBLEM provider <X> rejects tool name <Y> (grammar …)` (counted in the ready count).
+  The provider resolves `MULTIPI_PROVIDER` (the what-if seam) → the session's
+  configured model (`ctx.model.provider` — the seat's primary ambient source,
+  because pi injects `PI_PROVIDER` only into shell-tool children, provably not
+  the extension's own process env) → pi's `PI_PROVIDER` shell-tool session env
+  (the residue, which is doctor's only ambient source — doctor has no ctx), and
+  `MULTIPI_PROBE_TOOL_NAMES` (colon-separated; empty = unset) what-ifs a rename without
+  shipping it; the orchestrator's `session_start` hook emits the same warning (non-blocking,
+  the provider JSON-encoded so one line stays one line) whenever the active
+  provider is a known grammar-strict one (OpenAI-completions shape).
 
 ## Dark factory (seams and guard limits)
 
@@ -139,6 +154,21 @@ is a seam; never introduce undocumented ones.
   the expected bound of an in-flight one-shot child (canonical decimal minutes,
   default 480, 0 = disabled) — past-bound children tag OVER BOUND and drive rc 2
   (DECISIONS.md 2026-11-20, #103).
+- `MULTIPI_PROVIDER` / `MULTIPI_PROBE_TOOL_NAMES` — provider tool-name grammar
+  probe (ticket #107), NOT child seams: `MULTIPI_PROVIDER` names the active
+  provider/model for the probe (wins outright in the resolution chain — the
+  seat's is `MULTIPI_PROVIDER` → the session's configured model
+  `ctx.model.provider` → pi's `PI_PROVIDER` shell-tool session env, which the
+  extension's own process env provably never carries — set = wins, empty =
+  unset) — known grammar-strict (OpenAI-completions shape) providers
+  are the openai-named family (case-insensitive substring) plus the pinned
+  `kimi`/`moonshot`, and they gate the session_start warning; doctor's static
+  check reports a bad name under ANY provider, unknown included. Both surfaces
+  share the single source `extension/src/toolnames.ts` (grammar, names,
+  classification) so doctor, the seat and the #99 unit pin cannot drift.
+  `MULTIPI_PROBE_TOOL_NAMES` (colon-separated; empty = unset) is the diagnostic
+  seam that what-ifs a name change without shipping it — the doctor's probe and
+  the session_start seat both honour it.
 
 **Config keys (`.devloop.json`):** `"factory"` (`"collaborative"` | `"dark"`, default
 `"collaborative"` — a preset that only sets defaults; an explicit option always wins), the

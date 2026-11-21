@@ -85,8 +85,9 @@ test("extension registers 6 tools, the full orchestrator hook set and the /devlo
 		assert.ok(tools.includes("devloop_dispatch"));
 		// P2: the orchestrator gains the policy tool_call hook and a policy session_start seat
 		// on top of the pre-existing four (the UI session_start remains); P3's shim-PATH arm
-		// is a third session_start seat (the hook set otherwise stays put).
-		assert.deepEqual(hookNames(hooks).sort(), ["agent_before_settle", "message_update", "session_shutdown", "session_start", "session_start", "session_start", "session_start", "session_tree", "tool_call", "tool_execution_end", "tool_execution_start", "tool_result"]);
+		// is a third session_start seat (the hook set otherwise stays put); #107's
+		// provider tool-name grammar probe adds the fourth session_start seat.
+		assert.deepEqual(hookNames(hooks).sort(), ["agent_before_settle", "message_update", "session_shutdown", "session_start", "session_start", "session_start", "session_start", "session_start", "session_tree", "tool_call", "tool_execution_end", "tool_execution_start", "tool_result"]);
 		assert.deepEqual(commands, ["devloop-agents"]);
 	} finally {
 		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
@@ -422,6 +423,179 @@ test("a child session never registers the shim PATH (inheritance comes from spaw
 		assert.equal(process.env.PATH, saved);
 	} finally {
 		process.env.PATH = saved;
+		fx.cleanup();
+	}
+});
+
+// --- provider tool-name grammar probe: the session_start seat (ticket #107) -------
+// The seat warns ONCE, at session_start, when the ACTIVE provider is grammar-strict
+// (OpenAI-completions shape) and a registered control-plane tool name would be
+// rejected — the 400-coming-at-dispatch seen BEFORE dispatch. Permissive and UNKNOWN
+// providers stay silent (there the failure is hypothetical; doctor carries the static,
+// provider-agnostic half). The deliberately-broken names ride the documented
+// MULTIPI_PROBE_TOOL_NAMES seam (empty = unset) — no real rename is ever shipped to
+// test this.
+
+function withProviderProbeEnv(provider: string | undefined, names: string | undefined, fn: () => void): void {
+	const savedProvider = process.env.MULTIPI_PROVIDER;
+	const savedNames = process.env.MULTIPI_PROBE_TOOL_NAMES;
+	// pi's shell-tool session env is not under test control; an inherited PI_PROVIDER
+	// would mask the "unknown provider" cases, so park it for the duration.
+	const savedPiProvider = process.env.PI_PROVIDER;
+	if (provider === undefined) delete process.env.MULTIPI_PROVIDER;
+	else process.env.MULTIPI_PROVIDER = provider;
+	if (names === undefined) delete process.env.MULTIPI_PROBE_TOOL_NAMES;
+	else process.env.MULTIPI_PROBE_TOOL_NAMES = names;
+	delete process.env.PI_PROVIDER;
+	try {
+		fn();
+	} finally {
+		if (savedProvider === undefined) delete process.env.MULTIPI_PROVIDER;
+		else process.env.MULTIPI_PROVIDER = savedProvider;
+		if (savedNames === undefined) delete process.env.MULTIPI_PROBE_TOOL_NAMES;
+		else process.env.MULTIPI_PROBE_TOOL_NAMES = savedNames;
+		if (savedPiProvider === undefined) delete process.env.PI_PROVIDER;
+		else process.env.PI_PROVIDER = savedPiProvider;
+	}
+}
+
+/** Fire every session_start seat in the fixture repo (production shape) and return the
+ * console.error lines that look like a probe warning (other seats' noise, should any
+ * appear, is filtered out — the pin is on the probe's own line, not on silence of all).
+ * `ctx` carries EXTRA fields for the session context (e.g. the session's configured
+ * `model`) merged over the production-shape defaults.
+ */
+function probeWarnings(fx: ReturnType<typeof makeFixture>, ctx?: Record<string, unknown>): string[] {
+	const { pi, hooks } = fakePi();
+	const lines: string[] = [];
+	const orig = console.error;
+	console.error = (...args: unknown[]) => {
+		lines.push(args.join(" "));
+	};
+	try {
+		withCwd(fx.repo, () => {
+			devloopExtension(pi);
+			for (const h of hooks.filter((x) => x.name === "session_start")) h.fn({}, { cwd: fx.repo, hasUI: false, mode: "rpc", ...ctx } as never);
+		});
+	} finally {
+		console.error = orig;
+	}
+	return lines.filter((l) => l.startsWith("devloop: provider"));
+}
+
+test("session_start probe: a strict provider plus a grammar-breaking name warns exactly one line naming provider, name and grammar", () => {
+	const fx = makeFixture("{}");
+	const savedHome = process.env.MULTIPI_HOME;
+	const savedChild = process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD;
+	process.env.MULTIPI_HOME = path.join(fx.dir, "home");
+	try {
+		withProviderProbeEnv("openai", "devloop_dispatch:devloop.bad", () => {
+			const lines = probeWarnings(fx);
+			assert.equal(lines.length, 1, `exactly one probe warning, got: ${JSON.stringify(lines)}`);
+			assert.match(lines[0], /openai/, "the warning names the active provider");
+			assert.match(lines[0], /devloop\.bad/, "the warning names the offending tool name");
+			assert.match(lines[0], /^devloop: provider "openai" /, "one-line warning on the console.error surface (provider JSON-encoded so a hostile seam value cannot smuggle a newline in)");
+			assert.ok(lines[0].includes("grammar"), "the warning cites the grammar");
+			assert.ok(lines[0].includes("devloop_dispatch") === false, "a passing name is not accused");
+		});
+	} finally {
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		fx.cleanup();
+	}
+});
+
+test("session_start probe: a strict provider with ALL names passing stays silent", () => {
+	const fx = makeFixture("{}");
+	const savedHome = process.env.MULTIPI_HOME;
+	const savedChild = process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD;
+	process.env.MULTIPI_HOME = path.join(fx.dir, "home");
+	try {
+		withProviderProbeEnv("kimi", undefined, () => {
+			assert.deepEqual(probeWarnings(fx), [], "no warning: the registered names pass");
+		});
+	} finally {
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		fx.cleanup();
+	}
+});
+
+test("session_start probe: a PERMISSIVE provider stays silent even with a bad name (and so does the unknown provider)", () => {
+	const fx = makeFixture("{}");
+	const savedHome = process.env.MULTIPI_HOME;
+	const savedChild = process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD;
+	process.env.MULTIPI_HOME = path.join(fx.dir, "home");
+	try {
+		withProviderProbeEnv("anthropic", "devloop.bad", () => {
+			assert.deepEqual(probeWarnings(fx), [], "permissive provider: the seat is silent by design");
+		});
+		withProviderProbeEnv(undefined, "devloop.bad", () => {
+			assert.deepEqual(probeWarnings(fx), [], "unknown provider: silence (doctor carries the provider-agnostic check)");
+		});
+	} finally {
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		fx.cleanup();
+	}
+});
+
+test("session_start probe: a strict CTX.MODEL provider plus a grammar-breaking name warns with NO env seams set (review round 1: the extension's own env never carries PI_PROVIDER — the session's configured model is the primary ambient source)", () => {
+	const fx = makeFixture("{}");
+	const savedHome = process.env.MULTIPI_HOME;
+	const savedChild = process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD;
+	process.env.MULTIPI_HOME = path.join(fx.dir, "home");
+	try {
+		withProviderProbeEnv(undefined, "devloop.bad", () => {
+			const lines = probeWarnings(fx, { model: { provider: "openai" } });
+			assert.equal(lines.length, 1, `exactly one probe warning, got: ${JSON.stringify(lines)}`);
+			assert.match(lines[0], /openai/, "the warning names the session's configured provider");
+			assert.match(lines[0], /devloop\.bad/, "the warning names the offending tool name");
+		});
+	} finally {
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		fx.cleanup();
+	}
+});
+
+test("session_start probe: a PERMISSIVE ctx.model provider stays silent even with a bad name (ctx.model resolution, no env seams set)", () => {
+	const fx = makeFixture("{}");
+	const savedHome = process.env.MULTIPI_HOME;
+	const savedChild = process.env.MULTIPI_CHILD;
+	delete process.env.MULTIPI_CHILD;
+	process.env.MULTIPI_HOME = path.join(fx.dir, "home");
+	try {
+		withProviderProbeEnv(undefined, "devloop.bad", () => {
+			assert.deepEqual(probeWarnings(fx, { model: { provider: "anthropic" } }), [], "permissive ctx.model provider: the seat is silent by design");
+		});
+	} finally {
+		if (savedHome === undefined) delete process.env.MULTIPI_HOME;
+		else process.env.MULTIPI_HOME = savedHome;
+		if (savedChild === undefined) delete process.env.MULTIPI_CHILD;
+		else process.env.MULTIPI_CHILD = savedChild;
+		fx.cleanup();
+	}
+});
+
+test("a child session never registers the grammar-probe seat (the probe is the orchestrator's, like the other seats)", () => {
+	const fx = makeFixture("{}");
+	try {
+		const { hooks } = loadChild("implementer", fx.repo);
+		assert.equal(hooks.filter((h) => h.name === "session_start").length, 0, "a child registers no session_start at all");
+	} finally {
 		fx.cleanup();
 	}
 });

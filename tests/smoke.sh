@@ -1126,6 +1126,43 @@ echo "$out" | grep -q "extension runtime" &&
   fail "doctor probed the extension runtime without an installed extension" ||
   pass "doctor silently skips the extension runtime check"
 
+# --- doctor.sh: provider tool-name grammar probe (ticket #107) --------------------
+# The static, OFFLINE operational half of the #99 pin: the registered control-plane
+# tool names are validated against the strictest common provider grammar. The healthy
+# fixture must carry the ok line; the deliberately-broken name RIDES the documented
+# test seam (MULTIPI_PROBE_TOOL_NAMES — never a real rename) and must produce a
+# PROBLEM naming provider, name and grammar, counted in the ready line.
+out=$(bash "$plugin/scripts/doctor.sh" 2>&1); rc=$?
+expect "doctor stays ready with a passing tool-name probe" "0" "$rc"
+echo "$out" | grep -qF "ok      provider tool-name grammar (6 tools)" &&
+  pass "doctor reports the passing tool-name grammar probe" ||
+  fail "no ok tool-name grammar line (want: 'ok      provider tool-name grammar (6 tools)')"
+
+# A strict-grammar provider with passing names stays ready, naming the provider.
+out=$(MULTIPI_PROVIDER=openai bash "$plugin/scripts/doctor.sh" 2>&1); rc=$?
+expect "a strict provider with passing names stays ready" "0" "$rc"
+echo "$out" | grep -qF "provider      openai (grammar-strict)" &&
+  pass "the strict provider is named in the probe context line" || fail "no strict-provider context line"
+
+# The deliberately-broken name (via the seam): exactly one PROBLEM.
+out=$(MULTIPI_PROVIDER=openai MULTIPI_PROBE_TOOL_NAMES="devloop_dispatch:devloop.bad" bash "$plugin/scripts/doctor.sh" 2>&1)
+rc=$?
+echo "$out"
+expect "a grammar-breaking tool name is a named problem" "1" "$rc"
+echo "$out" | grep -qF "PROBLEM provider openai (grammar-strict) rejects tool name devloop.bad (grammar ^[A-Za-z][A-Za-z0-9_-]*$)" &&
+  pass "the PROBLEM names provider, offending name and grammar" || fail "PROBLEM line missing or misworded"
+echo "$out" | grep -q "doctor: 1 problem(s)" &&
+  pass "the probe problem feeds the ready count" || fail "the probe problem was not counted"
+
+# An UNKNOWN provider with a bad name is STILL a problem (the static check is
+# provider-agnostic; only the session_start warning seat is provider-gated).
+out=$(MULTIPI_PROBE_TOOL_NAMES="devloop.bad" bash "$plugin/scripts/doctor.sh" 2>&1)
+rc=$?
+echo "$out"
+expect "a bad name with an unknown provider is still a problem" "1" "$rc"
+echo "$out" | grep -qF "PROBLEM provider unknown rejects tool name devloop.bad" &&
+  pass "the unknown-provider PROBLEM is named" || fail "no unknown-provider PROBLEM line"
+
 # Orphaned local branch (a failed `git branch -D` after a worktree removal): a NOTE that
 # names the branch, never a problem count — the run stays ready.
 git branch dl-orphan-pin
