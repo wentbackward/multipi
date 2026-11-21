@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync, chmodSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync, chmodSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket, testSeams } from "../../extension/src/tools.ts";
 import { makeFixture } from "../fixtures.ts";
@@ -1081,6 +1081,116 @@ test("finishEntry: a stale-generation finish does not clobber a re-dispatched en
 		finishEntry(ctx, "gen1", gen1, { exitCode: 0, finalText: "STATUS: DONE", aborted: false, stopReason: "end", stderr: "" });
 		st = stateEntry(fx, ctx, "gen1");
 		assert.equal(st.status, "running", "the re-dispatch's entry is intact");
+	} finally { fx.cleanup(); }
+});
+
+test("reclaim: a SECOND orphan on the same ticket resurfaces — re-dispatch persists a clean entry, the second reap stamps a fresh endedAt and beats the first ack (#121 review M1)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Second orphan");
+		const branch = `feat/${n}-again`;
+		sh(fx.repo, "checkout", "-qb", branch, "origin/main");
+		sh(fx.repo, "push", "-q", "-u", "origin", branch);
+		sh(fx.repo, "checkout", "-q", "main");
+		plantDispatch(ctx, {
+			[String(n)]: {
+				pid: await deadPid(),
+				role: "implementer",
+				branch,
+				worktree: path.join(fx.dir, "home", "proj", "worktrees", "proj", `issue-${n}`),
+				startedAt: Date.now() - 10 * 60_000,
+				status: "running",
+			},
+		});
+		// Generation 1 is reaped by the status pass and acked into the ledger.
+		const s1 = textOf(await call(ctx, "devloop_status", {}));
+		assert.match(s1, /crashed/, `gen-1's reap surfaces:\n${s1}`);
+		const gen1 = JSON.parse(readFileSync(path.join(ctx.stateDir, "dispatch.json"), "utf8"))[String(n)];
+		assert.equal(gen1.status, "crashed");
+		const ackedAt = gen1.endedAt;
+		assert.deepEqual(JSON.parse(readFileSync(path.join(ctx.stateDir, "reconcile-seen.json"), "utf8")), { [String(n)]: ackedAt }, "the gen-1 terminal is acked");
+		// The re-dispatch takes the ticket back (a slow fake child stays up).
+		process.env.FAKE_PI_MODE = "slow";
+		process.env.FAKE_PI_SLEEP = "30";
+		const pending = call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
+		let gen2: Record<string, unknown>;
+		const deadline = Date.now() + 5_000;
+		for (;;) {
+			const cur = JSON.parse(readFileSync(path.join(ctx.stateDir, "dispatch.json"), "utf8"))[String(n)];
+			if (cur.status === "running" && typeof cur.pid === "number" && cur.pid > 0 && cur.startedAt > gen1.startedAt) {
+				gen2 = cur;
+				break;
+			}
+			if (Date.now() > deadline) throw new Error("the re-dispatch never persisted a pid-stamped running entry");
+			await new Promise((r) => setTimeout(r, 25));
+		}
+		// The fresh running entry must be CLEAN: a merged-in stale endedAt would let the second
+		// reap keep it (endedAt ??=), making terminalTime equal the already-acked gen-1 time.
+		assert.equal(gen2.endedAt, undefined, "the re-dispatched entry carries no endedAt");
+		assert.equal(gen2.report, undefined, "the re-dispatched entry carries no report");
+		assert.equal(gen2.error, undefined, "the re-dispatched entry carries no error");
+		assert.equal(gen2.stopReason, undefined, "the re-dispatched entry carries no stopReason");
+		// Generation 2 is orphaned in the same shape: the recorded pid dies, the harness never sees it.
+		const swap = JSON.parse(readFileSync(path.join(ctx.stateDir, "dispatch.json"), "utf8"));
+		swap[String(n)].pid = await deadPid();
+		writeFileSync(path.join(ctx.stateDir, "dispatch.json"), JSON.stringify(swap, null, 2));
+		const s2 = textOf(await call(ctx, "devloop_status", {}));
+		const on2 = JSON.parse(readFileSync(path.join(ctx.stateDir, "dispatch.json"), "utf8"))[String(n)];
+		assert.equal(on2.status, "crashed", "the second orphan is reaped");
+		assert.ok(on2.endedAt > ackedAt, `the second reap stamps a FRESH endedAt (stamped ${on2.endedAt}, first ack ${ackedAt})`);
+		assert.match(s2, new RegExp(`- #${n} implementer \\(`), `the second orphan resurfaces in the late reports despite the first ack:\n${s2}`);
+		assert.match(s2, /-> crashed/);
+		// cleanup: stop the still-sleeping fake child and drain the pending dispatch.
+		try { process.kill(Number(gen2.pid), "SIGKILL"); } catch { /* already gone */ }
+		await pending;
+	} finally {
+		delete process.env.FAKE_PI_MODE;
+		delete process.env.FAKE_PI_SLEEP;
+		fx.cleanup();
+	}
+});
+
+test("status: a tracker failure errors the tool WITHOUT consuming the late report — it must surface on the next status (#121 review M2)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Tracker blip");
+		plantDispatch(ctx, {
+			[String(n)]: { pid: 1, role: "implementer", branch: `feat/${n}-blip`, worktree: "/wt", startedAt: 1000, status: "done", report: "Pushed and green.\nSTATUS: DONE", endedAt: 2000 },
+		});
+		// Break gh so the tracker list throws mid-render (a blip, not a missing tracker).
+		const ghBin = path.join(fx.dir, "bin", "gh");
+		unlinkSync(ghBin);
+		writeFileSync(ghBin, "#!/bin/sh\necho 'gh: connection refused' >&2\nexit 1\n");
+		chmodSync(ghBin, 0o755);
+		const s1 = await call(ctx, "devloop_status", {});
+		assert.equal(s1.isError, true, `the tracker blip errors the tool:\n${textOf(s1)}`);
+		assert.ok(!existsSync(path.join(ctx.stateDir, "reconcile-seen.json")), "the failed status must NOT ack the late report into the ledger");
+		// The blip clears: the same report surfaces (nothing was consumed).
+		unlinkSync(ghBin);
+		execFileSync("ln", ["-sf", path.join(ROOT, "tests", "fake-gh"), ghBin]);
+		const s2 = textOf(await call(ctx, "devloop_status", {}));
+		assert.match(s2, new RegExp(`- #${n} implementer`), `the un-acked late report surfaces:\n${s2}`);
+		assert.match(s2, /STATUS: DONE/);
+	} finally { fx.cleanup(); }
+});
+
+test("status: late reports name non-numeric keys plainly (review-/analyst- keys are not ticket numbers)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		plantDispatch(ctx, {
+			"review-5": { pid: 1, role: "code-reviewer", worktree: "/wt", startedAt: 1000, status: "done", report: "Looks right.\nVERDICT: APPROVE", endedAt: 2000 },
+			"analyst-feedback": { pid: 1, role: "analyst", worktree: "/wt", startedAt: 1100, status: "done", report: "Plan posted.\nSTATUS: DONE", endedAt: 2100 },
+		});
+		const s = textOf(await call(ctx, "devloop_status", {}));
+		assert.match(s, /- review-5 code-reviewer /, `the review key names plainly:\n${s}`);
+		assert.match(s, /- analyst-feedback analyst /, `the analyst key names plainly:\n${s}`);
+		assert.ok(!s.includes("#review-5") && !s.includes("#analyst-feedback"), "no ticket-number prefix on non-numeric keys");
 	} finally { fx.cleanup(); }
 });
 

@@ -203,3 +203,18 @@ test("ackTerminals: the ledger persists and merges (later acks keep earlier ones
 	writeFileSync(path.join(dir, "reconcile-seen.json"), "{corrupt");
 	assert.deepEqual(readSeen(dir), {}, "a corrupt ledger reads empty (history is lossy)");
 });
+
+test("ackTerminals: a no-op ack does not rewrite the ledger (write-only-on-change, no mtime churn)", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "st-seen-noop-"));
+	const f = path.join(dir, "reconcile-seen.json");
+	ackTerminals(dir, { "7": 100 });
+	const before = statSync(f);
+	ackTerminals(dir, { "7": 100 }); // identical values: nothing changed
+	const after = statSync(f);
+	assert.equal(after.ino, before.ino, "an identical ack leaves the file alone (no rename over it)");
+	assert.equal(after.mtimeMs, before.mtimeMs, "an identical ack does not churn the mtime");
+	assert.deepEqual(readSeen(dir), { "7": 100 });
+	ackTerminals(dir, { "7": 999 }); // a real change still writes
+	assert.notEqual(statSync(f).ino, before.ino, "a changed ack rewrites the ledger");
+	assert.deepEqual(readSeen(dir), { "7": 999 });
+});
