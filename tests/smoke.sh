@@ -5053,6 +5053,29 @@ echo "$out" | grep -q "none declared for this train" && pass "no exercise arg re
 # A train-specific contract exercise lands in the brief (the #55 case).
 out=$(bash "$plugin/scripts/verify-brief.sh" "$vb_pre..$vb_post" "the #55 shell-mirror: cmp the shims against the TS engine" 2>&1)
 echo "$out" | grep -qF "the #55 shell-mirror: cmp the shims against the TS engine" && pass "the exercise arg lands in the brief" || fail "the exercise arg is missing from the brief"
+# (a2) de-dup: a train landing two files in the SAME category renders it exactly
+# once (#129). The live #108 output (skills/, scripts/, skills/) is reproduced by
+# interleaving a different category between the duplicates, so the repeated
+# category was seen FIRST in pathsort order — the position whose repeat the
+# missing-newline-sentinel accumulator never caught.
+vb_pre=$(git rev-parse main)
+vb_land .pi/skills/a.md "installed mirror skill"
+vb_land scripts/other.sh "#!/usr/bin/env bash"
+vb_land skills/b.md "source skill"
+vb_post=$(git rev-parse main)
+out=$(bash "$plugin/scripts/verify-brief.sh" "$vb_pre..$vb_post" 2>&1); rc=$?
+echo "$out"
+expect "a same-category duplicate after an intervening category still dispatches (rc 0)" "0" "$rc"
+expect "the repeated-first category renders exactly once (pathsort order)" "touched: skills/, scripts/" "$(printf '%s\n' "$out" | grep '^touched:')"
+# and the plain shape: two files, one category, no interleave.
+vb_pre=$(git rev-parse main)
+vb_land agents/reviewer.md "reviewer role"
+vb_land .pi/agents/reviewer.md "installed mirror reviewer"
+vb_post=$(git rev-parse main)
+out=$(bash "$plugin/scripts/verify-brief.sh" "$vb_pre..$vb_post" 2>&1); rc=$?
+echo "$out"
+expect "two files in one category dispatch (rc 0)" "0" "$rc"
+expect "a lone duplicated category renders exactly once" "touched: agents/" "$(printf '%s\n' "$out" | grep '^touched:')"
 # (b) docs/test-only train: skip, no dispatch.
 vb_pre=$(git rev-parse main)
 vb_land docs/note.md "a doc"
