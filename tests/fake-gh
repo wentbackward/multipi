@@ -44,7 +44,7 @@
 #     emits the real comments array; "title" is always included.
 #   issue edit <n> --add-label <l>
 #   issue close <n> [--comment <c>]
-#   api repos/<owner>/<repo>/issues/<n>/timeline
+#   api repos/<owner>/<repo>/issues/<n>/timeline [--paginate --slurp]
 #     the label-event timeline, for blocked-age detection (ticket #104): one line
 #     per event in <dir>/timeline/<n> shaped "<created_at ISO8601> <label-name>";
 #     emits [{"event":"labeled","created_at":"<iso>","label":{"name":"<l>"}}, …]
@@ -113,7 +113,18 @@ fi
 # below (which matches "cmd subcmd" and would never see the bare "api" word):
 case "${1:-}" in
   api)
-    ref=${2:-}
+    # Flags (--paginate --slurp, ticket #104's newest-event pagination) may precede the
+    # ref; the fake is single-page and honours none of them beyond RECORDING them in
+    # calls.log (the pins key off that recording, the pagination is the REAL client's).
+    shift
+    ref=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --*) : ;;
+        *) ref=${1:-}; break ;;
+      esac
+      shift
+    done
     case "$ref" in
       repos/*/issues/*/timeline)
         rest=${ref#*/issues/}

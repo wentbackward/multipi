@@ -4376,7 +4376,198 @@ expect "blocked empty: a tracker without dl/blocked tickets is a quiet no-op (rc
 [ -s "$WK" ] && fail "a wake fired with no blocked ticket" \
   || pass "blocked empty: no wake, no log line, the healthy no-op stands"
 
-rm -rf "$BLGH" "$BLGH_M" "$BLGH_M2" "$BLGH_R" "$BLGH_X" "$BLGH_F" "$BLGH_N" "$BLGH_O" "$BLGH_E" "$work/blgh-nox"
+# (f11) probe throttle (ticket #104 gate revision): the tracker probe (gh auth + issue
+# list, plus the per-ticket calls) runs at most once per BLOCKED_PROBE_THROTTLE_MS
+# (15 min), ledgered by `BL-PROBE` lines in the watch log — INDEPENDENT of the 24h
+# per-ticket wake dedupe. A 60 s daemon tick must not spend API calls every tick.
+BLGH_T="$work/blgh-thr"; mkdir -p "$BLGH_T"
+bgh_issue "$BLGH_T" "Awaiting a human call (throttle)" "Parked on a decision.
+
+## Questions
+Throttle me gently?" >/dev/null
+THR_ISO="2026-11-17T00:00:00Z"; THR_T=$(date -d "$THR_ISO" +%s%3N)
+printf '%s dl/blocked\n' "$THR_ISO" >"$BLGH_T/timeline/1"
+LV_NOW=$((THR_T + 5 * 86400000))
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_T" GH_REPO=owner/fixture
+expect "blocked throttle: the first probe wakes the overdue ticket" \
+  'BLOCKED (multipi-watch): #1 has awaited a human decision for 5d — "Throttle me gently?". Resume or drop it.' \
+  "$(head -1 "$WK" 2>/dev/null)"
+expect "blocked throttle: the probe stamps exactly one BL-PROBE ledger line" "1" "$(grep -cF ' BL-PROBE' "$wl" 2>/dev/null)"
+thr_calls_before=$(wc -l <"$BLGH_T/calls.log" 2>/dev/null || echo 0)
+LV_NOW=$((LV_NOW + 60000))   # 1 min later: inside the throttle window AND the 24h dedupe
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_T" GH_REPO=owner/fixture
+expect "blocked throttle rc 0: a throttled tick is still a clean no-op" "0" "$LV_RC"
+expect "blocked throttle: a tick inside the 15-min window makes ZERO tracker calls" \
+  "$thr_calls_before" "$(wc -l <"$BLGH_T/calls.log" 2>/dev/null || echo 0)"
+expect "blocked throttle: the throttle short-circuits BEFORE the per-ticket dedupe (no BLOCKED-SKIP)" \
+  "0" "$(grep -cF ' BLOCKED-SKIP' "$wl" 2>/dev/null)"
+expect "blocked throttle: no second wake (TTY still one line)" "1" "$(wc -l <"$WK")"
+expect "blocked throttle: the ledger still carries exactly one BL-PROBE stamp" "1" "$(grep -cF ' BL-PROBE' "$wl" 2>/dev/null)"
+LV_NOW=$((THR_T + 5 * 86400000 + 90060000))   # 25h+1m after the wake: 24h dedupe lapsed, throttle long past
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_T" GH_REPO=owner/fixture
+expect "blocked throttle: 25h+1m later (dedupe lapsed) the second probe wakes again" \
+  'BLOCKED (multipi-watch): #1 has awaited a human decision for 6d — "Throttle me gently?". Resume or drop it.' \
+  "$(tail -1 "$WK" 2>/dev/null)"
+expect "blocked throttle: the TTY now carries exactly two wake lines" "2" "$(wc -l <"$WK")"
+expect "blocked throttle: the second probe stamped a second BL-PROBE line (and a second ledger entry)" \
+  "2" "$(grep -cF ' BL-PROBE' "$wl" 2>/dev/null)"
+expect "blocked throttle: the ledger carries two wake entries at the exact ages" \
+  "2" "$(grep -cF ' BLOCKED n=1 age=522060000 resumed=0 approx=0' "$wl" 2>/dev/null)"
+
+# (f12) the throttle bounds PROBING; it never eats a due wake: with no usable TTY at
+# probe time the wake is log-only (the 24h window does NOT start), a TTY-ready check
+# inside the throttle window stays silent and makes ZERO tracker calls, and the due
+# wake lands the moment the throttle window lapses — deferred at most one period,
+# far inside the 24h dedupe window (the wake, not the throttle, owns the cadence).
+BLGH_C="$work/blgh-nothy"; mkdir -p "$BLGH_C"
+bgh_issue "$BLGH_C" "Awaiting a human call (no TTY first)" "Parked on a decision.
+
+## Questions
+Any TTY nearby?" >/dev/null
+NOHY_ISO="2026-11-17T06:00:00Z"; NOHY_T=$(date -d "$NOHY_ISO" +%s%3N)
+printf '%s dl/blocked\n' "$NOHY_ISO" >"$BLGH_C/timeline/1"
+LV_NOW=$((NOHY_T + 5 * 86400000))
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_C" GH_REPO=owner/fixture MULTIPI_INTERRUPT_TTY="$work/lv-nosuch-xy"
+expect "blocked no-tty probe rc 0: a due ticket with no usable TTY stays rc 0" "0" "$LV_RC"
+[ -s "$WK" ] && fail "a no-TTY probe wrote to the (absent) TTY" \
+  || pass "blocked no-tty probe: nothing is injected (the wake cannot land)"
+expect "blocked no-tty probe: the log-only BLOCKED-NO-TTY line is written (window does NOT start)" \
+  "1" "$(grep -cF ' BLOCKED-NO-TTY n=1' "$wl" 2>/dev/null)"
+expect "blocked no-tty probe: the completed sweep still stamps BL-PROBE (the cost is paid once)" \
+  "1" "$(grep -cF ' BL-PROBE' "$wl" 2>/dev/null)"
+nhc_before=$(wc -l <"$BLGH_C/calls.log" 2>/dev/null || echo 0)
+LV_NOW=$((LV_NOW + 60000))
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_C" GH_REPO=owner/fixture
+expect "blocked wake-deferral: the TTY is back but the throttle window is not lapsed — still silent" \
+  "0" "$( [ -s "$WK" ] && echo 1 || echo 0)"
+expect "blocked wake-deferral: the throttled check made ZERO tracker calls" \
+  "$nhc_before" "$(wc -l <"$BLGH_C/calls.log" 2>/dev/null || echo 0)"
+LV_NOW=$((LV_NOW + 900000))   # 16 min after the stamp: the throttle window has lapsed
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_C" GH_REPO=owner/fixture
+expect "blocked wake-deferral: the moment probing is permitted again, the due wake lands" \
+  'BLOCKED (multipi-watch): #1 has awaited a human decision for 5d — "Any TTY nearby?". Resume or drop it.' \
+  "$(tail -1 "$WK" 2>/dev/null)"
+expect "blocked wake-deferral: the late wake starts the 24h window (one BLOCKED entry)" \
+  "1" "$(grep -cF ' BLOCKED n=1 ' "$wl" 2>/dev/null)"
+
+# (f13) throttle boundary, keyed off the ledger (the timestamps are seeded directly —
+# the arithmetic is what is under test): a stamp EXACTLY 15 min old permits the probe;
+# one 1 ms newer still throttles.
+BLGH_B="$work/blgh-bound"; mkdir -p "$BLGH_B"
+FAKE_GH_DIR="$BLGH_B" gh issue create "Boundary parking" "Plain open ticket.
+
+## Questions
+Boundary?" >/dev/null
+LV_NOW=$((THR_T + 5 * 86400000))
+lvfresh
+mkstate idle 1000 0 0
+printf '%s BL-PROBE\n' "$((LV_NOW - 900000))" >"$wl"
+bb_before=$(wc -l <"$BLGH_B/calls.log" 2>/dev/null || echo 0)
+lvwatch FAKE_GH_DIR="$BLGH_B" GH_REPO=owner/fixture
+expect "blocked throttle boundary: a stamp exactly 900000 ms old permits the probe (auth + list)" \
+  "$((bb_before + 2))" "$(wc -l <"$BLGH_B/calls.log" 2>/dev/null || echo 0)"
+lvfresh
+mkstate idle 1000 0 0
+printf '%s BL-PROBE\n' "$((LV_NOW - 899999))" >"$wl"
+bb_before=$(wc -l <"$BLGH_B/calls.log" 2>/dev/null || echo 0)
+lvwatch FAKE_GH_DIR="$BLGH_B" GH_REPO=owner/fixture
+expect "blocked throttle boundary: a stamp 899999 ms old still throttles (zero tracker calls)" \
+  "$bb_before" "$(wc -l <"$BLGH_B/calls.log" 2>/dev/null || echo 0)"
+
+# (f14) timeline pagination: a chatty ticket's newest dl/blocked event may sit past
+# the first 100 events — the probe must paginate; `--paginate --slurp` keeps the
+# concatenated pages one array, so the newest-event-wins max() semantics survive.
+BLGH_P="$work/blgh-page"; mkdir -p "$BLGH_P"
+FAKE_GH_DIR="$BLGH_P" gh issue create "Chatty ticket" "Parked several times.
+
+## Questions
+Which park?" >/dev/null
+FAKE_GH_DIR="$BLGH_P" gh issue edit 1 --add-label dl/blocked >/dev/null
+printf '%s dl/blocked\n%s dl/blocked\n' "2026-11-14T00:00:00Z" "2026-11-15T00:00:00Z" >"$BLGH_P/timeline/1"
+LV_NOW=$((TL + 5 * 86400000))
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_P" GH_REPO=owner/fixture
+expect "blocked pagination: the age comes from the NEWEST of several dl/blocked events (5d, not 6d)" \
+  'BLOCKED (multipi-watch): #1 has awaited a human decision for 5d — "Which park?". Resume or drop it.' \
+  "$(head -1 "$WK" 2>/dev/null)"
+expect "blocked pagination: the timeline call paginates and slurps into one array" \
+  "1" "$(grep -cF -e '--paginate --slurp api repos/owner/fixture/issues/1/timeline' "$BLGH_P/calls.log" 2>/dev/null)"
+
+# (f15) dep-cluster scoping: only the FIRST reference cluster after each "Depends on"
+# marker is collected — a parenthetical mention ("#3 for the related note") is
+# context, not a dependency. Claiming resumable while a referenced ticket is OPEN
+# would be the dangerous false claim, so the scoping must exclude it.
+BLGH_D="$work/blgh-clust"; mkdir -p "$BLGH_D"
+FAKE_GH_DIR="$BLGH_D" gh issue create "Cluster scoping" "Waiting on the parser.
+Depends on #2 (see #3 for the related note)
+
+## Questions
+Go?" >/dev/null
+FAKE_GH_DIR="$BLGH_D" gh issue create "the closed dep" "done" >/dev/null
+FAKE_GH_DIR="$BLGH_D" gh issue create "related, still open" "open" >/dev/null
+FAKE_GH_DIR="$BLGH_D" gh issue close 2 >/dev/null
+FAKE_GH_DIR="$BLGH_D" gh issue edit 1 --add-label dl/blocked >/dev/null
+printf '%s dl/blocked\n' "$LRISO" >"$BLGH_D/timeline/1"
+LV_NOW=$((TL + 5 * 86400000))
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_D" GH_REPO=owner/fixture
+expect "blocked dep-cluster: a parenthetical #ref on the marker line is NOT a dependency (claim stands)" \
+  'BLOCKED (multipi-watch): #1 has awaited a human decision for 5d — "Go?". Its dependencies are all closed — now resumable. Resume or drop it.' \
+  "$(head -1 "$WK" 2>/dev/null)"
+expect "blocked dep-cluster: the log flags resumed=1" "1" "$(grep -cF ' BLOCKED n=1 age=432000000 resumed=1 approx=0' "$wl" 2>/dev/null)"
+
+# (f16) dep-cap refusal: MORE THAN 10 distinct dependencies cannot all be verified —
+# claiming "now resumable" from a truncated list would be the dangerous false claim,
+# so the scan refuses (plain line, resumed=0). EXACTLY 10 are fully verifiable:
+# the claim stays allowed.
+BLGH_K11="$work/blgh-cap11"; mkdir -p "$BLGH_K11"
+FAKE_GH_DIR="$BLGH_K11" gh issue create "Eleven dependencies" "Parking with an unusually long dependency list.
+Depends on #2, #3, #4, #5, #6, #7, #8, #9, #10, #11, #12
+
+## Questions
+All closed?" >/dev/null
+for k in 2 3 4 5 6 7 8 9 10 11 12; do FAKE_GH_DIR="$BLGH_K11" gh issue create "dep $k" "done" >/dev/null; done
+for k in 2 3 4 5 6 7 8 9 10 11 12; do FAKE_GH_DIR="$BLGH_K11" gh issue close "$k" >/dev/null; done
+FAKE_GH_DIR="$BLGH_K11" gh issue edit 1 --add-label dl/blocked >/dev/null
+printf '%s dl/blocked\n' "$LRISO" >"$BLGH_K11/timeline/1"
+LV_NOW=$((TL + 5 * 86400000))
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_K11" GH_REPO=owner/fixture
+expect "blocked dep cap: 11 closed deps (cap exceeded) REFUSES the resumable claim" \
+  'BLOCKED (multipi-watch): #1 has awaited a human decision for 5d — "All closed?". Resume or drop it.' \
+  "$(head -1 "$WK" 2>/dev/null)"
+expect "blocked dep cap: the log keeps resumed=0 (unverifiable above the cap, never claimed)" \
+  "1" "$(grep -cF ' BLOCKED n=1 age=432000000 resumed=0 approx=0' "$wl" 2>/dev/null)"
+BLGH_K10="$work/blgh-cap10"; mkdir -p "$BLGH_K10"
+FAKE_GH_DIR="$BLGH_K10" gh issue create "Ten dependencies" "Parking with a long dependency list.
+Depends on #2, #3, #4, #5, #6, #7, #8, #9, #10, #11
+
+## Questions
+All closed, exactly ten?" >/dev/null
+for k in 2 3 4 5 6 7 8 9 10 11; do FAKE_GH_DIR="$BLGH_K10" gh issue create "dep $k" "done" >/dev/null; done
+for k in 2 3 4 5 6 7 8 9 10 11; do FAKE_GH_DIR="$BLGH_K10" gh issue close "$k" >/dev/null; done
+FAKE_GH_DIR="$BLGH_K10" gh issue edit 1 --add-label dl/blocked >/dev/null
+printf '%s dl/blocked\n' "$LRISO" >"$BLGH_K10/timeline/1"
+lvfresh
+mkstate idle 1000 0 0
+lvwatch FAKE_GH_DIR="$BLGH_K10" GH_REPO=owner/fixture
+expect "blocked dep cap: exactly 10 closed deps (fully verifiable) keep the claim" \
+  'BLOCKED (multipi-watch): #1 has awaited a human decision for 5d — "All closed, exactly ten?". Its dependencies are all closed — now resumable. Resume or drop it.' \
+  "$(head -1 "$WK" 2>/dev/null)"
+expect "blocked dep cap: the log flags resumed=1 at the exact cap" "1" "$(grep -cF ' BLOCKED n=1 age=432000000 resumed=1 approx=0' "$wl" 2>/dev/null)"
+
+rm -rf "$BLGH" "$BLGH_M" "$BLGH_M2" "$BLGH_R" "$BLGH_X" "$BLGH_F" "$BLGH_N" "$BLGH_O" "$BLGH_E" "$work/blgh-nox" "$BLGH_T" "$BLGH_C" "$BLGH_B" "$BLGH_P" "$BLGH_D" "$BLGH_K11" "$BLGH_K10"
 
 # Doc agreement (round-3 fold 4): the spec's --daemon sentence and the script header must
 # tell the same story — the script does NOT self-daemonize; the extension's detached spawn
