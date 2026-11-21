@@ -88,9 +88,10 @@ clean worktrees whose branch is already gone from the remote.
 
 ## Layout
 
-- `scripts/` — the deterministic core: `heavy.sh` (machine-wide slot queue with ports and
-  a memory cap), `gate-train.sh`, `merge-train.sh`, `open-pr.sh`, `paths.sh`, `doctor.sh`,
-  `install.sh`. Pinned exit-code contracts in each header and in the spec.
+- `scripts/` — the deterministic core: `multipi` (the operator's single entry point, see
+  below), `heavy.sh` (machine-wide slot queue with ports and a memory cap), `gate-train.sh`,
+  `merge-train.sh`, `open-pr.sh`, `paths.sh`, `doctor.sh`, `install.sh`. Pinned exit-code
+  contracts in each header and in the spec.
 - `extension/` — the pi extension: pure-node domain modules (`config`, `state`, `brief`,
   `child`, `roles`, `stopgate`, `formatter`, `gate`, `merge`, `issues`) and a thin
   registration layer (`tools`, `index`). No build step (Node 24 type stripping).
@@ -133,6 +134,25 @@ targets — `typebox` and `@earendil-works/pi-coding-agent` resolvable from the 
 
 This repo dogfoods itself: its committed `.pi/` directory **is** the result of
 `scripts/install.sh .` — the loop that built this project ran from these exact files.
+
+## Operator console
+
+A human owner learns ONE command — `scripts/multipi` (installed into every target alongside
+the other scripts): one line per surface, with its rc contract:
+
+| Command | What it does |
+|---|---|
+| `multipi status` | One line: is the orchestrator session live, idle, stale/wedged, or dead? |
+| `multipi board` | One-glance dashboard: open tickets (blocked first, with the blocking question), last gate, in-flight children. |
+| `multipi interrupt [--dry-run] "msg"` | Force-send a message into a wedged session's terminal (a TTY paste; prints the kill-and-resume fallback when there is none). |
+| `multipi watch [--daemon] [--interval N]` | The watchdog: wakes a wedged session before the tool bound becomes hours; nudges long-blocked tickets. |
+| `multipi doctor` | Prerequisites and the resolved config (offline). |
+| `multipi help` | This summary with each command's rc contract. |
+
+The dispatcher is pure: each subcommand execs the named `scripts/multipi-{status,board,interrupt,watch}.sh`
+or `scripts/doctor.sh` and passes the exit code through — the scripts also work standalone,
+and their own headers carry the full rc tables, seams and mechanisms. Bare `multipi`
+renders the board (status when the board script is absent); an unknown subcommand exits 2.
 
 ## Checks
 

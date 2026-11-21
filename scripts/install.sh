@@ -30,6 +30,12 @@ if [ "$(realpath "$plugin_root/scripts")" != "$(realpath "$target/scripts" 2>/de
 	# deny keeps the policy'd session from minting its own approvals.
 	cp -f "$plugin_root"/scripts/multipi-approve "$target/scripts/"
 	chmod +x "$target/scripts/multipi-approve"
+	# The operator's single entry point (ticket #109): a pure dispatcher over the five
+	# console scripts. Deliberately NOT a .sh name — it is the operator's tool, never a
+	# loop program, and the §5 identity check keys on the .sh suffix like it does for
+	# multipi-approve.
+	cp -f "$plugin_root"/scripts/multipi "$target/scripts/"
+	chmod +x "$target/scripts/multipi"
 	# policy shims (ticket #41): the Layer-2 git/gh wrappers + shared helper. Kept OUT of the
 	# scripts/*.sh trusted set on purpose: they are not loop programs, and the §5 identity
 	# check keys on both the checkout's scripts dir and the .sh suffix.

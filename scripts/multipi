@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# multipi — the one command the operator learns (ticket #109): a PURE dispatcher over
+# the five operator-console scripts. Each subcommand EXECs the sibling script with the
+# remaining arguments and passes its exit code through — no logic is duplicated here;
+# the rc contracts, seams and mechanism live in each script's header, which is the
+# contract. The five scripts remain fully runnable standalone (existing callers,
+# smoke tests and AGENTS.md references are unaffected).
+#
+#   multipi                      = board (status when multipi-board.sh is absent)
+#   multipi status               → multipi-status.sh     one line: alive/idle/stale/dead
+#   multipi board                → multipi-board.sh      one-glance operator dashboard
+#   multipi interrupt [args…]    → multipi-interrupt.sh  force-send into the session TTY
+#   multipi watch [args…]        → multipi-watch.sh      wedged-session watchdog
+#   multipi doctor               → doctor.sh             prerequisites + resolved config
+#   multipi help  (-h, --help)   this summary, with each script's rc contract
+#
+# The dispatcher's own rc (the only one it invents): 2 bad usage (unknown subcommand,
+# or a zero-arg default with NEITHER board nor status present — a broken install).
+#
+# No new env seams: the dispatcher consults none — each underlying script's own
+# MULTIPI_* seams apply unchanged when it is exec'd.
+set -u
+scripts_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+usage() {
+  cat <<'EOF'
+multipi — the devloop operator console: one command (ticket #109)
+
+  multipi status                          one line: is the session alive/idle/stale/dead?
+                                          scripts/multipi-status.sh — rc 0 live · 1 idle · 2 STALE/wedge · 3 dead · 4 bad usage
+  multipi board                           one-glance dashboard: tickets (blocked first), last gate, children
+                                          scripts/multipi-board.sh — rc 0 clear · 1 ≥1 dl/blocked · 2 over-bound child or red gate · 4 usage/state
+  multipi interrupt [--dry-run] "msg"     force-send a message into the session's terminal
+                                          scripts/multipi-interrupt.sh — rc 0 injected · 4 bad usage · 5 no live session · 6 no TTY (prints the fallback)
+  multipi watch [--daemon] [--interval N] wake a wedged session; nudge long-blocked tickets
+                                          scripts/multipi-watch.sh — rc 0 healthy · 4 bad usage/clock · 5 nothing to wake · 6 no usable TTY
+  multipi doctor                          prerequisites and the resolved config
+                                          scripts/doctor.sh — rc 0 ready · 1 ≥1 problem
+  multipi help                            this summary
+
+No argument: board (status when the board script is absent). Every subcommand execs the
+named script and passes its exit code through; the scripts also work standalone.
+EOF
+}
+
+cmd=${1:-}
+case $cmd in
+  "")
+    # Zero-arg "what needs me": the board — the ticket's recorded recommendation,
+    # falling back to status on an install that predates the board. Neither present
+    # is a broken install: refuse (rc 2), never guess.
+    if [ -f "$scripts_dir/multipi-board.sh" ]; then
+      exec bash "$scripts_dir/multipi-board.sh"
+    fi
+    if [ -f "$scripts_dir/multipi-status.sh" ]; then
+      exec bash "$scripts_dir/multipi-status.sh"
+    fi
+    echo "multipi: neither multipi-board.sh nor multipi-status.sh present in $scripts_dir (broken install?)" >&2
+    usage >&2
+    exit 2
+    ;;
+  status) exec bash "$scripts_dir/multipi-status.sh" "${@:2}" ;;
+  board) exec bash "$scripts_dir/multipi-board.sh" "${@:2}" ;;
+  interrupt) exec bash "$scripts_dir/multipi-interrupt.sh" "${@:2}" ;;
+  watch) exec bash "$scripts_dir/multipi-watch.sh" "${@:2}" ;;
+  doctor) exec bash "$scripts_dir/doctor.sh" "${@:2}" ;;
+  help) usage ;;
+  -h | --help) usage ;;
+  *)
+    echo "multipi: unknown subcommand '$cmd'" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
