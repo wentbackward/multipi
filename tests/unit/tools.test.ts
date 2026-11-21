@@ -80,11 +80,11 @@ function textOf(r: { content: Array<{ type: string; text?: string }> }): string 
 	return r.content.map((c) => c.text ?? "").join("");
 }
 
-async function call(ctx: ReturnType<typeof ctxWithAgents>, name: string, args: Record<string, unknown>) {
+async function call(ctx: ReturnType<typeof ctxWithAgents>, name: string, args: Record<string, unknown>, session: Record<string, unknown> = {}) {
 	const tools = makeTools();
 	const tool = tools.find((t) => t.name === name)!;
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any -- test harness drives raw tool executes
-	const res = await (tool.execute as unknown as (id: string, params: Record<string, unknown>, s: unknown, u: unknown, tc: unknown) => Promise<any>)("tc-test", args, new AbortController().signal, undefined, { cwd: ctx.cwd });
+	const res = await (tool.execute as unknown as (id: string, params: Record<string, unknown>, s: unknown, u: unknown, tc: unknown) => Promise<any>)("tc-test", args, new AbortController().signal, undefined, { cwd: ctx.cwd, ...session });
 	return res;
 }
 
@@ -125,6 +125,53 @@ test("dispatch stamps the child with its role (MULTIPI_CHILD_ROLE via the spawn 
 		delete process.env.FAKE_PI_ECHO_ROLE;
 		fx.cleanup();
 	}
+});
+
+// --- model inheritance (#130): a child rides the parent session's model ------
+//
+// The verifier path is the lightest end-to-end dispatch (no ticket, no worktree,
+// no tracker): it spawns the child straight from the role definition. fake-pi's
+// FAKE_PI_ECHO_TASK writes the child's ENTIRE argv to a file, so the composed
+// child command is assertable as plain text.
+
+const CFG_JSON = JSON.stringify({ base_branch: "main", checks: [{ name: "unit", command: "true", heavy: false }], format: null, format_extensions: null, fast_check: "true" });
+
+async function verifierArgv(extra: { session?: Record<string, unknown>; agentOverride?: string } = {}): Promise<string> {
+	const fx = makeFixture(CFG_JSON);
+	setupEnv(fx);
+	if (extra.agentOverride) {
+		writeFileSync(path.join(fx.dir, "agents", "verifier.md"), extra.agentOverride);
+	}
+	const argvFile = path.join(fx.dir, "argv.txt");
+	process.env.FAKE_PI_ECHO_TASK = argvFile;
+	try {
+		const ctx = ctxWithAgents(fx);
+		const res = await call(ctx, "devloop_dispatch", { role: "verifier", task: "audit it" }, extra.session ?? {});
+		assert.equal(res.isError ?? false, false, textOf(res));
+		return readFileSync(argvFile, "utf8");
+	} finally {
+		delete process.env.FAKE_PI_ECHO_TASK;
+		fx.cleanup();
+	}
+}
+
+test("dispatch renders the parent session's model for a role with no model: line (--model P, #130)", async () => {
+	const argv = await verifierArgv({ session: { model: { provider: "prov", id: "model-id" } } });
+	assert.match(argv, /\s--model prov\/model-id(\s|$)/, `composed args: ${argv}`);
+});
+
+test("dispatch: a role frontmatter model: line beats the parent session's model (override wins, #130)", async () => {
+	const argv = await verifierArgv({
+		session: { model: { provider: "prov", id: "model-id" } },
+		agentOverride: "---\nname: verifier\ndescription: audits\ntools: read, bash\nmodel: custom/role-model\n---\nAudit. End with STATUS: DONE.\n",
+	});
+	assert.match(argv, /\s--model custom\/role-model(\s|$)/, `composed args: ${argv}`);
+	assert.ok(!argv.includes("prov/model-id"), `the parent model must not ride along: ${argv}`);
+});
+
+test("dispatch: a parent session with no model selected leaves --model unset (settings-default fallback, #130)", async () => {
+	const argv = await verifierArgv();
+	assert.ok(!/(^|\s)--model(\s|$)/.test(argv), `no --model flag: ${argv}`);
 });
 
 test("dispatch refuses a second implementer on the same ticket while one is in flight", async () => {

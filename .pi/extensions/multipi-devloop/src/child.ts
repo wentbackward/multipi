@@ -37,7 +37,15 @@ export interface SpawnOpts {
 	/** Path of the role prompt file, passed via --append-system-prompt. */
 	appendSystemPrompt?: string;
 	tools?: string[];
+	/** The role's own model (`model:` frontmatter). Wins over `parentModel` when set. */
 	model?: string;
+	/**
+	 * The parent session's live model (`provider/id`). Rendered as `--model` when `model`
+	 * is unset, so a child inherits the orchestrator's model instead of the settings
+	 * default (spec §6.1 "Model defaults to the parent session's model", #130).
+	 * Neither set ⇒ no `--model`: the child resolves its model from settings as before.
+	 */
+	parentModel?: string;
 	thinking?: string;
 	/** One-shot role name; stamped as MULTIPI_CHILD_ROLE next to MULTIPI_CHILD=1 (role guard, spec §3). */
 	role?: string;
@@ -151,6 +159,14 @@ export function resolvePiInvocation(args: string[], env: NodeJS.ProcessEnv): { c
 }
 
 /**
+ * Render a session model as the pi CLI's `--model` value (`provider/id`).
+ * Gaps (undefined / empty fields) yield no flag — the settings-default fallback.
+ */
+export function parentModelArg(model: { provider: string; id: string } | null | undefined): string | undefined {
+	return model && model.provider && model.id ? `${model.provider}/${model.id}` : undefined;
+}
+
+/**
  * Spawn a one-shot headless pi (`-p --no-session --mode json`), stream its NDJSON events,
  * and resolve with the aggregated result. Never throws for child failures; `signal`
  * aborts by killing the child's WHOLE process tree (SIGTERM, SIGKILL after 5 s) and
@@ -162,6 +178,7 @@ export function spawnPi(opts: SpawnOpts): Promise<ChildResult> {
 	if (opts.appendSystemPrompt) args.push("--append-system-prompt", opts.appendSystemPrompt);
 	if (opts.tools?.length) args.push("--tools", opts.tools.join(","));
 	if (opts.model) args.push("--model", opts.model);
+	else if (opts.parentModel) args.push("--model", opts.parentModel);
 	if (opts.thinking) args.push("--thinking", opts.thinking);
 	args.push(opts.task);
 	const { command, args: fullArgs } = resolvePiInvocation(args, opts.env ?? process.env);
