@@ -98,7 +98,20 @@ the implementer. Never skip it; never merge on the implementer's self-review.
 - `VERDICT: CHANGES REQUIRED`: comment the must-fix list verbatim on the issue, re-dispatch the
   implementer for the same ticket (it resumes in the same worktree), then review again. Repeat until
   APPROVE. Cheap should-fix items: fold them into the same round. Expensive ones: follow-up issue.
-- `VERDICT: APPROVE`: label `dl/approved`.
+- `VERDICT: APPROVE`: label `dl/approved`. When the APPROVE carries should-fixes (nothing
+  must-fix), run the polish budget (ticket #105):
+  - A should-fix re-dispatch is ONE ROUND: the comment the re-dispatch rides on must BEGIN with
+    `should-fix follow-up` — the loop counts one round per such marked comment (the ticket's own
+    history IS the depth state; must-fix re-dispatches carry no marker and are never counted).
+  - `scripts/polish-tail.sh <ticket> <area> <findings-file>` counts the rounds against
+    `review.max_followup_depth` (default 2) and makes the deterministic decision:
+    - **Below the cap (rc 10)** — re-dispatch the implementer for the should-fixes (marker comment).
+    - **At/over the cap (rc 0) — accept the tail**: the findings are parked verbatim in the single
+      per-area `Polish backlog — <area>` ticket (created on first use, appended thereafter) and the
+      ticket is labelled `dl/approved` and proceeds to the gate. No further implementer round for
+      should-fixes: the tail is accepted, the backlog is where the polish converges.
+  - Must-fix findings are NEVER subject to the budget: they re-dispatch until APPROVE-clean
+    regardless of depth (correctness is not negotiable).
 
 ## 5. Gate the train (batch, never per-branch)
 
