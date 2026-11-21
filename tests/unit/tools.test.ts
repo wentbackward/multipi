@@ -1225,6 +1225,46 @@ test("stop gate: a done implementer entry whose branch awaits the reviewer drive
 	} finally { fx.cleanup(); }
 });
 
+test("stop gate: a crashed or interrupted reviewer re-arms the review drive — only a RUNNING review suppresses (ticket #124)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", fast_check: "true" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Delivered, reviewer died");
+		execFileSync("gh", ["issue", "edit", String(n), "--add-label", "dl/in-review"], { cwd: fx.repo, stdio: "pipe" });
+		const doneImpl = { pid: 1, role: "implementer", branch: `feat/${n}-delivered`, worktree: "/wt", startedAt: 1000, status: "done", report: "STATUS: DONE", endedAt: 2000 };
+		// The exact #124 repro: the reviewer ran, then died — reapDead leaves the terminal
+		// `crashed` entry in the state FOREVER, and the ticket sits dl/in-review unreviewed.
+		plantDispatch(ctx, {
+			[String(n)]: doneImpl,
+			[`review-${n}`]: { pid: await deadPid(), role: "code-reviewer", branch: `feat/${n}-delivered`, worktree: "/wt", startedAt: 3000, status: "crashed", endedAt: 4000 },
+		});
+		const d = await evaluateSettle(ctx.cwd);
+		assert.ok(d, "a crashed reviewer leaves the branch unreviewed: the gate must not settle");
+		assert.match(d!.entries[0].content, /await the reviewer/);
+		assert.match(d!.entries[0].content, new RegExp(`#${n}`));
+		// An interrupted reviewer (operator pause / SIGINT) is terminal in exactly the same way.
+		plantDispatch(ctx, {
+			[String(n)]: doneImpl,
+			[`review-${n}`]: { pid: 1, role: "code-reviewer", branch: `feat/${n}-delivered`, worktree: "/wt", startedAt: 3000, status: "interrupted", endedAt: 4000 },
+		});
+		const di = await evaluateSettle(ctx.cwd);
+		assert.ok(di, "an interrupted reviewer is terminal too: the review clause must stand");
+		assert.match(di!.entries[0].content, /await the reviewer/);
+		assert.match(di!.entries[0].content, new RegExp(`#${n}`));
+		// Contrast pin: a LIVE running reviewer still suppresses the clause (the startable
+		// clause stays — the ticket is still open and unblocked).
+		plantDispatch(ctx, {
+			[String(n)]: doneImpl,
+			[`review-${n}`]: { pid: process.pid, role: "code-reviewer", branch: `feat/${n}-delivered`, worktree: "/wt", startedAt: 3000, status: "running" },
+		});
+		const dr = await evaluateSettle(ctx.cwd);
+		assert.ok(dr, "the ticket is still startable — the gate keeps driving, on the dispatch clause");
+		assert.match(dr!.entries[0].content, /startable/i);
+		assert.ok(!dr!.entries[0].content.includes("await the reviewer"), "only a running review suppresses the clause");
+	} finally { fx.cleanup(); }
+});
+
 test("stop gate: a done entry on an UNLABELLED ticket (or a label-less tracker) does not claim a review", async () => {
 	const fx = makeFixture(JSON.stringify({ base_branch: "main", fast_check: "true" }));
 	setupEnv(fx);
