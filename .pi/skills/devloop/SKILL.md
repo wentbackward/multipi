@@ -100,9 +100,14 @@ the implementer. Never skip it; never merge on the implementer's self-review.
   APPROVE. Cheap should-fix items: fold them into the same round. Expensive ones: follow-up issue.
 - `VERDICT: APPROVE`: label `dl/approved`. When the APPROVE carries should-fixes (nothing
   must-fix), run the polish budget (ticket #105):
-  - A should-fix re-dispatch is ONE ROUND: the comment the re-dispatch rides on must BEGIN with
-    `should-fix follow-up` — the loop counts one round per such marked comment (the ticket's own
-    history IS the depth state; must-fix re-dispatches carry no marker and are never counted).
+  - A should-fix re-dispatch is ONE ROUND: the comment the re-dispatch rides on must open its
+    FIRST non-empty line with `should-fix follow-up` — the marker alone or followed by a colon
+    (the boundary keeps prose like "should-fix follow-ups are welcome" from counting). The loop
+    counts one round per such marked comment (the ticket's own history IS the depth state; must-fix
+    re-dispatches carry no marker and are never counted).
+  - **Forgotten-marker failure mode:** if a re-dispatch comment omits the marker, that round is
+    invisible to the counter and the brake never trips — the cost is exactly one unbudgeted
+    extra round, which is why the marker belongs in the SAME comment that dispatches.
   - `scripts/polish-tail.sh <ticket> <area> <findings-file>` counts the rounds against
     `review.max_followup_depth` (default 2) and makes the deterministic decision:
     - **Below the cap (rc 10)** — re-dispatch the implementer for the should-fixes (marker comment).

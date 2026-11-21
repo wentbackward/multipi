@@ -2,11 +2,20 @@
 //
 // A review that comes back APPROVE with only should-fixes is NOT a correctness gate — the
 // ticket may polish, but it must converge. Per ticket, each should-fix re-dispatch is
-// recorded as an issue comment whose FIRST line begins with SHOULD_FIX_FOLLOWUP_MARKER;
-// counting those comments is the ticket's follow-up depth, and when the depth reaches
-// `review.max_followup_depth` (default 2) the next tail is ACCEPTED: acceptTail parks the
-// findings in the single per-area polish backlog (created or appended), comments the
-// verdict on the ticket, and labels it dl/approved so it proceeds to the gate.
+// recorded as an issue comment whose FIRST non-empty line IS the marker SHOULD_FIX_FOLLOWUP_MARKER
+// or the marker followed by a colon (the boundary keeps prose that merely STARTS with the
+// marker — "should-fix follow-ups are welcome" — from counting); counting those comments is
+// the ticket's follow-up depth, and when the depth reaches `review.max_followup_depth`
+// (default 2) the next tail is ACCEPTED: acceptTail parks the findings in the single
+// per-area polish backlog (created or appended), comments the verdict on the ticket, and
+// labels it dl/approved so it proceeds to the gate.
+//
+// The parked entry is content-addressed and carries NO wall-clock date (determinism):
+// `#<ticket>` + newline + the findings, trimmed. acceptTail is IDEMPOTENT across a re-run
+// after a partial failure — a parking whose entry already exists is skipped, a ticket whose
+// verdict comment already exists is not re-verb'd, and a ticket already labelled dl/approved
+// is not re-labelled. A re-run therefore never double-parks, and a crash between any two of
+// the three mutations heals on the next call.
 //
 // Must-fix rounds never count (their re-dispatch comments carry no marker): correctness
 // is not budgeted, and a ticket that keeps producing must-fixes keeps re-dispatching
@@ -18,16 +27,19 @@ import { loadConfig } from "./config.ts";
 import { addComment, addLabel, createIssue, issueComments, listOpenIssues } from "./issues.ts";
 
 /** The first-line marker of a should-fix re-dispatch comment. A comment counts a round
- * only when its first NON-EMPTY line begins with it — inline mentions are invisible. */
+ * only when its first NON-EMPTY line IS the marker (end-of-line) or the marker followed by a
+ * colon — the boundary keeps prose that merely starts with the word ("should-fix
+ * follow-ups are welcome") invisible. Inline mentions never count. */
 export const SHOULD_FIX_FOLLOWUP_MARKER = "should-fix follow-up";
 
-/** The ticket's follow-up depth: one per comment whose first non-empty line opens with the
- * marker. One marked comment counts once, regardless of how often the marker recurs in it. */
+/** One round per comment whose first non-empty line is the marker with its boundary
+ * (bare at end-of-line, or followed by a colon). One marked comment counts once,
+ * regardless of how often the marker recurs in it. */
 export function countShouldFixRounds(comments: string[]): number {
 	let rounds = 0;
 	for (const c of comments) {
 		const first = c.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
-		if (first !== undefined && first.startsWith(SHOULD_FIX_FOLLOWUP_MARKER)) rounds++;
+		if (first !== undefined && (first === SHOULD_FIX_FOLLOWUP_MARKER || first.startsWith(SHOULD_FIX_FOLLOWUP_MARKER + ":"))) rounds++;
 	}
 	return rounds;
 }
@@ -57,8 +69,9 @@ export interface TailArgs {
 }
 
 export interface TailResult {
-	/** "accepted": findings parked, ticket dl/approved, gate-ready. "below-cap": nothing was
-	 * changed — re-dispatch the implementer (its comment must open with the marker). */
+	/** "accepted": findings parked (or already parked on a re-run), ticket dl/approved, gate-ready.
+	 * "below-cap": nothing was changed — re-dispatch the implementer (its comment must open with
+	 * the marker). */
 	action: "accepted" | "below-cap";
 	/** The counted should-fix rounds on the ticket. */
 	rounds: number;
@@ -66,7 +79,17 @@ export interface TailResult {
 	cap: number;
 	backlogTitle: string;
 	backlogNumber?: number;
-	backlogAction?: "created" | "appended";
+	/** "created": first use, the backlog now holds the entry in its body. "appended": the entry
+	 * rides as a new comment. "unchanged": a re-run found the entry already parked — nothing
+	 * was written (idempotency across a partial failure). */
+	backlogAction?: "created" | "appended" | "unchanged";
+}
+
+/** The content-addressed parking entry: source ticket, a newline, the findings trimmed.
+ * NO wall-clock date — a re-run must produce the SAME bytes so the idempotency guard can
+ * recognise it, and a stable entry keeps the backlog byte-stable for operators and tests. */
+function parkingEntry(ticket: number, findings: string): string {
+	return `#${ticket}\n${findings.trim()}`;
 }
 
 /** The deterministic half of the accept-tail verdict (ticket #105). See the module header
@@ -78,28 +101,42 @@ export function acceptTail(a: TailArgs): TailResult {
 	const cfg = loadConfig(a.root);
 	if (!cfg) throw new Error(`no valid .devloop.json at ${a.root}`);
 	const cap = cfg.review.maxFollowupDepth;
-	const rounds = countShouldFixRounds(issueComments(a.repo, a.ticket));
+	const comments = issueComments(a.repo, a.ticket);
+	const rounds = countShouldFixRounds(comments);
 	const title = polishBacklogTitle(a.area);
 	if (!acceptTailDue(rounds, cap)) {
 		return { action: "below-cap", rounds, cap, backlogTitle: title };
 	}
-	const entry = `#${a.ticket} (${new Date().toISOString().slice(0, 10)})\n${a.findings.trim()}`;
-	const backlog = listOpenIssues(a.repo).find((i) => i.title === title);
+	// Idempotency (review round 2): the three mutations are each guarded by the state the
+	// PREVIOUS run left behind — parking by the entry's own bytes, the verdict by its prefix,
+	// the label by the ticket's current labels. A re-run (full or after a partial failure)
+	// changes nothing that already happened.
+	const entry = parkingEntry(a.ticket, a.findings);
+	const open = listOpenIssues(a.repo);
+	const source = open.find((i) => i.number === a.ticket);
+	const backlog = open.find((i) => i.title === title);
 	let backlogNumber: number;
-	let backlogAction: "created" | "appended";
+	let backlogAction: "created" | "appended" | "unchanged";
 	if (backlog) {
 		backlogNumber = backlog.number;
-		addComment(a.repo, backlogNumber, entry);
-		backlogAction = "appended";
+		const alreadyParked = backlog.body === entry || issueComments(a.repo, backlogNumber).some((c) => c.trim() === entry);
+		if (alreadyParked) {
+			backlogAction = "unchanged";
+		} else {
+			addComment(a.repo, backlogNumber, entry);
+			backlogAction = "appended";
+		}
 	} else {
 		backlogNumber = createIssue(a.repo, title, entry);
 		backlogAction = "created";
 	}
-	addComment(
-		a.repo,
-		a.ticket,
-		`accept-tail: ${rounds} should-fix round(s) at the cap (${cap}) — findings parked in "${title}" (#${backlogNumber}); the ticket is dl/approved and proceeds to the gate.`,
-	);
-	addLabel(a.repo, a.ticket, "dl/approved");
+	if (!comments.some((c) => c.trimStart().startsWith("accept-tail:"))) {
+		addComment(
+			a.repo,
+			a.ticket,
+			`accept-tail: ${rounds} should-fix round(s) at the cap (${cap}) — findings parked in "${title}" (#${backlogNumber}); the ticket is dl/approved and proceeds to the gate.`,
+		);
+	}
+	if (!source?.labels.includes("dl/approved")) addLabel(a.repo, a.ticket, "dl/approved");
 	return { action: "accepted", rounds, cap, backlogTitle: title, backlogNumber, backlogAction };
 }
