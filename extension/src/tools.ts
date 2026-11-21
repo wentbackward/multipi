@@ -23,7 +23,8 @@ import {
 import * as childreg from "./childreg.ts";
 import { spawnPi, type ChildResult } from "./child.ts";
 import { discoverRoles, findRole } from "./roles.ts";
-import { listOpenIssues, listClosedIssueNumbers, addLabel, latestComment, addComment, type Issue } from "./issues.ts";
+import { listOpenIssues, listClosedIssueNumbers, addLabel, latestComment, issueComments, addComment, type Issue } from "./issues.ts";
+import { countShouldFixRounds, acceptTailDue } from "./polish.ts";
 import { scanStore, coveredTicketsFromScan } from "./scenarios.ts";
 import {
 	evaluateStopGate,
@@ -976,9 +977,22 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 					.join("\n");
 				const issues = listOpenIssues(ctx.repoSlug)
 					.map((i) => {
-						const labels = i.labels.filter((l) => l.startsWith("dl/")).join(", ") || "-";
+						const labels = i.labels.filter((l) => l.startsWith("dl/"));
+						const labelNames = labels.join(", ") || "-";
 						const deps = [...i.body.matchAll(/Depends on #(\d+)/g)].map((m) => `#${m[1]}`).join(" ");
-						return `| #${i.number} | ${i.title} | ${labels} | ${deps || "-"} |`;
+						// Polish depth (ticket #105): only a ticket in the review window can accrue
+						// should-fix rounds; a tracker blip there degrades to "-" (status never fails
+						// on an auxiliary probe) and an at-cap depth is flagged for the accept-tail branch.
+						let polish = "-";
+						if (labels.includes("dl/in-review") || labels.includes("dl/approved")) {
+							try {
+								const rounds = countShouldFixRounds(issueComments(ctx.repoSlug, i.number));
+								polish = `${rounds}/${ctx.cfg.review.maxFollowupDepth}${acceptTailDue(rounds, ctx.cfg.review.maxFollowupDepth) ? " cap" : ""}`;
+							} catch {
+								/* depth unknown; the row still renders */
+							}
+						}
+						return `| #${i.number} | ${i.title} | ${labelNames} | ${deps || "-"} | ${polish} |`;
 					})
 					.join("\n");
 				const running = Object.values(state).filter((e) => e.status === "running" && e.role === "implementer").length;
@@ -990,7 +1004,7 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 					/* no record */
 				}
 				return text(
-					[`# devloop status`, "", `Implementers in flight: ${running}/${ctx.cfg.heavy.slots}`, "", "## Children", "| ticket | role | branch | status | since |", "|---|---|---|---|---|", kids || "| - | - | - | (none) | - |", "", "## Open tickets", "| # | title | dl/ labels | depends |", "|---|---|---|---|", issues || "| - | (none) | - | - |", "", `## Last green gate`, train, ""].join("\n"),
+					[`# devloop status`, "", `Implementers in flight: ${running}/${ctx.cfg.heavy.slots}`, "", "## Children", "| ticket | role | branch | status | since |", "|---|---|---|---|---|", kids || "| - | - | - | (none) | - |", "", "## Open tickets", "| # | title | dl/ labels | depends | polish |", "|---|---|---|---|---|", issues || "| - | (none) | - | - | - |", "", `## Last green gate`, train, ""].join("\n"),
 				);
 		}),
 	});
