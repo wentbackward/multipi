@@ -40,8 +40,18 @@
 #     ones named in --json are emitted (unknown fields are ignored), so a body
 #     containing JSON-shaped text can never pollute a --json number query.
 #   issue view <n> --json <fields>
+#     "state" emits "OPEN"/"CLOSED" (open dir vs issues-closed dir); "comments"
+#     emits the real comments array; "title" is always included.
 #   issue edit <n> --add-label <l>
 #   issue close <n> [--comment <c>]
+#   api repos/<owner>/<repo>/issues/<n>/timeline
+#     the label-event timeline, for blocked-age detection (ticket #104): one line
+#     per event in <dir>/timeline/<n> shaped "<created_at ISO8601> <label-name>";
+#     emits [{"event":"labeled","created_at":"<iso>","label":{"name":"<l>"}}, …]
+#     ([] when the file is absent). Any other api ref is unsupported (rc 1).
+#   issue list --json …updatedAt
+#     the row's "updatedAt": <dir>/ts/<n> line 1 when present, else the
+#     documented default 2026-01-01T00:00:00Z (the real CLI always returns one).
 #
 # `issue list --json` emits the REAL CLI shape: ONE compact array line
 # ([{...},{...}], or [] when empty), not one object per line.
@@ -74,7 +84,7 @@ case ":$PATH:" in
     ;;
 esac
 dir=${FAKE_GH_DIR:?FAKE_GH_DIR not set}
-mkdir -p "$dir" "$dir/issues" "$dir/issues-closed" "$dir/labels"
+mkdir -p "$dir" "$dir/issues" "$dir/issues-closed" "$dir/labels" "$dir/ts" "$dir/timeline"
 gh_repo="${GH_REPO:--}"
 prev_arg=""
 for a in "$@"; do
@@ -98,6 +108,35 @@ fi
 if [ "${1:-} ${2:-}" = "pr list" ] && [ "${FAKE_GH_FAIL_PR_LIST:-}" = 1 ]; then
   echo "fake gh: simulated transient failure (pr list)" >&2; exit 1
 fi
+
+# `api repos/<owner>/<repo>/issues/<n>/timeline` is dispatched before the $1/$2 case
+# below (which matches "cmd subcmd" and would never see the bare "api" word):
+case "${1:-}" in
+  api)
+    ref=${2:-}
+    case "$ref" in
+      repos/*/issues/*/timeline)
+        rest=${ref#*/issues/}
+        n=${rest%%/*}
+        events="[]"
+        if [ -f "$dir/timeline/$n" ]; then
+          events="["
+          first=1
+          while read -r iso lab; do
+            [ -n "$iso" ] || continue
+            [ "$first" = 1 ] || events="$events,"
+            events="$events{\"event\":\"labeled\",\"created_at\":\"$(jesc "$iso")\",\"label\":{\"name\":\"$(jesc "$lab")\"}}"
+            first=0
+          done <"$dir/timeline/$n"
+          events="$events]"
+        fi
+        printf '%s\n' "$events"
+        ;;
+      *) echo "fake gh: unsupported api ref: $ref" >&2; exit 1 ;;
+    esac
+    exit 0
+    ;;
+esac
 
 case "${1:-} ${2:-}" in
   "auth status")
@@ -269,6 +308,11 @@ case "${1:-} ${2:-}" in
           body=$(jesc "$(sed -n '2,$p' "$src/$f")" | awk '{printf "%s%s", (NR>1?"\\n":""), $0}')
           obj="$obj,\"body\":\"$body\""
         fi
+        if want_field updatedAt; then
+          uat="2026-01-01T00:00:00Z"   # documented default (the real CLI always returns one)
+          [ -f "$dir/ts/$f" ] && uat=$(sed -n 1p "$dir/ts/$f")
+          obj="$obj,\"updatedAt\":\"$(jesc "$uat")\""
+        fi
         obj="$obj}"
         [ -z "$items" ] || items="$items,"  # compact single line, real-CLI shape
         items="$items$obj"
@@ -282,12 +326,18 @@ case "${1:-} ${2:-}" in
   "issue view")
     n=$3
     fields=${5:-title}
+    state=""
     title=$(sed -n 1p "$dir/issues/$n" 2>/dev/null)
-    [ -n "$title" ] || title=$(sed -n 1p "$dir/issues-closed/$n" 2>/dev/null)
-    [ -n "$title" ] || exit 1
-    if [ -n "${fields##*comments}" ]; then
-      printf '{"title":"%s"}\n' "$(jesc "$title")"
+    if [ -n "$title" ]; then
+      state=OPEN
     else
+      title=$(sed -n 1p "$dir/issues-closed/$n" 2>/dev/null)
+      [ -n "$title" ] && state=CLOSED
+    fi
+    [ -n "$title" ] || exit 1
+    out="{\"title\":\"$(jesc "$title")\""
+    case ",$fields," in *,state,*) out="$out,\"state\":\"$state\"" ;; esac
+    if [ -z "${fields##*comments}" ]; then
       cmts="[]"
       if [ -d "$dir/comments/$n" ]; then
         cmts="["
@@ -302,8 +352,9 @@ case "${1:-} ${2:-}" in
         done
         cmts="$cmts]"
       fi
-      printf '{"title":"%s","comments":%s}\n' "$(jesc "$title")" "$cmts"
+      out="$out,\"comments\":$cmts"
     fi
+    printf '%s}\n' "$out"
     ;;
   "issue edit")
     n=$3
