@@ -274,8 +274,11 @@ case "${1:-} ${2:-}" in
         cmts="["
         first=1
         for f in $(find "$dir/comments/$n" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort); do
+          # Newlines are encoded as literal \n AFTER the quote/backslash escaping: a comment
+          # is a SINGLE JSON string, the same contract the issue BODY in `issue list` follows.
+          body_nl=$(jesc "$(cat "$dir/comments/$n/$f")" | awk '{printf "%s%s", (NR>1?"\\n":""), $0}')
           [ "$first" = 1 ] || cmts="$cmts,"
-          cmts="$cmts{\"body\":\"$(jesc "$(cat "$dir/comments/$n/$f")")\"}"
+          cmts="$cmts{\"body\":\"$body_nl\"}"
           first=0
         done
         cmts="$cmts]"
