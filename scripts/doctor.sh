@@ -11,6 +11,7 @@ missing() {
   echo "MISSING $*"
   problems=$((problems + 1))
 }
+problem() { echo "PROBLEM $*"; problems=$((problems + 1)); }
 optional() { echo "note    $*"; }
 
 if command -v git >/dev/null 2>&1; then ok "git $(git --version | cut -d' ' -f3)"; else missing "git"; fi
@@ -293,6 +294,55 @@ for (const pkg of ["typebox", "@earendil-works/pi-coding-agent"]) {
       ok "extension runtime (node $(node --version), typebox, pi-coding-agent)"
     fi
   fi
+fi
+# Provider tool-name grammar probe (ticket #107 — #99's pin as an operational surface):
+# a STATIC validation of the registered control-plane tool names against the strictest
+# common provider function-name grammar — NO live API call (the doctor stays offline).
+# The names and the grammar come from the extension's single source (toolnames.ts), so
+# this check and the unit-test pin share one list and one ruler. The provider is taken
+# from MULTIPI_PROVIDER (documented operator seam), falling back to PI_PROVIDER (pi's
+# shell-tool session env); MULTIPI_PROBE_TOOL_NAMES (colon-separated) is the diagnostic
+# seam that what-ifs a name change (empty = unset). The evaluator is pure node, so the
+# one-shot never drags the pi runtime in — the same compute-then-tally discipline as
+# the factory and policy reports: node prints one JSON object, doctor applies the lines.
+probe_src=""
+for cand in ${DL_ROOT:+$DL_ROOT/.pi/extensions/multipi-devloop/src} "$scripts_dir/../extension/src"; do
+  if [ -f "$cand/toolnames.ts" ]; then probe_src=$cand; break; fi
+done
+if [ -z "$probe_src" ]; then
+  optional "provider tool-name grammar probe unavailable (extension source not found)"
+elif ! command -v node >/dev/null 2>&1; then
+  optional "provider tool-name grammar probe skipped (node not found)"
+else
+  probe_err=$(mktemp)
+  # EXIT trap owns the temp file until the normal path resets it (the factory pattern):
+  # a mid-run death cannot leak it.
+  trap 'rm -f "$probe_err"' EXIT
+  probe_json=$(
+    PROBE_SRC=$probe_src node --input-type=module -e '
+const m = await import(process.env.PROBE_SRC + "/toolnames.ts");
+process.stdout.write(JSON.stringify(m.probeToolNameGrammar(m.toolNamesFromEnv(process.env), m.resolveProvider(process.env))));
+' 2>"$probe_err"
+  )
+  if [ -z "$probe_json" ]; then
+    perr_first=$(head -n 1 "$probe_err")
+    optional "provider tool-name grammar probe unavailable (node import failed${perr_first:+: $perr_first})"
+  else
+    p_provider=$(json_get provider <<<"$probe_json")
+    p_strict=$(json_get strict <<<"$probe_json")
+    p_count=$(json_get count <<<"$probe_json")
+    [ "$p_strict" = "true" ] && p_provider="$p_provider (grammar-strict)"
+    echo "        provider      $p_provider"
+    bad_n=$(json_len bad <<<"$probe_json")
+    bi=0
+    while [ "$bi" -lt "$bad_n" ]; do
+      problem "provider $p_provider rejects tool name $(json_get "bad.$bi" <<<"$probe_json") (grammar ^[A-Za-z][A-Za-z0-9_-]*\$)"
+      bi=$((bi + 1))
+    done
+    [ "$bad_n" -eq 0 ] && ok "provider tool-name grammar ($p_count tools)"
+  fi
+  rm -f "$probe_err"
+  trap - EXIT
 fi
 [ "$problems" -eq 0 ] && echo "doctor: ready" || echo "doctor: $problems problem(s)"
 [ "$problems" -eq 0 ]
