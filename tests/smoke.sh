@@ -4731,7 +4731,6 @@ grep -qF "does NOT self-daemonize" "$LV_SPEC" && \
 rm -rf "$lvhome" "$work/lv-pty.out" "$work/lv-wake.out" "$work/lv-meminfo"
 kill "$LVPID" 2>/dev/null || true
 
-
 # --- the one-glance operator board (ticket #103: scripts/multipi-board.sh) ---------
 # Its own state home + tracker (other sections' issues/branches stay out of the view),
 # its own local-origin fixture branches. The board is PURE READ: every fabrication below
