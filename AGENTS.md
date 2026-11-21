@@ -75,7 +75,16 @@ bootstrap another project, the **`devloop-setup` skill**.
   or a heartbeat silent > 10 min — deduped to one wake per tool-seq and per 3600 s.
   A session that vanished mid-tool was very likely OOM-killed: the rc 3 line says so and
   points at `journalctl --since <start> | grep oom-kill` (the confirmed root cause of the
-  "No result provided" deaths).
+  "No result provided" deaths). `scripts/multipi-board.sh` is the one-glance dashboard
+  for a human product owner — pure-read, offline-friendly (gh degrades to a local-only
+  render, never hard-fails): header (tracker @ local base head, main synced/behind),
+  the last gate (`gate: GREEN <age> (<log>) | RED <age> — <failing checks> | never run`,
+  from the gate-train `<state>/gate-last.txt` record), in-flight children (ages, capacity
+  from `heavy.slots`, OVER BOUND past `MULTIPI_BOARD_CHILD_BOUND_MIN`), the open tickets —
+  `dl/blocked` FIRST with the blocking question (`└─ Q:`), in-review with PR number + head,
+  gated with the mergeable note — and the blocked ages. rc 0 nothing needs the human ·
+  1 ≥1 `dl/blocked` · 2 ≥1 over-bound child OR last gate RED (2 shadows 1) · 4 bad usage/
+  unreadable state (seams `MULTIPI_BOARD_REPO`, `MULTIPI_BOARD_CHILD_BOUND_MIN`).
 - `scripts/doctor.sh` diagnoses; `scripts/install.sh <repo>` installs the loop into a project.
 
 ## Dark factory (seams and guard limits)
@@ -121,6 +130,15 @@ is a seam; never introduce undocumented ones.
   its own and steer its own process tree's resolution there — the named
   best-effort limit, and the decision layer (and the refusal audit lines) still
   run over whatever the shim resolved.
+- `MULTIPI_BOARD_REPO` / `MULTIPI_BOARD_CHILD_BOUND_MIN` — one-glance board
+  (ticket #103), NOT child seams: the operator dashboard `scripts/multipi-board.sh`
+  (rc 0 nothing-needed · 1 ≥1 dl/blocked · 2 ≥1 over-bound child OR last gate RED ·
+  4 bad usage/unreadable state; 2 shadows 1). `MULTIPI_BOARD_REPO` overrides the
+  tracker slug (default: the origin-derived GH_REPO pin, else the repo basename)
+  and pins `--repo` for the board's gh calls; `MULTIPI_BOARD_CHILD_BOUND_MIN` is
+  the expected bound of an in-flight one-shot child (canonical decimal minutes,
+  default 480, 0 = disabled) — past-bound children tag OVER BOUND and drive rc 2
+  (DECISIONS.md 2026-11-20, #103).
 
 **Config keys (`.devloop.json`):** `"factory"` (`"collaborative"` | `"dark"`, default
 `"collaborative"` — a preset that only sets defaults; an explicit option always wins), the

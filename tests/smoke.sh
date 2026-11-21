@@ -4048,6 +4048,207 @@ grep -qF "does NOT self-daemonize" "$LV_SPEC" && \
 rm -rf "$lvhome" "$work/lv-pty.out" "$work/lv-wake.out" "$work/lv-meminfo"
 kill "$LVPID" 2>/dev/null || true
 
+# --- the one-glance operator board (ticket #103: scripts/multipi-board.sh) ---------
+# Its own state home + tracker (other sections' issues/branches stay out of the view),
+# its own local-origin fixture branches. The board is PURE READ: every fabrication below
+# is a file the loop itself writes (dispatch.json, gate-last.txt, issue files, worktrees).
+bdbase="$work/bd"
+bddir_home="$bdbase/home"
+bddir_state="$bddir_home/project"   # DL_STATE = $MULTIPI_HOME/<repo basename "project">
+mkdir -p "$bddir_home" "$bdbase/nogit" "$bdbase/noxbin"
+board() { # board [ENV_KV ...] — run in the fixture repo; sets BOARD_OUT / BOARD_RC
+  local out rc
+  out=$(cd "$work/project" && env MULTIPI_HOME="$bddir_home" FAKE_GH_DIR="$BDGH" \
+    MULTIPI_BOARD_REPO=owner/fixture "$@" bash "$plugin/scripts/multipi-board.sh" 2>&1); rc=$?
+  BOARD_OUT=$out; BOARD_RC=$rc
+}
+BDGH="$bdbase/gh-0"
+mkdir -p "$BDGH"
+
+# (a) rc 4: bad usage / unreadable state / malformed seam (the pinned matrix, first arm)
+# (--bogus goes AFTER the script: through env's "$@" slot it would BE the command)
+BOARD_OUT=$(cd "$work/project" && env MULTIPI_HOME="$bddir_home" FAKE_GH_DIR="$BDGH" bash "$plugin/scripts/multipi-board.sh" --bogus 2>&1); BOARD_RC=$?
+expect "board rc 4: bad usage (an argument)" "4" "$BOARD_RC"
+board MULTIPI_BOARD_CHILD_BOUND_MIN=09
+expect "board rc 4: a leading-zero MULTIPI_BOARD_CHILD_BOUND_MIN is refused (never read as octal)" "4" "$BOARD_RC"
+echo "$BOARD_OUT" | grep -qF "MULTIPI_BOARD_CHILD_BOUND_MIN" && \
+  pass "board rc 4 names the offending seam" || fail "board rc 4 line: $BOARD_OUT"
+board MULTIPI_BOARD_CHILD_BOUND_MIN=abc
+expect "board rc 4: a non-numeric MULTIPI_BOARD_CHILD_BOUND_MIN is refused" "4" "$BOARD_RC"
+BOARD_OUT=$(cd "$bdbase/nogit" && env MULTIPI_HOME="$bddir_home" bash "$plugin/scripts/multipi-board.sh" 2>&1); BOARD_RC=$?
+expect "board rc 4: not inside a git repository (unreadable state)" "4" "$BOARD_RC"
+
+# (b) rc 0: a green board with an EMPTY tracker renders "nothing needs you"
+# Earlier sections' merge trains moved origin/main without the local main — sync the
+# LOCAL ref first (the board itself never fetches), then pin both header renderings.
+git -C "$work/project" fetch -q origin
+git -C "$work/project" checkout -q main 2>/dev/null || git -C "$work/project" checkout -qb main origin/main
+git -C "$work/project" reset -q --hard origin/main
+board
+expect "board rc 0: a green board with zero open tickets" "0" "$BOARD_RC"
+echo "$BOARD_OUT" | grep -qF "multipi board — owner/fixture @" && \
+  pass "board: the seam MULTIPI_BOARD_REPO pins the header slug" || fail "board header: $(head -1 <<<"$BOARD_OUT")"
+echo "$BOARD_OUT" | grep -qF "(main synced)" && \
+  pass "board: a fresh local main renders (main synced)" || fail "board main sync: $(head -1 <<<"$BOARD_OUT")"
+git -C "$work/project" reset -q --hard origin/main~1
+board
+echo "$BOARD_OUT" | grep -qF "(main behind 1)" && \
+  pass "board: a lagging local main renders (main behind 1)" || fail "board main behind: $(head -1 <<<"$BOARD_OUT")"
+git -C "$work/project" reset -q --hard origin/main
+echo "$BOARD_OUT" | grep -qF "in-flight: none" && \
+  pass "board: no dispatch entries renders in-flight: none" || fail "board in-flight: $(grep -F in-flight <<<"$BOARD_OUT" || echo '<none>')"
+echo "$BOARD_OUT" | grep -qF "gate: never run" && \
+  pass "board: no gate record renders gate: never run" || fail "board gate: $(grep -F 'gate:' <<<"$BOARD_OUT" || echo '<none>')"
+echo "$BOARD_OUT" | grep -qF "nothing needs you" && \
+  pass "board: an empty tracker says nothing needs you" || fail "board summary: $(grep -F tickets <<<"$BOARD_OUT" || echo '<none>')"
+
+# (c) rc 0 + the gate line: a GREEN record with its newest train log path
+BDGH="$bdbase/gh-1"; mkdir -p "$BDGH" "$bddir_state/logs"
+touch "$bddir_state/logs/train-smoke.log"
+GLTS=$(( $(date +%s%3N) - 5 * 3600 * 1000 ))
+printf 'result=green ts=%s detail=- logdir=%s\n' "$GLTS" "$bddir_state/logs" >"$bddir_state/gate-last.txt"
+board
+expect "board rc 0: a green gate alone needs no human" "0" "$BOARD_RC"
+echo "$BOARD_OUT" | grep -qE "gate: GREEN 5h.*train-smoke\.log" && \
+  pass "board: GREEN carries the human age and the newest train log path" || fail "board gate: $(grep -F 'gate:' <<<"$BOARD_OUT" || echo '<none>')"
+
+# (d) rc 2: the last gate RED names the failing check(s)
+printf 'result=red ts=%s detail=smoke,shellcheck logdir=%s\n' "$GLTS" "$bddir_state/logs" >"$bddir_state/gate-last.txt"
+board
+expect "board rc 2: a RED last gate" "2" "$BOARD_RC"
+echo "$BOARD_OUT" | grep -qE "gate: RED 5h[0-1]m? — smoke,shellcheck" && \
+  pass "board: RED names the failing checks" || fail "board gate: $(grep -F 'gate:' <<<"$BOARD_OUT" || echo '<none>')"
+rm -f "$bddir_state/gate-last.txt"
+
+# (e) rc 2 via an in-flight child past its bound; under the bound the same child is rc 0
+sleep 120 & BD_LIVE=$!
+dispatch_entry() { # dispatch_entry KEY PID STARTED_AGO_MS [ROLE] — one entry in dispatch.json
+  printf '{"%s":{"pid":%s,"role":"%s","worktree":"%s/wt-%s","startedAt":%s,"status":"running"}}\n' \
+    "$1" "$2" "${4:-implementer}" "$bddir_state" "$1" "$(( $(date +%s%3N) - $3 ))"
+}
+dispatch_entry 88 "$BD_LIVE" $((10 * 3600 * 1000)) >"$bddir_state/dispatch.json"
+board MULTIPI_BOARD_CHILD_BOUND_MIN=60
+expect "board rc 2: an in-flight child past its bound" "2" "$BOARD_RC"
+echo "$BOARD_OUT" | grep -qE "in-flight: 1/2 implementers — #88 \(10h[0-1]m?, OVER BOUND\)" && \
+  pass "board: the over-bound child tags OVER BOUND (age + capacity from heavy.slots)" || \
+  fail "board in-flight: $(grep -F in-flight <<<"$BOARD_OUT" || echo '<none>')"
+dispatch_entry 88 "$BD_LIVE" $((5 * 60 * 1000)) >"$bddir_state/dispatch.json"
+board MULTIPI_BOARD_CHILD_BOUND_MIN=60
+expect "board rc 0: the same child UNDER its bound" "0" "$BOARD_RC"
+echo "$BOARD_OUT" | grep -qF "in-flight: 1/2 implementers — #88 (5m)" && \
+  pass "board: a young child renders plain" || fail "board in-flight: $(grep -F in-flight <<<"$BOARD_OUT" || echo '<none>')"
+rm -f "$bddir_state/dispatch.json"
+
+# (e2) two in-flight children: the census, the ordering, and the SECOND child's
+#     in-progress annotation (a mid-line lookup, not a line-start one). Dispatch keys
+#     are ticket numbers, so the two children ride tickets 88 and 1.
+sleep 120 & BD_LIVE2=$!
+BDGH="$bdbase/gh-e"; mkdir -p "$BDGH"
+FAKE_GH_DIR="$BDGH" gh issue create "In-flight ticket" "body one" >/dev/null
+FAKE_GH_DIR="$BDGH" gh issue edit 1 --add-label dl/in-progress >/dev/null
+printf '{"88":{"pid":%s,"role":"implementer","worktree":"%s/wt-88","startedAt":%s,"status":"running"},"1":{"pid":%s,"role":"implementer","worktree":"%s/wt-1","startedAt":%s,"status":"running"}}\n' \
+  "$BD_LIVE" "$bddir_state" "$(( $(date +%s%3N) - 5 * 60 * 1000 ))" \
+  "$BD_LIVE2" "$bddir_state" "$(( $(date +%s%3N) - 5 * 60 * 1000 ))" >"$bddir_state/dispatch.json"
+board MULTIPI_BOARD_CHILD_BOUND_MIN=60
+expect "board rc 0: two young children" "0" "$BOARD_RC"
+echo "$BOARD_OUT" | grep -qE "in-flight: 2/2 implementers — #88 \([0-9]+m\), #1 \([0-9]+m\)" && \
+  pass "board: the census counts two implementers at capacity" || fail "board census: $(grep -F in-flight <<<"$BOARD_OUT" || echo '<none>')"
+echo "$BOARD_OUT" | grep -qE "#1  \[dl/in-progress\] In-flight ticket  \(running [0-9]+m\)" && \
+  pass "board: the SECOND child's in-progress annotation is found mid-line" || \
+  fail "board in-progress line: $(grep -F in-progress <<<"$BOARD_OUT" || echo '<none>')"
+kill "$BD_LIVE2" 2>/dev/null || true
+wait "$BD_LIVE2" 2>/dev/null || true
+rm -f "$bddir_state/dispatch.json"
+
+# (f) rc 1: a dl/blocked ticket renders FIRST with its question; the summary counts;
+#     in-review gets its PR + head annotation; gated gets the mergeable note.
+BDGH="$bdbase/gh-block"; mkdir -p "$BDGH"
+FAKE_GH_DIR="$BDGH" gh issue create "Blocked ticket needs a call" "An implementer report with an open question.
+
+## Questions
+Should the loop keep or delete the old snapshots?" >/dev/null
+FAKE_GH_DIR="$BDGH" gh issue create "Parser fix" "body two" >/dev/null
+FAKE_GH_DIR="$BDGH" gh issue create "Gated and ready" "body three" >/dev/null
+FAKE_GH_DIR="$BDGH" gh issue edit 1 --add-label dl/blocked >/dev/null
+FAKE_GH_DIR="$BDGH" gh issue edit 2 --add-label dl/in-review >/dev/null
+FAKE_GH_DIR="$BDGH" gh issue edit 3 --add-label dl/gated >/dev/null
+# Ticket 2's PR branch — plus a DECOY branch of the same ticket with NO PR: the annotation
+# must follow the branch that carries the open PR, not the alphabetical winner.
+git -C "$work/project" branch -q feat/2-open origin/main && git -C "$work/project" push -q origin feat/2-open
+git -C "$work/project" branch -q feat/2-parser origin/main && git -C "$work/project" push -q origin feat/2-parser
+FAKE_GH_DIR="$BDGH" gh pr create --head feat/2-parser --title "feat: parser (2)" >/dev/null
+# A dispatch record for the blocked ticket whose WORKTREE MTIME carries the blocked age.
+printf '{"1":{"pid":1,"role":"implementer","worktree":"%s/wt1","startedAt":1,"status":"blocked"}}\n' "$bddir_state" >"$bddir_state/dispatch.json"
+mkdir -p "$bddir_state/wt1" && : >"$bddir_state/wt1/anchor"
+touch -d '2 days ago' "$bddir_state/wt1"
+touch -d '2 days ago' "$bddir_state/wt1/anchor"
+board
+expect "board rc 1: a dl/blocked ticket is the bottleneck" "1" "$BOARD_RC"
+ln_blocked=$(grep -nF "[dl/blocked]" <<<"$BOARD_OUT" | head -1 | cut -d: -f1)
+ln_review=$(grep -nF "[dl/in-review]" <<<"$BOARD_OUT" | head -1 | cut -d: -f1)
+[ -n "$ln_blocked" ] && [ -n "$ln_review" ] && [ "$ln_blocked" -lt "$ln_review" ] && \
+  pass "board: the blocked ticket renders BEFORE the in-review one" || \
+  fail "board ordering (blocked line ${ln_blocked:-?} vs review line ${ln_review:-?}): $(grep -E '^  #' <<<"$BOARD_OUT")"
+echo "$BOARD_OUT" | grep -qF "tickets: 3 open" && \
+  pass "board: the summary counts the open tickets" || fail "board summary: $(grep -F tickets <<<"$BOARD_OUT")"
+echo "$BOARD_OUT" | grep -qF "1 awaiting YOUR decision, 1 in review, 1 gated" && \
+  pass "board: the summary names blocked/in-review/gated" || fail "board summary: $(grep -F tickets <<<"$BOARD_OUT")"
+echo "$BOARD_OUT" | grep -qF "└─ Q: Should the loop keep or delete the old snapshots?" && \
+  pass "board: the blocked ticket carries its blocking question (from the body)" || \
+  fail "board Q line: $(grep -F 'Q:' <<<"$BOARD_OUT" || echo '<none>')"
+echo "$BOARD_OUT" | grep -qE "#2  \[dl/in-review\] Parser fix  \(PR #100, head " && \
+  pass "board: the in-review ticket carries PR number + head (from the PR-bearing branch)" || \
+  fail "board review line: $(grep -F 'in-review' <<<"$BOARD_OUT")"
+echo "$BOARD_OUT" | grep -qF "(gate green — mergeable)" && \
+  pass "board: the gated ticket notes mergeable" || fail "board gated line: $(grep -F 'gated' <<<"$BOARD_OUT")"
+echo "$BOARD_OUT" | grep -qF "blocked age: #1 blocked 2d" && \
+  pass "board: the blocked age is human (worktree mtime)" || fail "board blocked age: $(grep -F 'blocked age' <<<"$BOARD_OUT" || echo '<none>')"
+# The question travels as a COMMENT too — a newer comment supersedes the body.
+FAKE_GH_DIR="$BDGH" gh issue comment 1 --body "## Questions
+Is the bound of 480 minutes right?" >/dev/null
+board
+expect "board rc 1 unchanged with the question moved to a comment" "1" "$BOARD_RC"
+echo "$BOARD_OUT" | grep -qF "└─ Q: Is the bound of 480 minutes right?" && \
+  pass "board: the blocking question prefers the comment over the body" || \
+  fail "board Q comment: $(grep -F 'Q:' <<<"$BOARD_OUT")"
+
+# (g) precedence: blocked AND a red last gate ⇒ rc 2 (the red pipeline shadows the waiting)
+printf 'result=red ts=%s detail=smoke logdir=%s\n' "$GLTS" "$bddir_state/logs" >"$bddir_state/gate-last.txt"
+board
+expect "board rc 2: a red gate shadows the blocked ticket (precedence 2 > 1)" "2" "$BOARD_RC"
+echo "$BOARD_OUT" | grep -qF "[dl/blocked]" && \
+  pass "board: the blocked ticket still renders under rc 2" || fail "board: blocked line missing under rc 2"
+rm -f "$bddir_state/gate-last.txt" "$bddir_state/dispatch.json"
+
+# (h) graceful degradation: gh unauthenticated ⇒ LOCAL-ONLY, still rendered, never hard-fail
+printf '#!/bin/sh\nexit 1\n' >"$bdbase/noxbin/gh"
+chmod +x "$bdbase/noxbin/gh"
+BDGH="$bdbase/gh-2"; mkdir -p "$BDGH"
+board PATH="$bdbase/noxbin:$PATH"
+expect "board rc 0: an unreachable gh is degraded, not fatal (nothing else needs the human)" "0" "$BOARD_RC"
+echo "$BOARD_OUT" | grep -qF "gh unavailable" && \
+  pass "board: the degraded render SAYS gh is unavailable" || fail "board degraded: $(head -3 <<<"$BOARD_OUT")"
+echo "$BOARD_OUT" | grep -qF "in-flight: none" && echo "$BOARD_OUT" | grep -qF "gate: never run" && \
+  pass "board: local facts (state, gate) still render when gh is down" || fail "board degraded locals: $BOARD_OUT"
+rm -f "$bdbase/noxbin/gh"
+
+# (i) corrupt dispatch state fails SOFT (the state file's own contract: history is lossy)
+BDGH="$bdbase/gh-3"; mkdir -p "$BDGH"
+printf 'not json at all\n' >"$bddir_state/dispatch.json"
+board
+expect "board rc 0: a corrupt dispatch.json degrades to no in-flight" "0" "$BOARD_RC"
+echo "$BOARD_OUT" | grep -qF "in-flight: none" && \
+  pass "board: the corrupt state reads as empty, not an error" || fail "board corrupt state: $BOARD_OUT"
+
+rm -f "$bddir_state/dispatch.json"
+rm -rf "$bdbase"
+kill "$BD_LIVE" 2>/dev/null || true
+wait "$BD_LIVE" 2>/dev/null || true
+
+# Teardown: the decoy branches belong to this section only.
+git -C "$work/project" push -q origin :feat/2-open :feat/2-parser 2>/dev/null || true
+git -C "$work/project" branch -q -D feat/2-open feat/2-parser 2>/dev/null || true
+
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
 MULTIPI_PLUGIN_DIR="$plugin" env -u MULTIPI_CHILD node --input-type=module -e '
 const pi = { registered: [], handlers: {}, commands: [], registerTool(t) { this.registered.push(t.name); }, registerCommand(n) { this.commands.push(n); }, on(ev, h) { this.handlers[ev] = h; } };
