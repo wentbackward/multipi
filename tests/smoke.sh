@@ -4196,10 +4196,14 @@ dispatch_entry() { # dispatch_entry KEY PID STARTED_AGO_MS [ROLE] — one entry 
   printf '{"%s":{"pid":%s,"role":"%s","worktree":"%s/wt-%s","startedAt":%s,"status":"running"}}\n' \
     "$1" "$2" "${4:-implementer}" "$bddir_state" "$1" "$(( $(date +%s%3N) - $3 ))"
 }
-dispatch_entry 88 "$BD_LIVE" $((10 * 3600 * 1000)) >"$bddir_state/dispatch.json"
+# Fabricate the over-bound child with slack (10h30m ago, not exactly 10h): this box's NTP
+# takes backwards steps (observed up to -891ms/60s), and a step inside the ~50ms window
+# between the fixture write and the board's own `now` capture sinks an exactly-10h age below
+# 10h, flaking the pin. 10h30m renders 10h2[0-9]m or 10h30m regardless of a sub-second step.
+dispatch_entry 88 "$BD_LIVE" $(( (10 * 3600 + 1800) * 1000 )) >"$bddir_state/dispatch.json"
 board MULTIPI_BOARD_CHILD_BOUND_MIN=60
 expect "board rc 2: an in-flight child past its bound" "2" "$BOARD_RC"
-echo "$BOARD_OUT" | grep -qE "in-flight: 1/2 implementers — #88 \(10h[0-1]m?, OVER BOUND\)" && \
+echo "$BOARD_OUT" | grep -qE "in-flight: 1/2 implementers — #88 \(10h(2[0-9]|30)m, OVER BOUND\)" && \
   pass "board: the over-bound child tags OVER BOUND (age + capacity from heavy.slots)" || \
   fail "board in-flight: $(grep -F in-flight <<<"$BOARD_OUT" || echo '<none>')"
 dispatch_entry 88 "$BD_LIVE" $((5 * 60 * 1000)) >"$bddir_state/dispatch.json"
