@@ -73,6 +73,11 @@ bootstrap another project, the **`devloop-setup` skill**.
   (`scripts/multipi-watch.sh --daemon`, auto-started by TUI sessions, single-instance
   pidfile, `MULTIPI_WATCH_TOOL_MS`/`MULTIPI_WATCH_NOW_MS` seams) wakes a tool in flight > 12 min
   or a heartbeat silent > 10 min — deduped to one wake per tool-seq and per 3600 s.
+  A blocked-ticket nudge (ticket #104, `MULTIPI_WATCH_BLOCKED_MS`, default 4h; malformed
+  ⇒ silent default) additionally wakes an open `dl/blocked` ticket past the age — at most
+  once per ticket per 24h, naming the ticket and its first question line, with explicit
+  "now resumable" wording when every `Depends on #k` is verifiably CLOSED — and skips
+  silently when gh is down.
   A session that vanished mid-tool was very likely OOM-killed: the rc 3 line says so and
   points at `journalctl --since <start> | grep oom-kill` (the confirmed root cause of the
   "No result provided" deaths). `scripts/multipi-board.sh` is the one-glance dashboard
@@ -139,6 +144,17 @@ is a seam; never introduce undocumented ones.
   the expected bound of an in-flight one-shot child (canonical decimal minutes,
   default 480, 0 = disabled) — past-bound children tag OVER BOUND and drive rc 2
   (DECISIONS.md 2026-11-20, #103).
+- `MULTIPI_WATCH_BLOCKED_MS` — blocked-ticket surfacing (ticket #104), NOT a child
+  seam: the `multipi-watch.sh` blocked-age nudge threshold (canonical decimal ms,
+  default 14400000 = 4h; malformed ⇒ silent default, like the other runtime
+  thresholds). An open `dl/blocked` ticket past the age is woken at most once per
+  ticket per 24h (ledger: the watch log): `BLOCKED (multipi-watch): #n has awaited a
+  human decision for <age> — "<question>". Resume or drop it.` — with "Its
+  dependencies are all closed — now resumable." when every `Depends on #k` is
+  verifiably CLOSED. Blocked age = the newest dl/blocked timeline label event,
+  else the issue's updatedAt (log-flagged `approx=1`, the documented
+  approximation). Skipped silently when gh is unavailable; the one-shot rc table
+  is untouched (DECISIONS.md 2026-11-20, #104).
 
 **Config keys (`.devloop.json`):** `"factory"` (`"collaborative"` | `"dark"`, default
 `"collaborative"` — a preset that only sets defaults; an explicit option always wins), the

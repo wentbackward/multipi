@@ -132,11 +132,26 @@ paste, not an RPC — if the session's terminal is detached/dead, rc 6 + printed
     scripts/multipi-status.sh; if dead, kill <pid> and resume in a fresh session (step 0).`
   - **dedupe:** at most one wake per `tool.seq` and per 3600 s wall (state in
     `lastWakeSeq` + watch log).
+  - **blocked-ticket nudge (ticket #104):** an open ticket labelled `dl/blocked` whose
+    blocked age is older than `MULTIPI_WATCH_BLOCKED_MS` (default 14400000 = 4h) → an
+    informational watch-log line AND (where a usable TTY exists) a wake:
+    `BLOCKED (multipi-watch): #<n> has awaited a human decision for <age> — "<question>".
+    Resume or drop it.` (when every `Depends on #k` on the ticket is verifiably CLOSED,
+    `Its dependencies are all closed — now resumable.` is inserted before the last
+    sentence). The blocked age is the `created_at` of the newest `dl/blocked` label event
+    on the issue's timeline (`gh api`); the fallback is the row's `updatedAt`, flagged
+    `approx=1` in the log (the documented approximation, never a silent guess). Its own
+    dedupe axis: at most one nudge per ticket per 24h, ledgered in the watch log
+    (`BLOCKED n=<n>` lines) — separate from the WAKE/WEDGE axes above. Runs only when the
+    check reached a valid sidecar; gh-down / list-failure skips silently, and the one-shot
+    rc table is untouched.
 - Clocks/thresholds overridable: `MULTIPI_WATCH_NOW_MS` (integer epoch-ms, same pattern as
-  `MULTIPI_APPROVE_NOW_MS`), `MULTIPI_WATCH_TOOL_MS`, `MULTIPI_STATUS_STALE_MS`,
+  `MULTIPI_APPROVE_NOW_MS`), `MULTIPI_WATCH_TOOL_MS`, `MULTIPI_WATCH_BLOCKED_MS`,
+  `MULTIPI_STATUS_STALE_MS`,
   `MULTIPI_INTERRUPT_TTY` — all documented seams. **Seam-validation posture (deliberate
   divergence, see DECISIONS.md):** the runtime THRESHOLD seams of the daemon
-  (`MULTIPI_WATCH_TOOL_MS`, `MULTIPI_STATUS_STALE_MS`) fall back SILENTLY to their safe
+  (`MULTIPI_WATCH_TOOL_MS`, `MULTIPI_STATUS_STALE_MS`, `MULTIPI_WATCH_BLOCKED_MS`) fall
+  back SILENTLY to their safe
   defaults on a malformed integer — a typo must degrade the safety net to its default,
   not kill it — whereas the ISSUING CLOCK `MULTIPI_WATCH_NOW_MS` is strict (rc 4):
   a wrong clock would silently skew every comparison it feeds.
@@ -169,7 +184,10 @@ paste, not an RPC — if the session's terminal is detached/dead, rc 6 + printed
   figures on the line and the oom-kill hint on rc 3's dead text); (b) interrupt dry-run + real injection into a
   `script -qec`-captured pty asserting the exact line landed; (c) watch one-shot: fabricated
   sidecars + `MULTIPI_WATCH_NOW_MS` → correct wake chosen / dedupe honoured / rc 0 no-op
-  when healthy; (d) `--daemon` single-instance (second launch exits 0 without doubling).
+  when healthy, plus the blocked-ticket nudge (an old `dl/blocked` ticket woken with the
+  exact line, a young one silent, the per-ticket 24h dedupe ledgered, `Depends on`
+  all-closed ⇒ the now-resumable wording, the timeline→`updatedAt` fallback flagged
+  `approx=1`, gh-down / list-failure skipped silently); (d) `--daemon` single-instance (second launch exits 0 without doubling).
 - `make check` green offline; shellcheck-clean; `tsc --noEmit` clean.
 
 ## 6. Rollout
