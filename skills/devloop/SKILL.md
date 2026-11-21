@@ -15,7 +15,12 @@ and act on them.
 
 1. Read `AGENTS.md`, the spec it names, `.devloop.json`, `docs/DECISIONS.md` and the repo's spec docs.
 2. `devloop_status` — in-flight children, open tickets with their `dl/` labels, capacity, last green
-   gate. Then `git worktree list` and `git fetch` for anything the state file misses.
+   gate. It RECONCILES as it runs: a child whose pid is dead is re-marked `crashed` (its slot frees
+   and a re-dispatch is allowed — a "refused: already running" after a lost report means the child
+   died unannounced), and children that reached a terminal state since your last status are listed
+   under "Late reports" with their report tail. Act on them in the same turn: `done` → dispatch the
+   reviewer; `crashed`/`interrupted` with a live worktree → re-dispatch. Then `git worktree list`
+   and `git fetch` for anything the state file misses.
 3. **Handoff:** if `HANDOFF.md` exists in the loop notes dir, read it — the loop was paused by the
    operator. Re-dispatch the listed interrupted children (same ticket -> same worktree; their
    committed and uncommitted work is intact) and continue the pipeline from the labels.
@@ -158,6 +163,11 @@ is done: mark its issues closed, summarise what shipped and where, and stop ONLY
   `scripts/multipi-board.sh` (pure-read; rc 1 = a `dl/blocked` ticket waits on their decision,
   rc 2 = a red last gate or an over-bound child — the blocked ticket renders first, with its
   question).
+- **Lost reports reconcile; they do not wait:** a dispatch that hits its bound resolves with the
+  child STILL RUNNING. Do not poll `dispatch.json` by hand — the child's fate arrives on the next
+  `devloop_status` (dead pid → `crashed` with `endedAt`; a finished child is listed under
+  "Late reports" with its report tail), and the stop-gate refuses to settle while a delivered
+  branch still awaits its reviewer.
 - `devloop_cancel {ticket}` kills one child (its worktree and branch are kept; a re-dispatch resumes).
   Ctrl+C kills everything — after it, recover via step 0.
 - **Pausing:** when the user asks to pause, stop, or checkpoint the loop, call `devloop_pause`:
