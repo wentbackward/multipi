@@ -18,6 +18,7 @@ import { mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { makeFixture } from "../fixtures.ts";
 import { loadConfig, parseReviewBlock, DEFAULT_MAX_FOLLOWUP_DEPTH } from "../../extension/src/config.ts";
+import { createIssue } from "../../extension/src/issues.ts";
 import {
 	countShouldFixRounds,
 	acceptTailDue,
@@ -52,7 +53,14 @@ test("countShouldFixRounds: one round per marked comment, in any position in the
 test("countShouldFixRounds: the marker must open the first non-empty line, never appear mid-comment", () => {
 	assert.equal(countShouldFixRounds([`found it: ${SHOULD_FIX_FOLLOWUP_MARKER} mentioned inline`]), 0, "inline mention is not a round");
 	assert.equal(countShouldFixRounds([`\n\n${SHOULD_FIX_FOLLOWUP_MARKER}: late round`]), 1, "leading blank lines do not hide a marked comment");
-	assert.equal(countShouldFixRounds([`${SHOULD_FIX_FOLLOWUP_MARKER} appears again in line two\n${SHOULD_FIX_FOLLOWUP_MARKER}: no`]), 1, "one marked comment counts once, not per occurrence");
+	assert.equal(countShouldFixRounds([`${SHOULD_FIX_FOLLOWUP_MARKER}: appears again in line two\n${SHOULD_FIX_FOLLOWUP_MARKER}: no`]), 1, "one marked comment counts once, not per occurrence");
+});
+
+test("countShouldFixRounds: the marker needs a boundary (colon or end-of-line) — prose that merely starts with it is not a round", () => {
+	assert.equal(countShouldFixRounds([`${SHOULD_FIX_FOLLOWUP_MARKER}s are welcome`]), 0, "pluralised prose is a discussion, not a re-dispatch");
+	assert.equal(countShouldFixRounds([`${SHOULD_FIX_FOLLOWUP_MARKER}: round one`]), 1, "marker + colon is a round");
+	assert.equal(countShouldFixRounds([SHOULD_FIX_FOLLOWUP_MARKER]), 1, "the lone marker at end-of-line is a round");
+	assert.equal(countShouldFixRounds([`${SHOULD_FIX_FOLLOWUP_MARKER}, see the notes`]), 0, "a comma is not a boundary");
 });
 
 test("countShouldFixRounds: must-fix and gate/review chatter never count (correctness is not budgeted)", () => {
@@ -193,6 +201,36 @@ test("fake-gh: issue view returns ONE comments-array entry per message, oldest f
 
 const FINDINGS = "rename the hot path\nassert the eviction order";
 
+// ---------------------------------------------------------------------------
+// review round 2, must-fix 1: createIssue must speak the REAL CLI's flag form.
+// Positional `gh issue create <title> <body>` is rejected by the real gh
+// ("unknown arguments") — the fake historically modelled the positional form
+// and masked it; the calls.log pin below ties the extension to the flag form.
+// ---------------------------------------------------------------------------
+
+import { readFileSync } from "node:fs";
+
+test("createIssue calls gh with --title/--body (the real CLI's contract), not positionally", () => {
+	const fx = tailFx('{"base_branch":"main"}');
+	try {
+		const n = createIssue("", "Flag-form ticket", "line one\nline two");
+		assert.ok(Number.isInteger(n) && n > 0, "returns the new issue number");
+
+		const log = readFileSync(path.join(process.env.FAKE_GH_DIR!, "calls.log"), "utf8");
+		// A multi-line body makes the calls.log entry span lines: slice from the (last) create
+		// verb to the end of the log rather than line-splitting.
+		assert.ok(log.includes("issue create"), "the create call was recorded by the fake");
+		const call = log.slice(log.lastIndexOf("issue create"));
+		assert.match(call, /^issue create --title Flag-form ticket --body line one\nline two\n$/,
+			`the real CLI speaks flags, never positionals (calls.log said: ${JSON.stringify(call)})`);
+
+		// the flag-form issue round-trips: title on line 1, the multi-line body intact
+		const row = openRows(fx, "number,title,body").find((i) => i.number === n)!;
+		assert.equal(row.title, "Flag-form ticket");
+		assert.equal(row.body, "line one\nline two");
+	} finally { fx.cleanup(); }
+});
+
 test("at the cap (default 2), acceptTail CREATES the area backlog, parks the findings and approves the ticket", () => {
 	const fx = tailFx('{"base_branch":"main"}');
 	try {
@@ -215,7 +253,11 @@ test("at the cap (default 2), acceptTail CREATES the area backlog, parks the fin
 		assert.ok(mine.labels.some((l) => l.name === "dl/approved"), "the original ticket is dl/approved — gate-ready");
 
 		const withBody = openRows(fx, "number,title,body").find((i) => i.number === backlog!.number)!;
-		assert.ok(withBody.body!.includes("rename the hot path") && withBody.body!.includes("assert the eviction order"), "the findings land verbatim");
+		assert.equal(
+			withBody.body!,
+			`#${n}\n${FINDINGS}`,
+			"the parked entry is byte-stable: source ticket, a newline, the findings — NO wall-clock date (determinism pin, review round 2)",
+		);
 		assert.ok(withBody.body!.includes(`#${n}`), "the parked entry names its source ticket");
 
 		const bodies = commentBodies(fx, n);
@@ -296,6 +338,56 @@ test("acceptTail honours an explicit review.max_followup_depth (cap 1 trips afte
 		const res = acceptTail({ root: fx.repo, repo: "", ticket: n, area: "cache", findings: FINDINGS });
 		assert.equal(res.action, "accepted");
 		assert.equal(res.cap, 1);
+	} finally { fx.cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
+// review round 2, should-fix (a): idempotency across a partial failure — a
+// re-run must never double-park, double-verb or double-label.
+// ---------------------------------------------------------------------------
+
+test("a re-run with the SAME findings parks ONCE: no duplicate entry, one verdict, one label", () => {
+	const fx = tailFx('{"base_branch":"main"}');
+	try {
+		const n = createTicket(fx, "Cache layer");
+		roundComment(fx, n, 1);
+		roundComment(fx, n, 2);
+		const first = acceptTail({ root: fx.repo, repo: "", ticket: n, area: "cache", findings: FINDINGS });
+		assert.equal(first.action, "accepted");
+
+		const second = acceptTail({ root: fx.repo, repo: "", ticket: n, area: "cache", findings: FINDINGS });
+		assert.equal(second.action, "accepted", "a re-run is still an acceptance, not an error");
+		assert.equal(second.backlogNumber, first.backlogNumber, "the same backlog ticket");
+		assert.equal(second.backlogAction, "unchanged", "nothing was parked twice");
+
+		const entries = commentBodies(fx, first.backlogNumber!).filter((b) => b.includes("rename the hot path"));
+		assert.equal(entries.length, 0, "the findings stayed in the backlog BODY; the re-run appended nothing");
+		const verdicts = commentBodies(fx, n).filter((b) => b.startsWith("accept-tail"));
+		assert.equal(verdicts.length, 1, "exactly one verdict comment, not one per run");
+		const mine = openRows(fx, "number,title,labels").find((i) => i.number === n)!;
+		assert.equal(mine.labels.filter((l) => l.name === "dl/approved").length, 1, "the label is applied once");
+	} finally { fx.cleanup(); }
+});
+
+test("a re-run after a PARTIAL failure (parked, verdict never posted) heals without re-parking", () => {
+	const fx = tailFx('{"base_branch":"main"}');
+	try {
+		const n = createTicket(fx, "Cache layer");
+		roundComment(fx, n, 1);
+		roundComment(fx, n, 2);
+		// Simulate the crash BETWEEN parking and the verdict: the backlog exists with the
+		// entry parked as its first (comment) entry, but the ticket carries no verdict.
+		const b = Number(gh(fx, ["issue", "create", "Polish backlog — cache", ""]).trim().split("/").pop());
+		gh(fx, ["issue", "comment", String(b), "--body", `#${n}\n${FINDINGS}`]);
+
+		const res = acceptTail({ root: fx.repo, repo: "", ticket: n, area: "cache", findings: FINDINGS });
+		assert.equal(res.action, "accepted");
+		assert.equal(res.backlogNumber, b);
+		assert.equal(res.backlogAction, "unchanged", "the already-parked entry is not appended a second time");
+		assert.equal(commentBodies(fx, b).filter((c) => c === `#${n}\n${FINDINGS}`).length, 1, "the entry occurs exactly once");
+		assert.equal(commentBodies(fx, n).filter((c) => c.startsWith("accept-tail")).length, 1, "the missing verdict is posted exactly once");
+		const mine = openRows(fx, "number,title,labels").find((i) => i.number === n)!;
+		assert.ok(mine.labels.some((l) => l.name === "dl/approved"), "the ticket still lands dl/approved");
 	} finally { fx.cleanup(); }
 });
 
