@@ -766,6 +766,11 @@ else
   expect "polish-tail with no args is a usage error" "2" "$rc"
   echo "$out" | grep -qF "usage: polish-tail.sh" && pass "the usage line is printed" ||
     fail "no usage line: $out"
+  # Close the section's tickets: later sections count the OPEN issues (the worktree-cleanup
+  # board expects exactly its own four), so this section must leave the tracker as it found it.
+  gh issue close "$pt_n" >/dev/null
+  gh issue close "$pt_backlog" >/dev/null
+  gh issue close "$pt_n2" >/dev/null
 fi
 
 # --- merge-train.sh -----------------------------------------------------------
