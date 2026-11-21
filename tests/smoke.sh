@@ -4811,6 +4811,78 @@ wait "$BD_LIVE" 2>/dev/null || true
 git -C "$work/project" push -q origin :feat/2-open :feat/2-parser 2>/dev/null || true
 git -C "$work/project" branch -q -D feat/2-open feat/2-parser 2>/dev/null || true
 
+# --- the unified operator entry point (ticket #109: scripts/multipi) -------------
+# The dispatcher is PURE: every subcommand EXECs the sibling script and passes its rc
+# through, so these pins run it against a FAKE scripts/ dir — stub siblings print their
+# own name and argv, then exit DV_STUB_RC. That proves exec-target, arg-forwarding and
+# rc-passthrough for all five mappings without running the real scripts (their own pins
+# stand untouched elsewhere in this suite).
+DISP_FIX="$work/disp"
+mkdir -p "$DISP_FIX"
+for dl_stub in multipi-status.sh multipi-board.sh multipi-interrupt.sh multipi-watch.sh doctor.sh; do
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'echo "STUB=$(basename "$0" .sh) argc=$#"'
+    echo 'printf "ARG=%s\n" "$@"'
+    echo 'exit "${DV_STUB_RC:-0}"'
+  } >"$DISP_FIX/$dl_stub"
+done
+
+# Each subcommand execs its own script and passes the rc through (distinct non-zero
+# values keep a swapped mapping red in both directions).
+for dl_pair in status:7 board:8 interrupt:11 watch:13 doctor:17; do
+  dl_sub=${dl_pair%%:*}
+  dl_rc=${dl_pair##*:}
+  dl_out=$(env DV_STUB_RC="$dl_rc" bash "$DISP_FIX/multipi" "$dl_sub" 2>&1); dl_r=$?
+  expect "multipi $dl_sub: passes the underlying script's rc through" "$dl_rc" "$dl_r"
+  expect "multipi $dl_sub: execs the right sibling with no extra args" "STUB=$dl_sub argc=0" "$(head -n 1 <<<"$dl_out")"
+done
+
+# Argument forwarding: what follows the subcommand reaches the script verbatim.
+dl_out=$(bash "$DISP_FIX/multipi" interrupt --dry-run "hello world" 2>&1); dl_r=$?
+expect "multipi interrupt: forwards its args verbatim (rc 0)" "0" "$dl_r"
+expect "multipi interrupt: argv intact" "$(printf 'STUB=interrupt argc=2\nARG=--dry-run\nARG=hello world')" "$dl_out"
+dl_out=$(bash "$DISP_FIX/multipi" watch --daemon --interval 5 2>&1); dl_r=$?
+expect "multipi watch: forwards its flags verbatim (rc 0)" "0" "$dl_r"
+expect "multipi watch: argv intact" "$(printf 'STUB=watch argc=3\nARG=--daemon\nARG=--interval\nARG=5')" "$dl_out"
+
+# Zero-arg default: the board when present, the status when not (the ticket's
+# recommendation — DECISIONS.md 2026-11-21, #109).
+dl_out=$(bash "$DISP_FIX/multipi" 2>&1); dl_r=$?
+expect "bare multipi: defaults to the board (rc 0)" "0" "$dl_r"
+expect "bare multipi: the board is what runs" "STUB=board argc=0" "$(head -n 1 <<<"$dl_out")"
+rm -f "$DISP_FIX/multipi-board.sh"
+dl_out=$(bash "$DISP_FIX/multipi" 2>&1); dl_r=$?
+expect "bare multipi: falls back to status when the board is absent (rc 0)" "0" "$dl_r"
+expect "bare multipi: the fallback runs status" "STUB=status argc=0" "$(head -n 1 <<<"$dl_out")"
+
+# Bad usage is the dispatcher's own error (rc 2 + a usage line on the offender).
+dl_out=$(bash "$DISP_FIX/multipi" bogus 2>&1); dl_r=$?
+expect "multipi bogus: unknown subcommand is dispatcher usage error rc 2" "2" "$dl_r"
+echo "$dl_out" | grep -qF "unknown subcommand" && pass "multipi bogus: names the offence" || fail "multipi bogus: no offence line: $dl_out"
+
+# The help: every sibling named, each with its rc contract — the discoverability win.
+dl_out=$(bash "$DISP_FIX/multipi" help 2>&1); dl_r=$?
+expect "multipi help: exits 0" "0" "$dl_r"
+dl_helpok=1
+for dl_tok in multipi-status.sh multipi-board.sh multipi-interrupt.sh multipi-watch.sh doctor.sh "rc 0"; do
+  echo "$dl_out" | grep -qF "$dl_tok" || { dl_helpok=0; echo "help missing: $dl_tok"; }
+done
+[ "$dl_helpok" -eq 1 ] && pass "multipi help: names all five scripts and their rc contracts" || fail "multipi help: incomplete (see 'help missing' above)"
+
+# The SHIPPED dispatcher (not just the fixture): help exits 0, usage error exits 2.
+dl_out=$(bash "$plugin/scripts/multipi" help 2>&1); dl_r=$?
+expect "real multipi: help exits 0" "0" "$dl_r"
+dl_out=$(bash "$plugin/scripts/multipi" nope 2>&1); dl_r=$?
+expect "real multipi: unknown subcommand is rc 2" "2" "$dl_r"
+
+# install.sh lays the dispatcher down on the same path surface as the other scripts.
+DISP_INST="$work/dispinstall"
+git init -q "$DISP_INST"
+bash "$plugin/scripts/install.sh" "$DISP_INST" >/dev/null 2>&1
+[ -x "$DISP_INST/scripts/multipi" ] && pass "install: scripts/multipi is installed and executable" || fail "install: scripts/multipi missing or not executable"
+cmp -s "$plugin/scripts/multipi" "$DISP_INST/scripts/multipi" && pass "install: the dispatcher is a faithful copy" || fail "install: the dispatcher copy differs"
+
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
 MULTIPI_PLUGIN_DIR="$plugin" env -u MULTIPI_CHILD node --input-type=module -e '
 const pi = { registered: [], handlers: {}, commands: [], registerTool(t) { this.registered.push(t.name); }, registerCommand(n) { this.commands.push(n); }, on(ev, h) { this.handlers[ev] = h; } };
