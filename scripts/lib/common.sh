@@ -235,6 +235,30 @@ dl_note_file() {
   printf '%s/pr-%s.md\n' "$(dl_notes_dir)" "${1//\//_}"
 }
 
+# dl_blocked_question TEXT -> the blocking-question line of an implementer's BLOCKED
+# report: the first non-empty line of the "## Questions" section, else the
+# "STATUS: BLOCKED — reason" line, else the first line ending in "?", else
+# '(no question found in issue)'. Shared by the operator surfaces (multipi-board.sh's
+# "└─ Q:" line, multipi-watch.sh's blocked-nudge, ticket #104) — one implementation,
+# no drift.
+dl_blocked_question() {
+  local q
+  q=$(printf '%s\n' "$1" | awk '
+    /^## Questions[[:space:]]*$/ {f = 1; next}
+    f {sub(/^[[:space:]]+/, ""); if (length($0) > 0) {print; exit}}')
+  [ -n "$q" ] && { printf '%s' "$q"; return 0; }
+  q=$(printf '%s\n' "$1" | grep -m1 -E '^STATUS:[[:space:]]*BLOCKED' || true)
+  if [ -n "$q" ]; then
+    printf '%s\n' "$q" \
+      | sed -E 's/^STATUS:[[:space:]]*BLOCKED[[:space:]]*[-—–][[:space:]]*//' \
+      | sed -E 's/^STATUS:[[:space:]]*BLOCKED[[:space:]]*//'
+    return 0
+  fi
+  q=$(printf '%s\n' "$1" | grep -m1 -E '\?[[:space:]]*$' || true)
+  [ -n "$q" ] && { printf '%s' "$q"; return 0; }
+  printf '(no question found in issue)'
+}
+
 # dl_train_file: where gate-train.sh records the last green train (branch, source head, gated head).
 dl_train_file() {
   printf '%s/train-green.txt\n' "$DL_STATE"
