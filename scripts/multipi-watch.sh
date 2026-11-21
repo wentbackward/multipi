@@ -13,8 +13,32 @@
 #   When BOTH fire, the WEDGE (the stronger wake) is chosen.
 #   DEDUPE: at most one wake per tool.seq (sidecar's lastWakeSeq watermark — raised after a
 #   WAKE) AND at most one wake per 3600 s of wall clock (timestamps in the watch log).
+#   • Blocked-ticket nudge (ticket #104): an open ticket labelled dl/blocked whose blocked
+#     age is older than MULTIPI_WATCH_BLOCKED_MS (default 14400000 = 4h) → an informational
+#     line in the watch log AND (where a usable TTY exists) a wake:
+#     BLOCKED (multipi-watch): #<n> has awaited a human decision for <age> — "<question>".
+#     Resume or drop it.   (When every "Depends on #k" on the ticket is verifiably CLOSED,
+#     "Its dependencies are all closed — now resumable." is inserted before the last
+#     sentence.) Blocked age = the created_at of the newest dl/blocked label event on the
+#     issue's timeline (gh api --paginate --slurp — the newest event can sit past the
+#     first page of a chatty ticket; slurped into one array, the max() survives);
+#     the fallback is the issue-list row's updatedAt (the log
+#     flags it approx=1 — the documented approximation, never a silent guess). The resumable
+#     claim is refused when more than 10 distinct dependencies are referenced (an
+#     unverifiable list must never earn the claim). This is a
+#     SEPARATE dedupe axis: at most one nudge per ticket per 24h, ledgered in the watch log
+#     (`BLOCKED n=<n>` lines — the same pattern as lastWakeSeq); it does not count as a
+#     WAKE/WEDGE for the 3600 s wall axis. The TRACKER PROBE itself (gh auth + issue list
+#     + the per-ticket calls) is throttled to at most one per 15 min, ledgered by
+#     `BL-PROBE` stamps in the watch log — a 60 s daemon tick must not burn API calls every
+#     tick; a due wake defers at most one 15-min period (far inside the 24h window — the
+#     wake owns the cadence, the throttle only bounds probing). It runs only when the check
+#     reached a valid
+#     sidecar (rc 0/6), and skips silently when gh is unavailable or a tracker call fails —
+#     it never fails the check and never changes the rc table. Log tokens: BLOCKED /
+#     BLOCKED-SKIP / BLOCKED-NO-TTY / BLOCKED-NO-AGE / BL-PROBE / BL-THROTTLED.
 #   Every check appends one line to <state>/watch.log: "<now-ms> <HEALTHY|WAKE|WEDGE|
-#   SUPPRESSED:<reason>|IDLE:<reason>|NOTTY|BUMP-FAILED>". BUMP-FAILED: a WAKE was due and
+#   SUPPRESSED:<reason>|IDLE:<reason>|NOTTY|BUMP-FAILED|BLOCKED…|BL-PROBE|BL-THROTTLED"]. BUMP-FAILED: a WAKE was due and
 #   injected but its lastWakeSeq bump failed (e.g. no python3) — the 3600 s wall axis caps
 #   the damage, the log surfaces the lost seq axis.
 #
@@ -35,6 +59,9 @@
 #
 # Documented seams:
 #   MULTIPI_WATCH_TOOL_MS     integer ms; the tool-in-flight wake threshold (default 720000)
+#   MULTIPI_WATCH_BLOCKED_MS  integer ms; the blocked-ticket nudge threshold (default
+#                             14400000 = 4h; malformed ⇒ silent default, the same posture as
+#                             the other runtime thresholds)
 #   MULTIPI_STATUS_STALE_MS   integer ms; the stale bound (default 120000; wedge = 5×)
 #   MULTIPI_WATCH_NOW_MS      integer epoch-ms (canonical decimal — a leading zero is
 #                             refused, never read as octal); the issuing clock (same pattern as
@@ -48,6 +75,12 @@ scripts_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$scripts_dir/lib/liveness.sh"
 
 WAKE_DEDUPE_WALL_MS=3600000
+BLOCKED_DEDUPE_WALL_MS=86400000   # one blocked-nudge per ticket per 24h (ledger: watch.log)
+# Tracker-probe throttle (ticket #104 gate revision): internal cost constant, NOT an
+# operator seam (like the two dedupe walls above) — the smoke's seam-hygiene pin keys off
+# the documented MULTIPI_* set, and the cadence is a property of the probe, not of the
+# operator. A due wake defers at most one period: 15 min is far inside the 24h window.
+BLOCKED_PROBE_THROTTLE_MS=900000
 
 die_usage() {
   echo "usage: scripts/multipi-watch.sh [--daemon] [--interval SECS]" >&2
@@ -81,6 +114,7 @@ dl_load_config
 [ -n "${DL_ROOT:-}" ] || { echo "multipi-watch: not inside a git repository" >&2; exit 4; }
 tool_bound=$(int_or "${MULTIPI_WATCH_TOOL_MS:-}" 720000)
 stale=$(int_or "${MULTIPI_STATUS_STALE_MS:-}" 120000)
+blocked_bound=$(int_or "${MULTIPI_WATCH_BLOCKED_MS:-}" 14400000)
 log="$DL_STATE/watch.log"
 mkdir -p "$DL_STATE" 2>/dev/null || true
 lv_now() {
@@ -104,7 +138,173 @@ lv_now() {
 # scopes its own). The message is $2, never $*: $* would re-expand the timestamp too.
 wlog() { printf '%s %s\n' "$1" "$2" >>"$log" 2>/dev/null || true; }
 
-one_shot() {
+iso_to_ms() { # ISO8601 (UTC) -> epoch ms (prints nothing and returns 1 when unparseable)
+  local ms
+  ms=$(date -d "$1" +%s%3N 2>/dev/null) || return 1
+  case "$ms" in '' | *[!0-9]*) return 1 ;; *) printf '%s' "$ms"; return 0 ;; esac
+}
+
+# tl_blocked_iso TIMELINE_JSON -> the created_at of the NEWEST dl/blocked label event
+# ("" when none / unparseable). jq first, python3 second — the common.sh dependency rule.
+tl_blocked_iso() {
+  local js=$1
+  if dl_have_jq; then
+    jq -r '[ .[] | select(.event? == "labeled" and ((.label.name? // "") == "dl/blocked")) | .created_at ] | max // empty' <<<"$js" 2>/dev/null || true
+  else
+    python3 -I -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+xs = [e.get("created_at") for e in data
+      if isinstance(e, dict) and e.get("event") == "labeled"
+      and isinstance(e.get("label"), dict) and e["label"].get("name") == "dl/blocked"]
+xs = [x for x in xs if isinstance(x, str)]
+if xs:
+    print(max(xs))
+' <<<"$js" 2>/dev/null || true
+  fi
+}
+
+# deps_from_text < TEXT -> the dependency numbers of the FIRST reference cluster after
+# each "Depends on" marker (deduped, one per line, order preserved). The cluster is the
+# run of "#<n>" refs immediately following the marker — separated by whitespace or
+# commas only; the first non-ref token (a paren, prose, a sentence break) ends it, so
+# "Depends on #2 (see #3 for the related note)" yields #2 ALONE: a parenthetical mention
+# is context, not a dependency, and claiming it risks the false "now resumable". The
+# consumer decides what the list earns: with MORE THAN 10 distinct dependencies the
+# resumable claim must be refused (an unverifiable list — see bl_check).
+deps_from_text() {
+  awk '
+    tolower($0) ~ /depends on/ {
+      s = substr($0, index(tolower($0), "depends on") + 10)
+      for (;;) {
+        if (match(s, /^[[:space:],]+/)) { s = substr(s, RSTART + RLENGTH); continue }
+        if (match(s, /^#[0-9]+/)) {
+          print substr(s, 2, RLENGTH - 1)
+          s = substr(s, RSTART + RLENGTH)
+          continue
+        }
+        break
+      }
+    }' | awk '!seen[$0]++'
+}
+
+bl_check() {
+  # The blocked-ticket nudge (ticket #104). Called by one_shot ONLY after the core check
+  # reached a valid sidecar (rc 0 or 6): the nudge is delivered into the live session's
+  # TTY, and there is no delivery target (nor a session to own the rc) otherwise. Every
+  # failure mode — no gh, auth failure, list failure, unreadable timestamps — degrades to
+  # a silent skip: the nudge must never fail the check, never change the one-shot rc,
+  # and never kill the daemon. Its own dedupe (per ticket per 24h, ledger: watch.log)
+  # is independent of the WAKE/WEDGE dedupe axes.
+  local now sc pid lastprobe
+  now=$(lv_now) || return 0
+  sc=$(lv_sidecar)
+  [ -f "$sc" ] && lv_valid "$sc" || return 0
+  pid=$(lv_num "$sc" pid)
+  # Probe throttle (ticket #104 gate revision): the tracker probe (gh auth + issue list
+  # + the per-ticket calls) costs API calls, so it runs at most once per
+  # BLOCKED_PROBE_THROTTLE_MS, ledgered by `BL-PROBE` stamps in the watch log —
+  # independent of the 24h per-ticket wake dedupe, and it short-circuits BEFORE that
+  # dedupe (a throttled tick makes ZERO tracker calls and logs nothing per-ticket). The
+  # stamp lands BEFORE the gh calls: an outage burns at most one probe's cost per
+  # period. A due wake defers at most one 15-min period — far inside the 24h window;
+  # the wake owns the cadence, the throttle only bounds probing.
+  lastprobe=$(lv_last_probe_ts "$log")
+  if [ "$lastprobe" -gt 0 ] && [ $((now - lastprobe)) -lt "$BLOCKED_PROBE_THROTTLE_MS" ]; then
+    wlog "$now" "BL-THROTTLED"
+    return 0
+  fi
+  wlog "$now" "BL-PROBE"
+  command -v gh >/dev/null 2>&1 || return 0
+  gh auth status >/dev/null 2>&1 || return 0
+  local rows
+  rows=$(gh issue list --state open --label dl/blocked --json number,title,labels,body,updatedAt --limit 500 2>/dev/null) || return 0
+  local ncount i num labs body upd tl iso approx t age last cview cc ctext q st deps ndeps d resumed=0 msg
+  ncount=$(( $(printf '%s\n' "$rows" | grep -oE '"number"[[:space:]]*:' | wc -l) ))
+  i=0
+  while [ "$i" -lt "$ncount" ]; do
+    num=$(json_get "$i.number" <<<"$rows")
+    case "$num" in '' | *[!0-9]*) break ;; esac
+    labs=$(json_get "$i.labels" <<<"$rows" \
+      | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+      | sed -E 's/^"name"[[:space:]]*:[[:space:]]*"//; s/"$//' | tr '\n' ' ')
+    # Client-side label re-check: the real gh honours --label, the stand-in does not.
+    case " $labs " in
+      *" dl/blocked "*) : ;;
+      *) i=$((i + 1)); continue ;;
+    esac
+    body=$(json_get "$i.body" <<<"$rows")
+    upd=$(json_get "$i.updatedAt" <<<"$rows")
+    # The blocked start: the newest dl/blocked label event on the timeline (preferred);
+    # the row's updatedAt is the DOCUMENTED approximation (approx=1 in the log line).
+    # --paginate --slurp: on a chatty ticket the newest dl/blocked event can sit past
+    # the first page; slurped, the concatenated pages are ONE JSON array, so
+    # tl_blocked_iso's max() survives the page boundary.
+    iso=""; approx=0
+    if [ -n "${GH_REPO:-}" ]; then
+      tl=$(gh api --paginate --slurp "repos/$GH_REPO/issues/$num/timeline" 2>/dev/null || true)
+      iso=$(tl_blocked_iso "$tl")
+    fi
+    if [ -z "$iso" ]; then iso=$upd; approx=1; fi
+    t=$(iso_to_ms "$iso") || { wlog "$now" "BLOCKED-NO-AGE n=$num"; i=$((i + 1)); continue; }
+    age=$((now - t)); [ "$age" -lt 0 ] && age=0
+    [ "$age" -gt "$blocked_bound" ] || { i=$((i + 1)); continue; }
+    last=$(lv_last_blocked_ts "$log" "$num")
+    if [ "$last" -gt 0 ] && [ $((now - last)) -lt "$BLOCKED_DEDUPE_WALL_MS" ]; then
+      wlog "$now" "BLOCKED-SKIP n=$num"
+      i=$((i + 1)); continue
+    fi
+    # The question (newest comment supersedes the body — the board's same rule) and the
+    # resumable claim (every Depends-on verifiably CLOSED; unverifiable ⇒ never claimed).
+    cview=$(gh issue view "$num" --json comments 2>/dev/null || true)
+    cc=$(( $(printf '%s\n' "$cview" | grep -oE '"body"[[:space:]]*:' | wc -l) ))
+    ctext=""
+    [ "$cc" -gt 0 ] && ctext=$(json_get "comments.$((cc - 1)).body" <<<"$cview")
+    q=$(dl_blocked_question "${ctext:-$body}")
+    resumed=0
+    deps=$({ printf '%s\n' "$ctext"; printf '%s\n' "$body"; } | deps_from_text)
+    if [ -n "$deps" ]; then
+      # Refuse-to-claim (ticket #104 gate revision): MORE THAN 10 distinct dependencies
+      # cannot all be verified — claiming "now resumable" from a truncated list would be
+      # the dangerous false claim, so the scan refuses (plain line, resumed=0). Exactly
+      # 10 stays fully verifiable: the claim is allowed. Above the cap no per-dep state
+      # call is spent (the claim is foregone; the calls would only burn quota).
+      ndeps=$(printf '%s\n' "$deps" | wc -l)
+      if [ "$ndeps" -le 10 ]; then
+        resumed=1
+        for d in $deps; do
+          st=$(gh issue view "$d" --json state 2>/dev/null | json_get state)
+          [ "$st" = CLOSED ] || { resumed=0; break; }
+        done
+      fi
+    fi
+    msg="BLOCKED (multipi-watch): #$num has awaited a human decision for $(lv_human_dur "$age") — \"$q\"."
+    [ "$resumed" = 1 ] && msg="$msg Its dependencies are all closed — now resumable."
+    msg="$msg Resume or drop it."
+    lv_inject_target "$pid"
+    # The nudge APPENDS to its target: byte-identical to a truncate-write on a real TTY,
+    # and on a file sink (the tests' seam target) one line per nudge accumulates, so the
+    # injection count is observable. A target path that does not exist is a NO-USABLE-TTY
+    # condition (a detached terminal by another name): log-only, and the 24h window does
+    # NOT start — the nudge is retried the next tick a target returns.
+    if [ -n "$LV_TARGET" ] && [ -e "$LV_TARGET" ] && printf '%s\n' "$msg" >>"$LV_TARGET" 2>/dev/null; then
+      wlog "$now" "BLOCKED n=$num age=$age resumed=$resumed approx=$approx"
+      echo "watch: injected BLOCKED n=$num to ${LV_TARGET} (pid ${pid})"
+    else
+      # No usable TTY (a detached terminal): the informational log line still lands; the
+      # dedupe window does NOT start — the nudge is retried the next tick a TTY returns.
+      wlog "$now" "BLOCKED-NO-TTY n=$num"
+      echo "watch: BLOCKED n=$num is due but no usable TTY (log only)"
+    fi
+    i=$((i + 1))
+  done
+  return 0
+}
+
+core_check() {
   local now sc state pid tick ev hb toolseq toolname toolstart lastwakeseq
   local wedge_age tool_age kind min_n msg lw
   now=$(lv_now) || return 4
@@ -191,6 +391,18 @@ one_shot() {
   fi
   echo "watch: injected ${kind} to ${LV_TARGET} (pid ${pid})"
   return 0
+}
+
+one_shot() {
+  # The pinned one-shot contract (rc 0/4/5/6) is core_check's. When the check reached a
+  # live sidecar (rc 0 or 6), the blocked-ticket nudge (ticket #104) then runs: an
+  # independent, self-deduped informational check that never changes the returned rc.
+  local rc=0
+  core_check || rc=$?
+  case "$rc" in
+    0 | 6) bl_check ;;
+  esac
+  return "$rc"
 }
 
 if [ "$daemon" = 1 ]; then
