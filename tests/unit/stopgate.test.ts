@@ -101,6 +101,48 @@ test("countStartable counts unblocked issues whose deps are all closed", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Late-report loop drive (ticket #121): a child that delivered a branch (done)
+// with no reviewer dispatched is work-to-do — the stop-gate must not settle.
+// ---------------------------------------------------------------------------
+
+test("pending review: a delivered branch awaiting the reviewer blocks settlement (unbounded, no counter bump)", () => {
+	const d = evaluateStopGate({ ...base, pendingReviews: [103] });
+	assert.equal(d.action, "block");
+	assert.equal(d.bumpCounter, false, "loop drive is unbounded — the harness invariant, not a bounded block");
+	assert.match(d.message, /#103/);
+	assert.match(d.message, /reviewer/i);
+	// even at an absurd block count the drive stands (unbounded)
+	const d2 = evaluateStopGate({ ...base, pendingReviews: [103], currentBlocks: 999 });
+	assert.equal(d2.action, "block");
+});
+
+test("pending review: absent or empty pendingReviews leaves the existing decisions byte-identical", () => {
+	assert.equal(evaluateStopGate(base).action, "pass");
+	assert.equal(evaluateStopGate({ ...base, pendingReviews: [] }).action, "pass");
+	const solo = evaluateStopGate({ ...base, issues: [{ number: 7, blocked: false, deps: [] }] });
+	const withEmpty = evaluateStopGate({ ...base, issues: [{ number: 7, blocked: false, deps: [] }], pendingReviews: [] });
+	assert.equal(solo.action, "block");
+	assert.equal((solo as { message: string }).message, (withEmpty as { message: string }).message, "the startable clause alone is unchanged when there is no pending review");
+});
+
+test("pending review: startable tickets AND pending reviews both drive, each named once", () => {
+	const d = evaluateStopGate({ ...base, issues: [{ number: 7, blocked: false, deps: [] }], pendingReviews: [9, 10] });
+	assert.equal(d.action, "block");
+	assert.match(d.message, /startable/i);
+	assert.match(d.message, /#9/);
+	assert.match(d.message, /#10/);
+	assert.match(d.message, /reviewer/i);
+});
+
+test("pending review: red fast check and dirty tree outrank the loop drive (priority ordering)", () => {
+	const red = evaluateStopGate({ ...base, fastCheckPassed: false, fastCheckTail: "lint exploded", pendingReviews: [9] });
+	assert.equal(red.action, "block");
+	assert.equal(red.bumpCounter, true);
+	assert.match(red.message, /lint exploded/);
+	assert.ok(!red.message.includes("#9"), "the fast-check message is not diluted by the drive clause");
+});
+
+// ---------------------------------------------------------------------------
 // Startability rule with the scenario store on (dark-factory spec §4):
 // a ticket is startable only if the store holds a valid t<ticket>- scenario.
 // ---------------------------------------------------------------------------

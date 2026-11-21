@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync, chmodSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket, testSeams } from "../../extension/src/tools.ts";
@@ -963,6 +963,167 @@ test("dispatch streams a status line (elapsed, tokens, cost, activity) while the
 		const statusLines = updates.filter((t) => /tok [^ ]* · \$\d/.test(t));
 		assert.ok(statusLines.length >= 1, "a status update streamed: " + JSON.stringify(updates).slice(0, 400));
 		assert.match(statusLines[statusLines.length - 1], /implementer/);
+	} finally { fx.cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
+// Orphaned-child reclaim (ticket #121): the dispatch tool bound resolves without
+// the child's fate; the loop must reclaim the child at the next status and
+// surface the late report, and re-dispatch must no longer be refused by a
+// stale running entry.
+// ---------------------------------------------------------------------------
+
+async function deadPid(): Promise<number> {
+	const dead = spawn("sleep", ["0.2"]);
+	await new Promise((r) => dead.on("close", r));
+	return dead.pid!;
+}
+
+function plantDispatch(ctx: ReturnType<typeof ctxWithAgents>, obj: unknown): void {
+	mkdirSync(ctx.stateDir, { recursive: true });
+	writeFileSync(path.join(ctx.stateDir, "dispatch.json"), JSON.stringify(obj, null, 2));
+}
+
+test("reclaim: a running entry with a dead pid is reconciled to crashed on status, and the re-dispatch is no longer refused (#104 dead end)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Orphaned child reclaim");
+		// The orphan's branch exists on origin (the child pushed before dying); the
+		// re-dispatch must reuse it, exactly as a resume would.
+		const branch = `feat/${n}-orphaned`;
+		sh(fx.repo, "checkout", "-qb", branch, "origin/main");
+		sh(fx.repo, "push", "-q", "-u", "origin", branch);
+		sh(fx.repo, "checkout", "-q", "main");
+		plantDispatch(ctx, {
+			[String(n)]: {
+				pid: await deadPid(),
+				role: "implementer",
+				branch,
+				worktree: path.join(fx.dir, "home", "proj", "worktrees", "proj", `issue-${n}`),
+				startedAt: Date.now() - 10 * 60_000, // well past the spawn grace
+				status: "running",
+			},
+		});
+		// Status reconciles: the child row reads crashed, the slot is free…
+		const s1 = await call(ctx, "devloop_status", {});
+		assert.equal(s1.isError ?? false, false, textOf(s1));
+		assert.match(textOf(s1), /crashed/, `the dead child renders crashed:\n${textOf(s1)}`);
+		assert.match(textOf(s1), /Implementers in flight: 0\//, "the slot is free");
+		// …and persisted (a fresh plain read agrees):
+		const onDisk = JSON.parse(execFileSync("cat", [path.join(ctx.stateDir, "dispatch.json")]).toString());
+		assert.equal(onDisk[String(n)].status, "crashed");
+		assert.equal(typeof onDisk[String(n)].endedAt, "number", "endedAt is stamped");
+		// …and the #104 dead end is gone: the re-dispatch proceeds instead of "already running".
+		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
+		assert.equal(res.isError ?? false, false, textOf(res));
+		assert.match(textOf(res), new RegExp(`implementer #${n} .* -> done`));
+		// the re-dispatch reused the orphan's branch (resume semantics)
+		assert.ok(sh(fx.repo, "rev-parse", "--verify", "-q", `origin/${branch}`).toString().length > 0, "branch pushed under the same name");
+	} finally { fx.cleanup(); }
+});
+
+test("reclaim: status surfaces a late report (terminal since the last status) with its report tail, then acks it", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Late reporter");
+		const report = "Implemented and pushed.\nBranch is on origin.\n\n## Questions\nnone\n\nSTATUS: DONE";
+		plantDispatch(ctx, {
+			[String(n)]: { pid: 1, role: "implementer", branch: `feat/${n}-late`, worktree: "/wt", startedAt: 1000, status: "done", report, endedAt: 2000 },
+		});
+		const s1 = textOf(await call(ctx, "devloop_status", {}));
+		assert.match(s1, /## Late reports/, `the late-report section renders:\n${s1}`);
+		assert.match(s1, new RegExp(`#${n} .*done`), "the late child is named with its status");
+		assert.match(s1, /STATUS: DONE/, "the report tail carries the terminal line");
+		assert.ok(existsSync(path.join(ctx.stateDir, "reconcile-seen.json")), "the ack ledger was written");
+		// Second status: nothing new — the child is seen.
+		const s2 = textOf(await call(ctx, "devloop_status", {}));
+		assert.match(s2, /## Late reports[\s\S]*\(none\)/, `no repeat listing:\n${s2}`);
+		// A RE-terminal of the same child (re-dispatch finished/crashed again) resurfaces.
+		plantDispatch(ctx, {
+			[String(n)]: { pid: 1, role: "implementer", branch: `feat/${n}-late`, worktree: "/wt", startedAt: 3000, status: "crashed", endedAt: 4000 },
+		});
+		const s3 = textOf(await call(ctx, "devloop_status", {}));
+		assert.match(s3, new RegExp(`#${n} .*crashed`), `a fresh terminal beats the earlier ack:\n${s3}`);
+	} finally { fx.cleanup(); }
+});
+
+test("reclaim: a crashed child's late report without a report renders the (no report) tail", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Crashed with no words");
+		plantDispatch(ctx, {
+			[String(n)]: { pid: 1, role: "implementer", branch: `feat/${n}-silent`, worktree: "/wt", startedAt: 1000, status: "crashed", endedAt: 2000 },
+		});
+		const s1 = textOf(await call(ctx, "devloop_status", {}));
+		assert.match(s1, /\(no report\)/, `the report-less child is named:\n${s1}`);
+	} finally { fx.cleanup(); }
+});
+
+test("finishEntry: a stale-generation finish does not clobber a re-dispatched entry (the reap-then-redispatch race)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const gen1 = { pid: 424242, role: "implementer" as const, worktree: fx.repo, startedAt: 1, status: "running" as const };
+		finishEntry(ctx, "gen1", gen1, { exitCode: 0, finalText: "STATUS: DONE", aborted: false, stopReason: "end", stderr: "" });
+		let st = stateEntry(fx, ctx, "gen1");
+		assert.equal(st.status, "done", "the current generation finishes normally");
+		// A re-dispatch starts a NEW generation for the same key (fresh startedAt):
+		plantDispatch(ctx, { gen1: { pid: 0, role: "implementer", worktree: fx.repo, startedAt: Date.now(), status: "running" } });
+		// The old generation's finish now resolves (child died after the reap): it must not
+		// stomp the new entry with a stale terminal state.
+		finishEntry(ctx, "gen1", gen1, { exitCode: 0, finalText: "STATUS: DONE", aborted: false, stopReason: "end", stderr: "" });
+		st = stateEntry(fx, ctx, "gen1");
+		assert.equal(st.status, "running", "the re-dispatch's entry is intact");
+	} finally { fx.cleanup(); }
+});
+
+test("stop gate: a done implementer entry whose branch awaits the reviewer drives the settle (ticket #121)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", fast_check: "true" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Delivered, unreviewed");
+		execFileSync("gh", ["issue", "edit", String(n), "--add-label", "dl/in-progress"], { cwd: fx.repo, stdio: "pipe" });
+		plantDispatch(ctx, {
+			[String(n)]: { pid: 1, role: "implementer", branch: `feat/${n}-delivered`, worktree: "/wt", startedAt: 1000, status: "done", report: "STATUS: DONE", endedAt: 2000 },
+		});
+		const d = await evaluateSettle(ctx.cwd);
+		assert.ok(d, "a delivered unreviewed branch is work-to-do: the gate must not settle");
+		assert.equal(d!.continue, true);
+		assert.match(d!.entries[0].content, /await the reviewer/);
+		assert.match(d!.entries[0].content, new RegExp(`#${n}`));
+		// The moment a reviewer is dispatched, the review clause retires (the startable
+		// clause stays: the ticket is still open and unblocked).
+		plantDispatch(ctx, {
+			[String(n)]: { pid: 1, role: "implementer", branch: `feat/${n}-delivered`, worktree: "/wt", startedAt: 1000, status: "done", report: "STATUS: DONE", endedAt: 2000 },
+			[`review-${n}`]: { pid: process.pid, role: "code-reviewer", branch: `feat/${n}-delivered`, worktree: "/wt", startedAt: 3000, status: "running" },
+		});
+		const d2 = await evaluateSettle(ctx.cwd);
+		assert.ok(d2, "the ticket is still startable — the gate keeps driving, on the dispatch clause");
+		assert.match(d2!.entries[0].content, /startable/i);
+		assert.ok(!d2!.entries[0].content.includes("await the reviewer"), "the review clause is gone once the reviewer exists");
+	} finally { fx.cleanup(); }
+});
+
+test("stop gate: a done entry on an UNLABELLED ticket (or a label-less tracker) does not claim a review", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", fast_check: "true" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Delivered but unlabelled");
+		plantDispatch(ctx, {
+			[String(n)]: { pid: 1, role: "implementer", branch: `feat/${n}-x`, worktree: "/wt", startedAt: 1000, status: "done", report: "STATUS: DONE", endedAt: 2000 },
+		});
+		const d = await evaluateSettle(ctx.cwd);
+		assert.ok(d, "the ticket is startable regardless");
+		assert.ok(!d!.entries[0].content.includes("await the reviewer"), "no review claim without the in-progress/in-review label");
 	} finally { fx.cleanup(); }
 });
 
