@@ -161,7 +161,7 @@ function reportTail(report: string | undefined, maxLines = 4, maxChars = 400): s
 
 /** Render the late-report section (non-table on purpose: the structural pin keeps the
  * operator board to its pipe tables). Empty input yields the (none) fallback line. */
-export function lateReportsBlock(late: Array<[string, DispatchEntry]>): string[] {
+function lateReportsBlock(late: Array<[string, DispatchEntry]>): string[] {
 	if (late.length === 0) return ["(none)"];
 	const lines: string[] = [];
 	for (const [k, e] of late) {
