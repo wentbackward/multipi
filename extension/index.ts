@@ -286,16 +286,21 @@ function registerStoreGuard(pi: ExtensionAPI, childCwd: string): void {
  * providers stay silent (there the failure is hypothetical; scripts/doctor.sh
  * carries the static, provider-agnostic check for every provider). The name
  * list honours the documented MULTIPI_PROBE_TOOL_NAMES diagnostic seam (empty =
- * unset) so a candidate rename trips at startup on purpose, and the provider
- * comes from MULTIPI_PROVIDER, falling back to pi's PI_PROVIDER session env.
- * Offline: a static validation, never a live API call.
+ * unset) so a candidate rename trips at startup on purpose. The provider
+ * resolves MULTIPI_PROVIDER (the what-if seam) → ctx.model.provider (the
+ * session's CONFIGURED model — pi's own session env provably never carries
+ * PI_PROVIDER, which is injected into shell-tool children only) → PI_PROVIDER
+ * (harmless, present only for in-child callers); the provider is
+ * JSON-encoded in the line so a hostile seam value cannot smuggle a newline
+ * into the one-line warning. Offline: a static validation, never a live API
+ * call.
  */
 function registerToolNameProbe(pi: ExtensionAPI): void {
-	pi.on("session_start", () => {
+	pi.on("session_start", (_event, ctx: ExtensionContext) => {
 		try {
-			const report = probeToolNameGrammar(toolNamesFromEnv(process.env), resolveProvider(process.env));
+			const report = probeToolNameGrammar(toolNamesFromEnv(process.env), resolveProvider(process.env, ctx.model?.provider));
 			if (!report.strict || report.bad.length === 0) return;
-			console.error(`devloop: provider ${report.provider} is grammar-strict and will reject tool name ${report.bad.map((n) => JSON.stringify(n)).join(", ")} at the first API call (grammar ^[A-Za-z][A-Za-z0-9_-]*$) — dispatch is unusable until the names comply`);
+			console.error(`devloop: provider ${JSON.stringify(report.provider)} is grammar-strict and will reject tool name ${report.bad.map((n) => JSON.stringify(n)).join(", ")} at the first API call (grammar ^[A-Za-z][A-Za-z0-9_-]*$) — dispatch is unusable until the names comply`);
 		} catch {
 			// Advisory surface: the probe must never block a session start.
 		}

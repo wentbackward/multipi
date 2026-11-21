@@ -62,12 +62,17 @@ export function isStrictGrammarProvider(provider: string | undefined): boolean {
 	return p.includes("openai") || KNOWN_STRICT_PROVIDERS.includes(p);
 }
 
-/** The active provider id for the probe: `MULTIPI_PROVIDER` (the documented
- * operator seam — set when pi's own session env does not reach the surface)
- * wins over `PI_PROVIDER` (pi's shell-tool session env, "currently selected
- * model provider"). Empty means unset (the loop-wide convention). */
-export function resolveProvider(env: NodeJS.ProcessEnv): string | undefined {
-	return env.MULTIPI_PROVIDER || env.PI_PROVIDER || undefined;
+/** The active provider id for the probe. Resolution chain (review round 1,
+ * #107): `MULTIPI_PROVIDER` (the documented operator seam — wins outright, so a
+ * what-if probe stays fully operator-controlled) → `modelProvider` (the session's
+ * CONFIGURED model, pi's ExtensionContext.model — the primary ambient source for
+ * the session_start seat, because pi injects PI_PROVIDER only into shell-tool
+ * CHILDREN, provably not the extension's own process env) → `PI_PROVIDER`
+ * (pi's shell-tool session env, kept for surfaces that really do run inside a
+ * child — doctor's one-shot). Empty means unset at every rung (the loop-wide
+ * convention). */
+export function resolveProvider(env: NodeJS.ProcessEnv, modelProvider?: string): string | undefined {
+	return env.MULTIPI_PROVIDER || modelProvider || env.PI_PROVIDER || undefined;
 }
 
 /** The name list to probe: `MULTIPI_PROBE_TOOL_NAMES` (colon-separated) is
