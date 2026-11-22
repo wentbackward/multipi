@@ -71,9 +71,21 @@ Then dispatch implementers per the normal rules. If the analyst came back `STATU
 
 - Up to `heavy.slots` implementers at once (check `devloop_status`); a fourth concurrent dispatch is
   refused by the tool with the in-flight list — wait for the reports, do not retry in a tight loop.
+- **Area-aware scheduling (ticket #134):** every ticket declares its file areas, and you set them at
+  ticket creation — one `area/*` label per area (labels self-heal on first use, same as the `dl/`
+  labels): `area/extension` (extension/src + its `.pi/extensions` mirror), `area/smoke`
+  (tests/smoke.sh), `area/skills` (skills/ + the agents/ mirror), `area/scripts` (scripts/),
+  `area/docs` (docs/). The CRITICAL areas — `area/extension`, `area/smoke`, `area/skills` —
+  SERIALIZE: never dispatch a second in-flight implementer that shares a critical area with one
+  already running; the second starts only after the first lands (merged) or is cancelled. Disjoint
+  areas run in parallel as today. Enforcement is your discipline, exactly like the slot cap — the
+  declaration is what makes a violation auditable from the board (two `dl/in-progress` tickets
+  carrying the same critical label). The non-critical areas stay informational: they guide merge
+  order, and the gate's codified conflict rules (§5) absorb the additive-only classes they cause.
 - A ticket is STARTABLE when unblocked and every dependency is merged or in-flight (stacking).
-- Never run two tickets that edit the same hot files at once — conflicts cost more than waiting. Pair
-  tickets from different areas.
+- Never run two tickets that edit the same hot files at once — conflicts cost more than waiting. The
+  area labels ARE that pairing rule; where a ticket declares no areas, treat its diff targets as the
+  declaration and pair accordingly.
 - After every report, gate or merge, dispatch the next startable ticket in the SAME turn. Continuous
   work is the norm; stopping to narrate is not.
 - **Cycle cleanup (only when `.devloop.json` sets `"factory": "dark"`):** once per loop cycle —
@@ -111,8 +123,20 @@ the implementer. Never skip it; never merge on the implementer's self-review.
 - `VERDICT: CHANGES REQUIRED`: comment the must-fix list verbatim on the issue, re-dispatch the
   implementer for the same ticket (it resumes in the same worktree), then review again. Repeat until
   APPROVE. Cheap should-fix items: fold them into the same round. Expensive ones: follow-up issue.
-- `VERDICT: APPROVE`: label `dl/approved`. When the APPROVE carries should-fixes (nothing
-  must-fix), run the polish budget (ticket #105):
+- `VERDICT: APPROVE`: label `dl/approved`. **Rebase-on-approval (ticket #134, before the branch
+  enters the gate):** after the fetch, if `git merge-base --is-ancestor origin/main <branch-head>`
+  is FALSE the branch sits on a stale base — re-dispatch the OWNING IMPLEMENTER for the same ticket
+  (the re-dispatch resumes the same worktree) with the standing rebase instruction, posted verbatim
+  as a comment on the ticket (the dispatch note rides the same comment):
+  "Standing rebase instruction — your branch is approved but sits on a stale base. Rebase it onto
+  origin/main now. Rebase-only: no new work, no amended commits. Resolve conflicts per the codified
+  rules (docs/DECISIONS.md = chronological-union, keep both additions ordered by date line;
+  tests/smoke.sh = keep both new sections); anything else semantic is a blocker — report
+  STATUS: BLOCKED with the file named. Re-run the smoke sections you touched plus
+  `npx tsc --noEmit`, then re-push with force-with-lease. Nothing else." The review then covers
+  the final tree. If you keep the pre-rebase review instead, say so in the review record and the
+  DECISIONS entry: "reviewed pre-rebase; rebase was rule-resolved only". When the APPROVE
+  carries should-fixes (nothing must-fix), run the polish budget (ticket #105):
   - A should-fix re-dispatch is ONE ROUND: the comment the re-dispatch rides on must open its
     FIRST non-empty line with `should-fix follow-up` — the marker alone or followed by a colon
     (the boundary keeps prose like "should-fix follow-ups are welcome" from counting). The loop
@@ -139,8 +163,12 @@ When the set of `dl/approved` branches stabilises (nothing new expected this pas
    comment the gate log path.
 3. Red: nothing merges. Read the tail, identify the owning ticket(s), dispatch the implementer(s) to
    fix, and re-gate the whole train when they are back.
-4. Conflict at branch X: gate the rest without X; send X's implementer to rebase on the lower
-   branches; re-gate.
+4. Conflict at branch X: the gate's rebase step first applies the codified conflict rules — when
+   EVERY conflicted file is rule-covered (docs/DECISIONS.md chronological-union, tests/smoke.sh
+   additive-both) the conflict is resolved in place, logged `auto-resolved: <rule> on <file>` in
+   the gate output, and the train proceeds. Anything semantic still refuses (exit 3,
+   `TRAIN rebase conflict at X`): gate the rest without X; send X's implementer the standing
+   rebase instruction (§4, on the lower branches); re-gate.
 
 ## 6. Merge
 
