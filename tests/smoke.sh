@@ -5255,6 +5255,12 @@ echo "$out"
 expect "a contract-touching train dispatches from a credentialed origin (rc 0)" "0" "$rc"
 echo "$out" | grep -qF "https://github.example.invalid/fixture/repo.git" && pass "the brief names the credential-free origin" || fail "the sanitized origin url is missing: $out"
 echo "$out" | grep -q "ci-token-abc123\|ci-user@" && fail "embedded userinfo leaked into the brief" || pass "no userinfo@ credentials in the rendered brief"
+# An RFC-INVALID userinfo containing a raw @ (git tolerates it, splits at the LAST @):
+# strip to the last @, never half — the reviewer's exact reproduced case.
+git -C "$vb_cred" remote set-url origin "https://u:p@ss@gitlab.example.invalid/group/proj.git"
+out=$(bash "$plugin/scripts/verify-brief.sh" "$vb_cpre..$vb_cpost" 2>&1)
+echo "$out" | grep -qF "https://gitlab.example.invalid/group/proj.git" && pass "the last-@ userinfo case strips whole (host intact)" || fail "last-@ userinfo case: host wrong: $out"
+echo "$out" | grep -q "p@ss@\|:p@" && fail "an @-bearing userinfo fragment survived the strip" || pass "an @-bearing userinfo is stripped whole (no fragment survives)"
 cd "$vb/repo" || exit 1
 # (d) the installed twin: install.sh ships the template beside the scripts and
 # the installed script resolves it (installed targets have no templates/ dir).

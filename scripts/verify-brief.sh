@@ -147,7 +147,11 @@ attach_report() {
 		attached="${attached:+$attached }$t"
 	done
 	[ "$bad" -eq 0 ] || exit 3
-	echo "verification report attached to: ${attached:- (none new — every ticket already verified)}"
+	if [ -n "$attached" ]; then
+		echo "verification report attached to: $attached"
+	else
+		echo "verification report attached to: (none new — every ticket already verified)"
+	fi
 }
 
 [ $# -ge 1 ] || dl_die "usage: verify-brief.sh <pre>..<post> [exercise] | report <ticket> [<ticket> ...] < report.md"
@@ -164,10 +168,12 @@ template=$(verify_template) || exit 3
 url=$(git remote get-url origin 2>/dev/null) || url=""
 # Credential hygiene (review #126, the sharpest finding): an origin carrying
 # embedded userinfo (https://user:token@…) must not leak the token into the
-# brief → the verifier's session log → the issue comment. Strip the userinfo@
-# component of a scheme:// URL (userinfo never contains '/' or '@'); scp-style
-# user@host:path has no credential and passes through untouched.
-url=$(printf '%s\n' "$url" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]+@#\1#')
+# brief → the verifier's session log → the issue comment. Strip everything between
+# :// and the LAST @ before the first / — git itself splits userinfo at the last
+# @, so an RFC-invalid userinfo containing @ is stripped whole, not half. An
+# @ with no following host-and-path (no '/') is not a userinfo separator and is
+# left alone; scp-style user@host:path has no credential and passes through.
+url=$(printf '%s\n' "$url" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/]*@([^/].*)$#\1\2#')
 [ -n "$url" ] || url=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 touched=${VB_TOUCHED#$'\n'}
 touched=${touched%$'\n'}

@@ -66,7 +66,8 @@ bootstrap another project, the **`devloop-setup` skill**.
   named script with the remaining args and pass the rc through — no logic duplicated.
   `multipi help` (and `-h`/`--help`) prints the one-line-per-command summary with the rc
   contracts; bare `multipi` = board (status when the board script is absent); an unknown
-  subcommand is the dispatcher's own rc 2. The five scripts remain fully runnable
+  subcommand — or a named subcommand whose sibling script is missing — is the
+  dispatcher's own rc 2. The five scripts remain fully runnable
   standalone (all existing callers and tests unaffected): `scripts/multipi-status.sh` renders one line
   (state, in-flight tool + elapsed, heartbeat age, pid, tty, available RAM/swap-free) and
   exits per its pinned rc table (0 live · 1 idle · 2 STALE/wedge · 3 dead · 4 bad usage/
