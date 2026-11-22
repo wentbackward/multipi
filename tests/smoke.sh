@@ -456,6 +456,143 @@ expect "gate-train stops on a conflict and names the branch" "3 TRAIN rebase con
 
 git checkout -q main
 
+# --- gate-train.sh: codified conflict auto-resolution (ticket #134) ------------
+# The gate's rebase step applies deterministic rules BEFORE escalating, but only when
+# EVERY conflicted file is rule-covered: docs/DECISIONS.md = chronological-union (keep
+# both additions, ordered by date line, the lower train branch breaking ties),
+# tests/smoke.sh = additive-both (an additive hunk on either side survives). Each
+# resolution is logged `auto-resolved: <rule> on <file>` and the train proceeds; a
+# semantic conflict still refuses with the named branch (exit 3, unchanged).
+# The fixture project gains the three files the rules key off; they are inert for the
+# checks (the unit check only greps src.txt).
+mkdir -p docs tests extension/src
+cat >docs/DECISIONS.md <<'EOF'
+# Decisions
+- 2026-01-01 — base entry
+EOF
+cat >tests/smoke.sh <<'EOF'
+# fixture smoke
+section one
+EOF
+printf 'const one = 1;\n' >extension/src/tools.ts
+git add . && git commit -q -m "chore: area files for the conflict-rule pins (Refs #134)" && git push -q origin main
+
+# DECISIONS chronological union: interleaved dates end up sorted by DATE LINE, not by
+# arrival order (branch A's 01-05 lands between branch B's 01-03 and 01-07).
+git checkout -q -B feat/134-dec-a origin/main
+printf -- '- 2026-01-05 — branch A entry\n' >>docs/DECISIONS.md
+git commit -q -am "docs: A entry (Refs #134)" && git push -q -u origin feat/134-dec-a
+git checkout -q -B feat/134-dec-b origin/main
+printf -- '- 2026-01-03 — branch B early entry\n- 2026-01-07 — branch B late entry\n' >>docs/DECISIONS.md
+git commit -q -am "docs: B entries (Refs #134)" && git push -q -u origin feat/134-dec-b
+out=$(bash "$plugin/scripts/gate-train.sh" feat/134-dec-a feat/134-dec-b 2>&1)
+rc=$?
+echo "$out"
+expect "a DECISIONS collision auto-resolves and the train proceeds" "0" "$rc"
+echo "$out" | grep -qF 'auto-resolved: decisions-chronological-union on docs/DECISIONS.md' &&
+  pass "the DECISIONS auto-resolution is logged with rule and file" ||
+  fail "no auto-resolved line for docs/DECISIONS.md"
+expect "the resolved DECISIONS file is the chronological union" \
+'# Decisions
+- 2026-01-01 — base entry
+- 2026-01-03 — branch B early entry
+- 2026-01-05 — branch A entry
+- 2026-01-07 — branch B late entry' \
+"$(git -C "$gate" show train-feat/134-dec-b:docs/DECISIONS.md)"
+
+# smoke.sh additive-both: each branch appends its own section; both survive,
+# the lower train branch first (file order under the union rule).
+git checkout -q -B feat/134-smk-a origin/main
+echo "section A" >>tests/smoke.sh
+git commit -q -am "test: section A (Refs #134)" && git push -q -u origin feat/134-smk-a
+git checkout -q -B feat/134-smk-b origin/main
+echo "section B" >>tests/smoke.sh
+git commit -q -am "test: section B (Refs #134)" && git push -q -u origin feat/134-smk-b
+out=$(bash "$plugin/scripts/gate-train.sh" feat/134-smk-a feat/134-smk-b 2>&1)
+rc=$?
+echo "$out"
+expect "an additive smoke.sh collision auto-resolves and the train proceeds" "0" "$rc"
+echo "$out" | grep -qF 'auto-resolved: smoke-additive-both on tests/smoke.sh' &&
+  pass "the smoke.sh auto-resolution is logged with rule and file" ||
+  fail "no auto-resolved line for tests/smoke.sh"
+expect "the resolved smoke file keeps BOTH sections, lower branch first" \
+'# fixture smoke
+section one
+section A
+section B' \
+"$(git -C "$gate" show train-feat/134-smk-b:tests/smoke.sh)"
+
+# Duplicate DECISIONS entry (the second branch re-logs what the first landed):
+# the union collapses it, the commit is empty, the train still proceeds green.
+git checkout -q -B feat/134-dup-a origin/main
+printf -- '- 2026-01-09 — shared entry\n' >>docs/DECISIONS.md
+git commit -q -am "docs: shared entry (Refs #134)" && git push -q -u origin feat/134-dup-a
+git checkout -q -B feat/134-dup-b origin/main
+printf -- '- 2026-01-09 — shared entry\n' >>docs/DECISIONS.md
+git commit -q -am "docs: shared entry again (Refs #134)" && git push -q -u origin feat/134-dup-b
+out=$(bash "$plugin/scripts/gate-train.sh" feat/134-dup-a feat/134-dup-b 2>&1)
+rc=$?
+echo "$out"
+expect "a duplicate DECISIONS entry collapses and the train proceeds" "0" "$rc"
+expect "the collapsed entry appears exactly once" \
+'# Decisions
+- 2026-01-01 — base entry
+- 2026-01-09 — shared entry' \
+"$(git -C "$gate" show train-feat/134-dup-b:docs/DECISIONS.md)"
+expect "both branches still ride the green train record" "2" \
+"$(wc -l <"$work/home/project/train-green.txt" | tr -d ' ')"
+
+# Semantic collision (the ticket's tools.ts case): still refuses, branch named,
+# exit 3 — the refusal contract is untouched.
+git checkout -q -B feat/134-sem-a origin/main
+printf 'const one = 10;\n' >extension/src/tools.ts
+git commit -q -am "feat: ten (Refs #134)" && git push -q -u origin feat/134-sem-a
+git checkout -q -B feat/134-sem-b origin/main
+printf 'const one = 20;\n' >extension/src/tools.ts
+git commit -q -am "feat: twenty (Refs #134)" && git push -q -u origin feat/134-sem-b
+out=$(bash "$plugin/scripts/gate-train.sh" feat/134-sem-a feat/134-sem-b 2>&1)
+rc=$?
+echo "$out"
+expect "a semantic tools.ts collision still refuses and names the branch" \
+  "3 TRAIN rebase conflict at feat/134-sem-b" "$rc $(echo "$out" | tail -1)"
+echo "$out" | grep -q "auto-resolved" &&
+  fail "a refused train logged an auto-resolution" ||
+  pass "a refused train logs no auto-resolution"
+
+# Mixed conflict (one covered file + one uncovered): the rules need FULL coverage —
+# a rule-covered file never resolves when a sibling file has no rule.
+git checkout -q -B feat/134-mix-a origin/main
+echo "section M-A" >>tests/smoke.sh
+printf 'const one = 11;\n' >extension/src/tools.ts
+git commit -q -am "feat: mix A (Refs #134)" && git push -q -u origin feat/134-mix-a
+git checkout -q -B feat/134-mix-b origin/main
+echo "section M-B" >>tests/smoke.sh
+printf 'const one = 12;\n' >extension/src/tools.ts
+git commit -q -am "feat: mix B (Refs #134)" && git push -q -u origin feat/134-mix-b
+out=$(bash "$plugin/scripts/gate-train.sh" feat/134-mix-a feat/134-mix-b 2>&1)
+rc=$?
+echo "$out"
+expect "a mixed covered+uncovered conflict refuses (full coverage required)" \
+  "3 TRAIN rebase conflict at feat/134-mix-b" "$rc $(echo "$out" | tail -1)"
+echo "$out" | grep -q "auto-resolved" &&
+  fail "a partially covered refusal logged an auto-resolution" ||
+  pass "a partially covered refusal logs no auto-resolution"
+
+# The two policy halves of #134, pinned like the other skill doctrine: the
+# rebase-on-approval step (who performs it + the standing instruction) and the
+# area-aware scheduling rule (label vocabulary + serialization of critical areas).
+for sk in "$plugin/skills/devloop/SKILL.md" "$plugin/.pi/skills/devloop/SKILL.md"; do
+  grep -qiF "rebase-on-approval" "$sk" && grep -qiF "standing rebase instruction" "$sk" &&
+    pass "the skill documents rebase-on-approval (${sk#$plugin/})" ||
+    fail "the skill lacks the rebase-on-approval step (${sk#$plugin/})"
+  grep -qiF "area-aware scheduling" "$sk" && grep -qF "dl/area/extension" "$sk" &&
+    grep -qF "dl/area/smoke" "$sk" && grep -qF "dl/area/skills" "$sk" && grep -qiF "serializ" "$sk" &&
+    pass "the skill documents area-aware scheduling (${sk#$plugin/})" ||
+    fail "the skill lacks the area-aware scheduling rule (${sk#$plugin/})"
+done
+
+git checkout -q main
+
 # --- gate-train.sh x policy-shim PATH scrub (ticket #70) ---------------------------
 # Authority separation: the dogfood policy-shims protect the loop's SESSIONS; they must
 # never veto the loop's own verification. A wrapper dir whose git and gh are INTERPRETED
