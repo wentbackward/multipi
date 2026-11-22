@@ -16,9 +16,14 @@
 #       [exercise] (optional, one line) is the train-specific contract exercise the
 #       verifier runs on top of the standard steps.
 #   verify-brief.sh report <ticket> [<ticket> ...] < report.md
-#       Attach the verifier's report (on stdin) to every train ticket as one
-#       "Post-merge verification" comment; the header verdict rides the report's own
-#       `VERIFICATION: PASS` / `VERIFICATION: FAIL` line (absent = plain header).
+#       Attach the verifier's report (on stdin) to every train ticket that does not
+#       already carry one, as one "Post-merge verification" comment (one per ticket —
+#       a ticket already carrying the header is skipped, so a retry after a partial
+#       attach appends nothing); the header verdict rides the report's own
+#       `VERIFICATION: PASS` / `VERIFICATION: FAIL` line (line-anchored, PASS a whole
+#       word — prose mentions do not count; absent = plain header). A tracker failure
+#       on the check or the attach of any ticket exits 3 (nothing half-attached
+#       passes silently).
 #
 # The dispatch threshold (DECISIONS.md 2026-11-21, #108 — default-ON for anything
 # contract-touching): the train touches a shared contract iff its diff carries any of
