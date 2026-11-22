@@ -585,8 +585,8 @@ for sk in "$plugin/skills/devloop/SKILL.md" "$plugin/.pi/skills/devloop/SKILL.md
   grep -qiF "rebase-on-approval" "$sk" && grep -qiF "standing rebase instruction" "$sk" &&
     pass "the skill documents rebase-on-approval (${sk#$plugin/})" ||
     fail "the skill lacks the rebase-on-approval step (${sk#$plugin/})"
-  grep -qiF "area-aware scheduling" "$sk" && grep -qF "area/extension" "$sk" &&
-    grep -qF "area/smoke" "$sk" && grep -qF "area/skills" "$sk" && grep -qiF "serializ" "$sk" &&
+  grep -qiF "area-aware scheduling" "$sk" && grep -qF "dl/area/extension" "$sk" &&
+    grep -qF "dl/area/smoke" "$sk" && grep -qF "dl/area/skills" "$sk" && grep -qiF "serializ" "$sk" &&
     pass "the skill documents area-aware scheduling (${sk#$plugin/})" ||
     fail "the skill lacks the area-aware scheduling rule (${sk#$plugin/})"
 done

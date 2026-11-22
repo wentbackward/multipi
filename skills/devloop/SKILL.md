@@ -72,10 +72,10 @@ Then dispatch implementers per the normal rules. If the analyst came back `STATU
 - Up to `heavy.slots` implementers at once (check `devloop_status`); a fourth concurrent dispatch is
   refused by the tool with the in-flight list — wait for the reports, do not retry in a tight loop.
 - **Area-aware scheduling (ticket #134):** every ticket declares its file areas, and you set them at
-  ticket creation — one `area/*` label per area (labels self-heal on first use, same as the `dl/`
-  labels): `area/extension` (extension/src + its `.pi/extensions` mirror), `area/smoke`
-  (tests/smoke.sh), `area/skills` (skills/ + the agents/ mirror), `area/scripts` (scripts/),
-  `area/docs` (docs/). The CRITICAL areas — `area/extension`, `area/smoke`, `area/skills` —
+  ticket creation — one `dl/area/*` label per area (labels self-heal on first use, same as the `dl/`
+  labels): `dl/area/extension` (extension/src + its `.pi/extensions` mirror), `dl/area/smoke`
+  (tests/smoke.sh), `dl/area/skills` (skills/ + the agents/ mirror), `dl/area/scripts` (scripts/),
+  `dl/area/docs` (docs/). The CRITICAL areas — `dl/area/extension`, `dl/area/smoke`, `dl/area/skills` —
   SERIALIZE: never dispatch a second in-flight implementer that shares a critical area with one
   already running; the second starts only after the first lands (merged) or is cancelled. Disjoint
   areas run in parallel as today. Enforcement is your discipline, exactly like the slot cap — the
