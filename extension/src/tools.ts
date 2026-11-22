@@ -953,8 +953,9 @@ export async function evaluateSettle(cwd: string): Promise<{ entries: { type: "c
 		const { state } = reconcileState(ctx.stateDir);
 		const running = Object.values(state).filter((e) => e.status === "running" && e.role === "implementer").length;
 		// Late-report loop drive (#121): an implementer that DELIVERED (entry done) but whose
-		// ticket still sits at dl/in-progress/dl/in-review with no reviewer dispatched is
-		// work-to-do. Open issues only — a merged/closed ticket is not pending.
+		// ticket still sits at dl/in-progress/dl/in-review with no RUNNING review (ticket #124
+		// — a dispatched review that died re-arms the clause) is work-to-do. Open issues only —
+		// a merged/closed ticket is not pending.
 		// Count ONLY a `running` review entry as "review dispatched" (ticket #124):
 		// reapDead permanently keeps the terminal `crashed`/`interrupted` review entry in the
 		// state, so any historical entry would suppress the review drive forever and leave

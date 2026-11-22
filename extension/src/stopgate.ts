@@ -35,9 +35,11 @@ export interface StopGateInputs {
 	/** Ticket numbers covered by at least one valid `t<n>-` scenario (only effective when scenariosOn). */
 	covered?: number[];
 	/** Ticket numbers whose implementer child delivered a branch (entry `done`) but whose ticket
-	 * still sits at `dl/in-progress`/`dl/in-review` with no reviewer dispatched — the late-report
+	 * still sits at `dl/in-progress`/`dl/in-review` with no RUNNING review — the late-report
 	 * loop drive (ticket #121): a bounded dispatch can resolve with the child still running, and
-	 * the delivered branch must not settle silently. Computed by the caller (open issues only). */
+	 * the delivered branch must not settle silently. "Running" is the word that matters: a review
+	 * that WAS dispatched but died (crashed/interrupted) counts as no running review and the
+	 * ticket belongs here (ticket #124). Computed by the caller (open issues only). */
 	pendingReviews?: number[];
 }
 
