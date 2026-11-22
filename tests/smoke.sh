@@ -3084,6 +3084,20 @@ switch (process.env.REC_CMD) {
     const r = await call("devloop_dispatch", { role: "implementer", ticket: 1 });
     const t = txt(r);
     process.stdout.write("ERR=" + (r.isError ? "1" : "0") + "\n" + t.split("\n")[0]);
+    if (!r.isError) {
+      // Fire-and-poll (#133): the receipt comes back with the child left running; the
+      // completion handler writes the terminal entry IN THIS PROCESS. Wait for it (bounded
+      // poll) so the driver's exit does not orphan the child before its fate lands.
+      const fs = await import("node:fs");
+      const p = process.env.MULTIPI_HOME + "/project/dispatch.json";
+      for (let i = 0; i < 150; i++) {
+        try {
+          const e = JSON.parse(fs.readFileSync(p, "utf8"))["1"];
+          if (e && e.status !== "running") { process.stdout.write("\nTERMINAL=" + e.status); break; }
+        } catch {}
+        await new Promise((res) => setTimeout(res, 100));
+      }
+    }
     break;
   }
   case "settle": {
@@ -3117,9 +3131,11 @@ switch (process.env.REC_CMD) {
     pass "reclaim: endedAt is stamped in the state file" || \
     fail "reclaim endedAt: $(head -c 300 "$REC_HOME/project/dispatch.json")"
   # 3) The #104 dead end is gone: the re-dispatch PROCEEDS (was: refused, "already running").
+  # Fire-and-poll (#133): the receipt resolves with the child running; the driver waits for
+  # the terminal (done) inside the process that owns the completion handler.
   recdriver dispatch >"$RECBASE/d1.out"
-  grep -q "^ERR=0" "$RECBASE/d1.out" && grep -q "implementer #1 .* -> done" "$RECBASE/d1.out" && \
-    pass "reclaim: the re-dispatch is no longer refused — the child runs to done" || \
+  grep -q "^ERR=0" "$RECBASE/d1.out" && grep -q -- "-> running" "$RECBASE/d1.out" && grep -q "^TERMINAL=done" "$RECBASE/d1.out" && \
+    pass "reclaim: the re-dispatch is no longer refused — the receipt lands and the child runs to done" || \
     fail "reclaim redispatch: $(cat "$RECBASE/d1.out") | $(head -3 "$RECBASE/driver.err" | tr '\n' ' ')"
   # 4) The late-report surface: the finished child (terminal since the last status) is listed with its tail.
   recdriver status >"$RECBASE/s3.out"
@@ -4189,6 +4205,75 @@ expect "watch rc 0: after the refusals, a plain healthy check is a clean no-op (
 rm -f "$LVSC"
 lvwatch
 expect "watch rc 5: no sidecar (the daemon self-idles)" "5" "$LV_RC"
+lvfresh
+
+# (c-r) report-landing wake (ticket #133, fire-and-poll): a child entry that turned
+# terminal (done/crashed/interrupted) with an UNCOLLECTED report injects exactly one wake
+# per report; a second tick injects none (the per-report ledger in the watch log, the same
+# pattern as the BLOCKED n= axis); a report already acked by the extension's seen ledger
+# (the orchestrator collected it) never wakes. The rc table is untouched (0/6).
+LV_NOW=1000000000000
+plant_report_entry() { # plant_report_entry KEY ROLE STATUS — one terminal, uncollected entry
+  printf '{"%s":{"pid":1,"role":"%s","branch":"feat/9-x","worktree":"/wt","startedAt":999900000000,"status":"%s","endedAt":999999000000,"report":"STATUS: DONE"}}\n' "$1" "$2" "$3" >"$lvstate/dispatch.json"
+  rm -f "$lvstate/reconcile-seen.json"
+}
+lvfresh
+mkstate idle 1000 0 0
+plant_report_entry 42 implementer done
+lvwatch
+expect "watch rc 0: an uncollected terminal report wakes the session" "0" "$LV_RC"
+expect "watch: the exact REPORT LANDED line (numeric key, role, status, the collect instruction)" \
+  "REPORT LANDED (multipi-watch): #42 implementer -> done — run devloop_status to collect it (act in this turn)." \
+  "$(head -1 "$WK" 2>/dev/null)"
+expect "watch log: the delivered report wake is ledgered per key+generation" "1" "$(grep -cF 'REPORT n=42 t=999999000000' "$wl" 2>/dev/null)"
+lvwatch
+expect "watch dedupe: the second tick injects NOTHING for the same report" "1" "$(wc -l <"$WK")"
+expect "watch dedupe: the suppressed repeat is logged with its reason" "1" "$(grep -cF 'REPORT-SKIP n=42 seen' "$wl" 2>/dev/null)"
+# The ack ledger (reconcile-seen.json) is the extension's cursor: an acked generation never wakes.
+printf '{"42":999999000000}\n' >"$lvstate/reconcile-seen.json"
+lvfresh
+mkstate idle 1000 0 0
+lvwatch
+expect "watch: an acked (collected) report is a healthy no-op" "1" "$(grep -cF ' HEALTHY' "$wl" 2>/dev/null)"
+[ -s "$WK" ] && fail "an acked report woke anyway" || pass "watch: the acked report woke nothing"
+# Non-numeric keys name plainly (the late-report surface's own rule, mirrored in the wake).
+lvfresh
+mkstate idle 1000 0 0
+plant_report_entry review-42 code-reviewer crashed
+lvwatch
+expect "watch: a non-numeric key names plainly (no ticket-number prefix)" \
+  "REPORT LANDED (multipi-watch): review-42 code-reviewer -> crashed — run devloop_status to collect it (act in this turn)." \
+  "$(head -1 "$WK" 2>/dev/null)"
+# Wall axis: a WAKE within the last 3600 s suppresses a due report wake (one wake per hour, the
+# safety wakes' own axis — a report is surfaced at the next stop-gate turn if the wall holds).
+lvfresh
+mkstate active 1000 9 780000
+lvwatch
+expect "watch: the tool wake still fires on its own" "1" "$(grep -c '^WAKE ' "$WK")"
+plant_report_entry 43 implementer done
+lvwatch
+expect "watch: a due report inside the 3600 s wall window is suppressed with its reason" "1" "$(grep -cF 'REPORT-SKIP n=43 recent' "$wl" 2>/dev/null)"
+expect "watch: the wall-suppressed report is not injected" "1" "$(wc -l <"$WK")"
+# rc 6 (the honest limit, unchanged from the other wakes): a due report with no usable TTY.
+lvfresh
+mkstate idle 1000 0 0
+plant_report_entry 44 verifier interrupted
+lvwatch MULTIPI_INTERRUPT_TTY="$work/nowhere/no-tty"
+expect "watch rc 6: a due report with no usable TTY (the kill-and-resume fallback is printed)" "6" "$LV_RC"
+echo "$LV_LINE" | grep -qF "no usable TTY" && pass "watch rc 6 names the honest limit" || fail "rc 6 line: $LV_LINE"
+expect "watch log: the undeliverable report wake is logged (the 24h-style window does NOT start)" "1" "$(grep -cF 'REPORT-NO-TTY n=44' "$wl" 2>/dev/null)"
+# Corrupt / missing dispatch state degrades to no wake (soft read, like the status surface).
+rm -f "$lvstate/dispatch.json"
+lvfresh
+mkstate idle 1000 0 0
+lvwatch
+expect "watch: no dispatch state is a healthy no-op" "1" "$(grep -cF ' HEALTHY' "$wl" 2>/dev/null)"
+printf 'not json at all\n' >"$lvstate/dispatch.json"
+lvfresh
+mkstate idle 1000 0 0
+lvwatch
+expect "watch: a corrupt dispatch.json never wakes (history is lossy)" "1" "$(grep -cF ' HEALTHY' "$wl" 2>/dev/null)"
+rm -f "$lvstate/dispatch.json"
 lvfresh
 
 # (c2) the bounded-poll idiom (#82): the two daemon pins below replace fixed tick-completion
