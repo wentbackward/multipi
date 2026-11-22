@@ -5,9 +5,15 @@ session, one-shot role children (implementer / code-reviewer / verifier) in isol
 one batched check gate per train of ready branches, and ordered squash merges. GitHub issues are
 the tickets; labels are the loop state; the deterministic scripts + extension tools are the hands.
 
-The design spec is `docs/superpowers/specs/2026-10-27-devloop-pi-design.md` and is the source of
-truth; the dark-factory mode (the `"factory"` toggle, holdout scenarios, the role guard) is
-specified in `docs/superpowers/specs/2026-11-01-multipi-dark-factory.md`. Implementation history: `docs/superpowers/plans/`.
+`docs/SPEC.md` is the LIVING SPEC — the rebuild source of truth: the complete current-state
+description of the system (architecture, the six tools, the label state machine, the config
+schema, the child protocol, the permission model, the liveness surface, the dark factory, the
+guard), sufficient to rebuild it from scratch. It is kept true by the freshness check
+(`tests/unit/spec-freshness.test.ts`): if your change alters a contract surface (tool, label,
+exit code, config key, protocol), update it in the same change. The four dated specs under
+`docs/superpowers/specs/` are HISTORY — the audit trail of why it became this (design,
+dark-factory, permission-policy, orchestrator-liveness); `docs/LEARNINGS.md` distils the
+operational lessons. Implementation history: `docs/superpowers/plans/`.
 
 ## Project conventions
 

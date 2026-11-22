@@ -25,9 +25,11 @@ const SPEC = existsSync(SPEC_PATH) ? readFileSync(SPEC_PATH, "utf8") : "";
 
 /** A top-level "## Title" section (to the next "## " or EOF). */
 function section(text: string, title: string): string {
-	const m = text.match(new RegExp(`^## ${title}[\\s\\S]*?(?=^## |$)`, "m"));
-	assert.ok(m, `"docs/SPEC.md" must carry a "## ${title}" section`);
-	return m![0];
+	const idx = text.search(new RegExp(`^## (?:\\d+\\. )?${title}[^\\n]*$`, "m"));
+	assert.notEqual(idx, -1, `"docs/SPEC.md" must carry a "## ${title}" section`);
+	const rest = text.slice(idx);
+	const next = rest.indexOf("\n## ");
+	return next === -1 ? rest : rest.slice(0, next);
 }
 
 const read = (rel: string): string => readFileSync(path.join(ROOT, rel), "utf8");
@@ -162,9 +164,9 @@ function schemaDispatchRoles(): string[] {
 function assertDispatchRow(row: string, where: string): void {
 	assert.ok(row.startsWith("| `devloop_dispatch` |"), `${where}: no dispatch row`);
 	for (const p of dispatchParams()) {
-		assert.ok(new RegExp(`(?:^|[,{ ])${esc(p)}\\b`).test(row), `${where}: the dispatch row is missing parameter ${p}`);
+		assert.ok(new RegExp(`(?<![\w-])${esc(p)}(?!\w)`).test(row), `${where}: the dispatch row is missing parameter ${p}`);
 	}
-	const optionals = new Set([...row.matchAll(/\b[a-z]+\?\b/g)].map((m) => m[0]));
+	const optionals = new Set([...row.matchAll(/(?<![\w-])([a-z]+\?)(?!\w)/g)].map((m) => m[1]));
 	const knownOptional = new Set(dispatchParams().filter((p) => p.endsWith("?")));
 	const unknown = [...optionals].filter((p) => !knownOptional.has(p)).sort();
 	assert.deepEqual(unknown, [], `${where}: the dispatch row names parameters the schema does not have: ${unknown.join(", ")}`);
@@ -215,7 +217,7 @@ test("docs/LEARNINGS.md carries each round's lesson with symptom/cause/preventio
 		"wait_for", // the flake class and the bounded-poll idiom
 		"delete-then-push", // the PR-closed-without-merge nuance
 	]) {
-		assert.ok(t.toLowerCase().includes(topic), `LEARNINGS.md is missing the "${topic}" lesson`);
+		assert.ok(t.toLowerCase().includes(topic.toLowerCase()), `LEARNINGS.md is missing the "${topic}" lesson`);
 	}
 	for (const field of ["symptom", "root cause", "now prevents", "pinned"]) {
 		assert.ok(t.toLowerCase().includes(field), `every LEARNINGS.md entry must carry the "${field}" dimension`);
