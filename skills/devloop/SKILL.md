@@ -162,7 +162,8 @@ line). It classifies the train's diff against the shared contracts and is the th
 a train touches one iff its diff carries any of `extension/` (incl. the `.pi/extensions/`
 mirror), `scripts/`, `agents/` (incl. `.pi/agents/`), `skills/` (incl. `.pi/skills/`),
 the `.devloop.json` schema (root `.devloop.json`, `templates/devloop.json`,
-`.pi/templates/devloop.json`), or a spec doc under `docs/superpowers/specs/`.
+`.pi/templates/devloop.json`), the verifier brief template (`templates/verify-brief.md`),
+or a spec doc under `docs/superpowers/specs/`.
 - **rc 0, prints `VERIFY DISPATCH`:** the train is contract-touching — dispatch the
   verifier with the rendered brief verbatim:
   `devloop_dispatch {role: "verifier", worktree: <repo root>, task: <brief>}`. The brief is

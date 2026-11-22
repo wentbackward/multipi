@@ -59,6 +59,7 @@ test("skill §7 documents the automatic trigger, the threshold and the report at
 		"agents/",
 		"skills/",
 		".devloop.json",
+		"templates/verify-brief.md", // the brief template is its own threshold category
 		"docs/superpowers/specs/",
 		"report", // the report subcommand attaches the proof to the issues
 	]) {

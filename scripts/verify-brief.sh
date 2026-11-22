@@ -16,9 +16,14 @@
 #       [exercise] (optional, one line) is the train-specific contract exercise the
 #       verifier runs on top of the standard steps.
 #   verify-brief.sh report <ticket> [<ticket> ...] < report.md
-#       Attach the verifier's report (on stdin) to every train ticket as one
-#       "Post-merge verification" comment; the header verdict rides the report's own
-#       `VERIFICATION: PASS` / `VERIFICATION: FAIL` line (absent = plain header).
+#       Attach the verifier's report (on stdin) to every train ticket that does not
+#       already carry one, as one "Post-merge verification" comment (one per ticket —
+#       a ticket already carrying the header is skipped, so a retry after a partial
+#       attach appends nothing); the header verdict rides the report's own
+#       `VERIFICATION: PASS` / `VERIFICATION: FAIL` line (line-anchored, PASS a whole
+#       word — prose mentions do not count; absent = plain header). A tracker failure
+#       on the check or the attach of any ticket exits 3 (nothing half-attached
+#       passes silently).
 #
 # The dispatch threshold (DECISIONS.md 2026-11-21, #108 — default-ON for anything
 # contract-touching): the train touches a shared contract iff its diff carries any of
@@ -28,6 +33,9 @@
 #   skills/      (incl. the installed .pi/skills/ mirror)
 #   the .devloop.json schema (root .devloop.json, templates/devloop.json,
 #   .pi/templates/devloop.json)
+#   the verifier brief template (templates/verify-brief.md — it prescribes every
+#   future verifier's behaviour and is mirrored byte-for-byte into every install;
+#   its own change is contract-touching, never docs/test-only — review #126)
 #   spec docs under docs/superpowers/specs/ (spec-pinned contracts)
 # A diff without any of these (docs, tests, README, …) is docs/test-only.
 #
@@ -77,6 +85,7 @@ classify_range() {
 		VB_COUNT=$((VB_COUNT + 1))
 		case "$f" in
 		".devloop.json" | "templates/devloop.json" | ".pi/templates/devloop.json") cat=".devloop.json schema" ;;
+		"templates/verify-brief.md") cat="verify-brief template" ;;
 		extension/* | .pi/extensions/*) cat="extension/" ;;
 		scripts/*) cat="scripts/" ;;
 		agents/* | .pi/agents/*) cat="agents/" ;;
@@ -91,9 +100,11 @@ classify_range() {
 	done <<<"$VB_FILES"
 }
 
-# report mode: attach the single verification comment to every train ticket.
+# report mode: attach the single verification comment to every train ticket that
+# does not already carry one (one 'Post-merge verification' comment per ticket —
+# the skill's contract; a retry after a partial attach must append nothing).
 attach_report() {
-	local body verdict header text t out bad=0
+	local body verdict header text t out bad=0 attached=""
 	[ $# -ge 1 ] || dl_die "usage: verify-brief.sh report <ticket> [<ticket> ...] < report.md"
 	dl_load_config required
 	command -v gh >/dev/null 2>&1 || {
@@ -102,22 +113,45 @@ attach_report() {
 	}
 	body=$(cat)
 	[ -n "$body" ] || dl_die "the report body (stdin) is empty"
+	# Line-ANCHORED verdict (review #126): the markers count only when they open a
+	# line and PASS is a whole word (a space or line end follows) — a quoted
+	# 'VERIFICATION: PASSING — …', a mid-line mention, or prose quoting the markers
+	# must not set the header verdict.
 	verdict=""
-	if printf '%s\n' "$body" | grep -q "VERIFICATION: PASS"; then
+	if printf '%s\n' "$body" | grep -qE '^VERIFICATION: PASS([[:space:]]|$)'; then
 		verdict=" — PASS"
-	elif printf '%s\n' "$body" | grep -q "VERIFICATION: FAIL"; then
+	elif printf '%s\n' "$body" | grep -qE '^VERIFICATION: FAIL([[:space:]]|$)'; then
 		verdict=" — FAIL"
 	fi
 	header="## Post-merge verification${verdict}"
 	text="$(printf '%s\n\n%s' "$header" "$body")"
 	for t in "$@"; do
+		# De-dupe (review #126): a ticket that ALREADY carries the header (a prior
+		# attach, an rc 3 partial retry, a manual re-run) is skipped, never doubled.
+		# A check that fails is a tracker failure: fail closed (rc 3) — never attach
+		# against an unknown state and risk a second comment.
+		if ! out=$(gh issue view "$t" --json comments 2>&1); then
+			echo "multipi: could not check ticket $t for an existing verification comment: $out" >&2
+			bad=1
+			continue
+		fi
+		if printf '%s\n' "$out" | grep -qF "## Post-merge verification"; then
+			echo "skip: ticket $t already carries a 'Post-merge verification' comment — nothing attached"
+			continue
+		fi
 		if ! out=$(gh issue comment "$t" --body "$text" 2>&1); then
 			echo "multipi: could not attach the verification report to ticket $t: $out" >&2
 			bad=1
+			continue
 		fi
+		attached="${attached:+$attached }$t"
 	done
 	[ "$bad" -eq 0 ] || exit 3
-	echo "verification report attached to: $*"
+	if [ -n "$attached" ]; then
+		echo "verification report attached to: $attached"
+	else
+		echo "verification report attached to: (none new — every ticket already verified)"
+	fi
 }
 
 [ $# -ge 1 ] || dl_die "usage: verify-brief.sh <pre>..<post> [exercise] | report <ticket> [<ticket> ...] < report.md"
@@ -132,6 +166,14 @@ exercise=${2:-"none declared for this train — the standard steps 1-5 are the w
 classify_range "$range" || exit 2
 template=$(verify_template) || exit 3
 url=$(git remote get-url origin 2>/dev/null) || url=""
+# Credential hygiene (review #126, the sharpest finding): an origin carrying
+# embedded userinfo (https://user:token@…) must not leak the token into the
+# brief → the verifier's session log → the issue comment. Strip everything between
+# :// and the LAST @ before the first / — git itself splits userinfo at the last
+# @, so an RFC-invalid userinfo containing @ is stripped whole, not half. An
+# @ with no following host-and-path (no '/') is not a userinfo separator and is
+# left alone; scp-style user@host:path has no credential and passes through.
+url=$(printf '%s\n' "$url" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/]*@([^/].*)$#\1\2#')
 [ -n "$url" ] || url=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 touched=${VB_TOUCHED#$'\n'}
 touched=${touched%$'\n'}
