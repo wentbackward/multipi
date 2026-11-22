@@ -90,13 +90,15 @@ test("the §2.2 hygiene clause names the sanctioned watchdog exception (multipi-
 	assert.ok(sec2_2().includes("sanctioned exception") || sec2_2().includes("only exception"), "the clause must state it is the sanctioned/only exception");
 });
 
-// --- item 5: the close mechanism is manual, with the PR-close nuance ---------
+// --- item 5: the close mechanism is manual, with the PR-close nuance (narrowed) ---------
 
-test("the §4 merge step documents the actual close mechanism and the PR-closed-without-merge nuance", () => {
+test("the §4 merge step documents the actual close mechanism and the NARROWED PR-close nuance (open, unmerged PRs only)", () => {
 	const sec4 = designSection("4.");
 	assert.ok(!sec4.includes("close via `Closes #n`"), "the stale 'close via Closes #n' claim must be gone");
 	assert.ok(sec4.includes("gh issue close"), "the actual mechanism (the orchestrator's manual gh issue close) must be documented");
-	assert.ok(/close[sd]? the (branch'?s )?PR[^.]*without merging/i.test(sec4), "the PR-closed-without-merge nuance (delete-then-push) must be documented");
+	assert.ok(sec4.includes("open, unmerged PR"), "the nuance must be narrowed: branch deletion closes an OPEN, unmerged PR (a merged PR is unaffected)");
+	assert.ok(/deleting a branch[^.]*open, unmerged PR[^.]*closes that PR/i.test(sec4), "the narrowed delete-then-push wording must be documented");
+	assert.ok(!sec4.includes("git push --delete"), "the post-merge `git push --delete` cleanup must not be claimed to close the (already merged) PR");
 	assert.ok(sec4.includes("#55"), "the observed incident it cites (#55) must be attributed");
 });
 
