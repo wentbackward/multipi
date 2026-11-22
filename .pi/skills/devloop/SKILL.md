@@ -135,8 +135,8 @@ the implementer. Never skip it; never merge on the implementer's self-review.
   STATUS: BLOCKED with the file named. Re-run the smoke sections you touched plus
   `npx tsc --noEmit`, then re-push with force-with-lease. Nothing else." The review then covers
   the final tree. If you keep the pre-rebase review instead, say so in the review record and the
-  DECISIONS entry: "reviewed pre-rebase; rebase was rule-resolved only". When the APPROVE carries should-fixes (nothing
-  must-fix), run the polish budget (ticket #105):
+  DECISIONS entry: "reviewed pre-rebase; rebase was rule-resolved only". When the APPROVE
+  carries should-fixes (nothing must-fix), run the polish budget (ticket #105):
   - A should-fix re-dispatch is ONE ROUND: the comment the re-dispatch rides on must open its
     FIRST non-empty line with `should-fix follow-up` — the marker alone or followed by a colon
     (the boundary keeps prose like "should-fix follow-ups are welcome" from counting). The loop
@@ -163,12 +163,12 @@ When the set of `dl/approved` branches stabilises (nothing new expected this pas
    comment the gate log path.
 3. Red: nothing merges. Read the tail, identify the owning ticket(s), dispatch the implementer(s) to
    fix, and re-gate the whole train when they are back.
-4. Conflict at branch X: the gate's rebase step first applies the codified rules (§2's additive
-   classes) — when EVERY conflicted file is rule-covered (docs/DECISIONS.md
-   chronological-union, tests/smoke.sh additive-both) the conflict is resolved in place, logged
-   `auto-resolved: <rule> on <file>` in the gate output, and the train proceeds. Anything semantic
-   still refuses (exit 3, `TRAIN rebase conflict at X`): gate the rest without X; send X's
-   implementer the standing rebase instruction (§4, on the lower branches); re-gate.
+4. Conflict at branch X: the gate's rebase step first applies the codified conflict rules — when
+   EVERY conflicted file is rule-covered (docs/DECISIONS.md chronological-union, tests/smoke.sh
+   additive-both) the conflict is resolved in place, logged `auto-resolved: <rule> on <file>` in
+   the gate output, and the train proceeds. Anything semantic still refuses (exit 3,
+   `TRAIN rebase conflict at X`): gate the rest without X; send X's implementer the standing
+   rebase instruction (§4, on the lower branches); re-gate.
 
 ## 6. Merge
 
