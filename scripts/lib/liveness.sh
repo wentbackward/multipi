@@ -139,6 +139,15 @@ lv_last_wake_ts() {
   awk '$2 == "WAKE" || $2 == "WEDGE" {t = $1} END {print t + 0}' "$1" 2>/dev/null || echo 0
 }
 
+# lv_last_report_ts LOG KEY T: the timestamp (ms) of the last DELIVERED `REPORT n=KEY
+# t=T` entry (0 when none) — the per-report ledger of the report-landing wake
+# (ticket #133), the same watch-log-ledger pattern as lv_last_wake_ts / lv_last_blocked_ts.
+# Only a delivered wake counts: REPORT-SKIP / REPORT-NO-TTY lines do not start the window
+# (an undelivered report is retried once a TTY returns).
+lv_last_report_ts() {
+  awk -v k="$2" -v t="$3" '$2 == "REPORT" && $3 == "n=" k && $4 == "t=" t { last = $1 } END { print last + 0 }' "$1" 2>/dev/null || echo 0
+}
+
 # lv_last_blocked_ts LOG N: the timestamp (ms) of the last `BLOCKED n=N` entry (0 when
 # none) — the per-ticket 24h ledger of the blocked-nudge (ticket #104), the same watch-
 # log-ledger pattern as lv_last_wake_ts. BLOCKED-SKIP/NO-TTY/NO-AGE entries do not count

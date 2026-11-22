@@ -5,6 +5,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync, chmodSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket, testSeams } from "../../extension/src/tools.ts";
+import { readState, type DispatchEntry } from "../../extension/src/state.ts";
 import { makeFixture } from "../fixtures.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -80,6 +81,31 @@ function textOf(r: { content: Array<{ type: string; text?: string }> }): string 
 	return r.content.map((c) => c.text ?? "").join("");
 }
 
+/** Bounded wait for ANY dispatch key with the given prefix to reach a terminal state
+ * (the ad-hoc keys — verifier-<ts> — are not predictable, so the prefix is the handle). */
+async function waitTerminalPrefix(ctx: ReturnType<typeof ctxWithAgents>, prefix: string, timeoutMs = 20_000): Promise<string> {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		const hits = Object.entries(readState(ctx.stateDir)).filter(([k, e]) => k.startsWith(prefix) && e.status !== "running");
+		if (hits.length > 0) return hits[0][0];
+		if (Date.now() > deadline) throw new Error(`no '${prefix}-*' entry reached a terminal state within ${timeoutMs} ms`);
+		await new Promise((r) => setTimeout(r, 100));
+	}
+}
+
+/** Bounded wait for a dispatch entry to reach a terminal state. Fire-and-poll (#133):
+ * the completion handler writes the terminal entry asynchronously, so tests poll the
+ * shared state (a bounded poll, the smoke's #82 idiom) instead of assuming when it lands. */
+async function waitTerminal(ctx: ReturnType<typeof ctxWithAgents>, key: string, timeoutMs = 20_000): Promise<DispatchEntry> {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		const e = readState(ctx.stateDir)[key];
+		if (e && e.status !== "running") return e;
+		if (Date.now() > deadline) throw new Error(`entry '${key}' did not reach a terminal state within ${timeoutMs} ms (last seen: ${JSON.stringify(e ?? null)})`);
+		await new Promise((r) => setTimeout(r, 100));
+	}
+}
+
 async function call(ctx: ReturnType<typeof ctxWithAgents>, name: string, args: Record<string, unknown>, session: Record<string, unknown> = {}) {
 	const tools = makeTools();
 	const tool = tools.find((t) => t.name === name)!;
@@ -88,7 +114,7 @@ async function call(ctx: ReturnType<typeof ctxWithAgents>, name: string, args: R
 	return res;
 }
 
-test("dispatch(implementer) runs the child, opens the PR, labels in-review", async () => {
+test("dispatch(implementer) spawns the child and the completion handler opens the PR and labels in-review", async () => {
 	const fx = makeFixture(JSON.stringify({ base_branch: "main", checks: [{ name: "unit", command: "true", heavy: false }], format: null, format_extensions: null, fast_check: "true" }));
 	setupEnv(fx);
 	try {
@@ -96,7 +122,11 @@ test("dispatch(implementer) runs the child, opens the PR, labels in-review", asy
 		const n = createIssue(fx, "Add a feature X");
 		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
-		assert.match(textOf(res), /implementer #\d+ .* -> done/);
+		// Fire-and-poll (#133): the dispatch resolves with the RECEIPT (child left running),
+		// not with the child's report — the side effects land on completion.
+		assert.ok(textOf(res).includes(`DISPATCHED implementer #${n} (feat/${n}-add-a-feature) -> running`), textOf(res));
+		await waitTerminal(ctx, String(n));
+		assert.equal(readState(ctx.stateDir)[String(n)].status, "done");
 		// worktree created in the consolidated worktree dir (<state>/worktrees/<repo>/issue-<n>)
 		assert.ok(existsSync(path.join(fx.dir, "home", "proj", "worktrees", "proj", `issue-${n}`)), "worktree exists");
 		// branch pushed
@@ -119,6 +149,7 @@ test("dispatch stamps the child with its role (MULTIPI_CHILD_ROLE via the spawn 
 		const n = createIssue(fx, "Role plumbing check");
 		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
+		await waitTerminal(ctx, String(n)); // the (background) child wrote the role echo on exit
 		assert.ok(existsSync(roleFile), "the child saw the FAKE_PI_ECHO_ROLE seam");
 		assert.equal(readFileSync(roleFile, "utf8"), "implementer", "child env carried its role name");
 	} finally {
@@ -148,6 +179,7 @@ async function verifierArgv(extra: { session?: Record<string, unknown>; agentOve
 		const ctx = ctxWithAgents(fx);
 		const res = await call(ctx, "devloop_dispatch", { role: "verifier", task: "audit it" }, extra.session ?? {});
 		assert.equal(res.isError ?? false, false, textOf(res));
+		await waitTerminalPrefix(ctx, "verifier-"); // the background child wrote the argv echo on exit
 		return readFileSync(argvFile, "utf8");
 	} finally {
 		delete process.env.FAKE_PI_ECHO_TASK;
@@ -221,11 +253,15 @@ test("cancel marks the entry interrupted and kills via the controller registry (
 		const tools = makeTools();
 		const dispatch = tools.find((t) => t.name === "devloop_dispatch")!;
 		const p = (dispatch.execute as unknown as (...a: unknown[]) => Promise<any>)("tc-slow", { role: "implementer", ticket: n }, new AbortController().signal, undefined, { cwd: ctx.cwd });
+		const receipt = await p; // fire-and-poll: the receipt comes back at once, child left running
+		assert.equal(receipt.isError ?? false, false, textOf(receipt));
+		assert.match(textOf(receipt), /-> running/);
 		await new Promise((r) => setTimeout(r, 400)); // let the child start
 		const cancel = cancelImpl(ctx, String(n));
 		assert.match(textOf(cancel), /cancel sent/);
-		const res = await p; // resolves once the fake child is killed
-		assert.match(textOf(res), /interrupted/);
+		// The completion handler settles the entry asynchronously once the killed child exits.
+		const entry = await waitTerminal(ctx, String(n));
+		assert.equal(entry.status, "interrupted");
 	} finally {
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.FAKE_PI_SLEEP;
@@ -233,30 +269,94 @@ test("cancel marks the entry interrupted and kills via the controller registry (
 	}
 });
 
-test("every devloop_* call is bounded: a hung dispatch RESOLVES (never rejects, never hangs) with the reconciliation text (spec 2026-11-15 §2)", async () => {
-	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
+// --- fire-and-poll (ticket #133): the receipt, exactly-once collection, the retired block ----
+
+test("dispatch returns a receipt in bounded time with the child left running (fire-and-poll, #133)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", checks: [{ name: "unit", command: "true", heavy: false }], format: null, format_extensions: null, fast_check: "true" }));
 	setupEnv(fx);
 	process.env.FAKE_PI_MODE = "slow";
-	process.env.FAKE_PI_SLEEP = "30";
-	process.env.MULTIPI_TOOL_TIMEOUT_MS = "500"; // documented seam: no wall-clock minutes in tests
+	process.env.FAKE_PI_SLEEP = "30"; // a child that would block a blocking dispatch for 30 s
 	try {
 		const ctx = ctxWithAgents(fx);
-		const n = createIssue(fx, "Bound task");
+		const n = createIssue(fx, "Fire and poll");
 		const start = Date.now();
 		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
-		assert.ok(Date.now() - start < 10_000, "resolved at the bound, not when the child would report (30s)");
+		const elapsed = Date.now() - start;
+		assert.equal(res.isError ?? false, false, textOf(res));
+		assert.ok(elapsed < 10_000, `the receipt came back after ${elapsed} ms — dispatch must not wait on the 30 s child`);
+		const t = textOf(res);
+		// The receipt: child key, ticket, role, branch, worktree, notes path, report file path,
+		// expected-duration hint.
+		assert.ok(t.includes(`DISPATCHED implementer #${n} (feat/${n}-fire-and-poll) -> running`), t);
+		assert.match(t, new RegExp(`key: ${n}$`, "m"));
+		assert.ok(t.includes(`branch: feat/${n}-fire-and-poll`), t);
+		assert.match(t, /worktree: .*/);
+		assert.match(t, new RegExp(`notes: .*pr-feat_${n}-fire-and-poll\.md`), t);
+		assert.match(t, new RegExp(`report: .*reports/${n}\.md`));
+		assert.match(t, /expected: ~45 min/);
+		// The child is LEFT RUNNING: the entry is running and the report file is not written yet.
+		const entry = readState(ctx.stateDir)[String(n)];
+		assert.equal(entry.status, "running", "the child keeps running after the receipt");
+		assert.ok(!existsSync(path.join(ctx.stateDir, "reports", `${n}.md`)), "the report file lands on completion, not on dispatch");
+		// Tidy: cancel the slow child and let the completion handler settle it.
+		assert.match(textOf(cancelImpl(ctx, String(n))), /cancel sent/);
+		assert.equal((await waitTerminal(ctx, String(n))).status, "interrupted");
+	} finally {
+		delete process.env.FAKE_PI_MODE;
+		delete process.env.FAKE_PI_SLEEP;
+		fx.cleanup();
+	}
+});
+
+test("a completed child's report is presented exactly once at the next collection (ledger-pinned, #133)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", checks: [{ name: "unit", command: "true", heavy: false }], format: null, format_extensions: null, fast_check: "true" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Collected exactly once");
+		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
+		assert.equal(res.isError ?? false, false, textOf(res));
+		assert.equal((await waitTerminal(ctx, String(n))).status, "done", "the fake implementer delivered (its report ends with STATUS: DONE)");
+		// The completion side effects ran (PR + in-review label + report file).
+		assert.ok(existsSync(path.join(fx.dir, "gh", `feat_${n}-collected-exactly-once.title`)), "the completion handler opened the PR");
+		assert.ok(readFileSync(path.join(fx.dir, "gh", "labels", String(n)), "utf8").includes("dl/in-review"));
+		const reportFile = path.join(ctx.stateDir, "reports", `${n}.md`);
+		assert.match(readFileSync(reportFile, "utf8"), /STATUS: DONE/);
+		// First collection (devloop_status): the report is presented ...
+		const s1 = textOf(await call(ctx, "devloop_status", {}));
+		assert.match(s1, /## Late reports/);
+		assert.match(s1, new RegExp(`- #${n} implementer \\(`));
+		assert.match(s1, /STATUS: DONE/);
+		// ... and acked into the ledger: the next collection presents NOTHING (exactly once).
+		const s2 = textOf(await call(ctx, "devloop_status", {}));
+		const sec2 = s2.slice(s2.indexOf("## Late reports"), s2.indexOf("## Open tickets"));
+		assert.match(sec2, /\(none\)/, `the second collection must not re-present the report:\n${sec2}`);
+	} finally { fx.cleanup(); }
+});
+
+test("a hung dispatch preflight is still bounded: the call RESOLVES with the reconciliation text (spec 2026-11-15 §2), without waiting on a child", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main" }));
+	setupEnv(fx);
+	process.env.FAKE_PI_MODE = "slow"; // the child is slow too — the bound must not even be its waiting
+	process.env.FAKE_PI_SLEEP = "30";
+	process.env.MULTIPI_LIST_LAG_RETRY_MS = "4000"; // the stuck preflight: the list-lag retry wait
+	process.env.MULTIPI_TOOL_TIMEOUT_MS = "500";    // documented seam: no wall-clock minutes in tests
+	try {
+		const ctx = ctxWithAgents(fx);
+		const start = Date.now();
+		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: 9999 }); // missing: the retry never finds it
+		assert.ok(Date.now() - start < 10_000, "resolved at the bound");
 		assert.equal(res.isError, true, "the timeout is an error RESULT");
 		const t = textOf(res);
 		assert.match(t, /devloop_dispatch timed out after 1s/);
 		assert.match(t, /UNTOUCHED/);
-		assert.match(t, /scripts\/multipi-status\.sh/);
-		assert.match(t, /devloop_status/);
 		assert.match(t, /devloop_cancel/);
-		const cancel = cancelImpl(ctx, String(n)); // reconcile: kill the abandoned child
-		assert.match(textOf(cancel), /cancel sent/);
+		// No child was ever spawned (the preflight died at the ticket lookup).
+		assert.ok(!existsSync(path.join(ctx.stateDir, "dispatch.json")), "no dispatch entry for a preflight that timed out");
 	} finally {
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.FAKE_PI_SLEEP;
+		delete process.env.MULTIPI_LIST_LAG_RETRY_MS;
 		delete process.env.MULTIPI_TOOL_TIMEOUT_MS;
 		fx.cleanup();
 	}
@@ -595,8 +695,9 @@ test("dispatch(analyst) plans from a spec, writes no ticket, records a done entr
 		const res = await call(ctx, "devloop_dispatch", { role: "analyst", spec: "docs/prd.md" });
 		assert.equal(res.isError ?? false, false, textOf(res));
 		const out = textOf(res);
-		assert.match(out, /analyst .* -> done/);
+		assert.match(out, /DISPATCHED analyst -> running/);
 		assert.match(out, /plan file: .*notes\/tickets-prd-md\.md/);
+		await waitTerminal(ctx, "analyst-prd-md");
 		const state = JSON.parse(execFileSync("cat", [path.join(fx.dir, "home", "proj", "dispatch.json")]).toString());
 		assert.equal(state["analyst-prd-md"].status, "done");
 		assert.equal(state["analyst-prd-md"].worktree, fx.repo);
@@ -693,6 +794,8 @@ test("dispatch(scenario-writer) runs the child at the repo root (no worktree, no
 		const n = createIssue(fx, "Cache hit skips recompute", SC_WRITER_BODY);
 		const res = await call(ctx, "devloop_dispatch", { role: "scenario-writer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
+		assert.ok(textOf(res).includes(`DISPATCHED scenario-writer #${n} -> running`), textOf(res));
+		await waitTerminal(ctx, `scenario-writer-${n}`);
 		// The echoed task IS the brief (written verbatim to the echo file): it must carry the
 		// ticket number, its acceptance criteria, the cited spec section and the store dir.
 		assert.ok(existsSync(echo), "the FAKE_PI_ECHO_TASK seam captured the brief");
@@ -736,7 +839,9 @@ test("dispatch(scenario-writer) DONE posts the scenario TITLES (id, title, requi
 			"STATUS: DONE",
 		].join("\n"));
 		const res = await call(ctx, "devloop_dispatch", { role: "scenario-writer", ticket: n });
-		assert.match(textOf(res), /scenario-writer #\d+ .* -> done/, textOf(res));
+		assert.equal(res.isError ?? false, false, textOf(res));
+		assert.ok(textOf(res).includes(`DISPATCHED scenario-writer #${n} -> running`), textOf(res));
+		await waitTerminal(ctx, `scenario-writer-${n}`);
 		const commentFile = path.join(fx.dir, "gh", "comments", String(n), "0001");
 		assert.ok(existsSync(commentFile), "a comment was posted on the ticket");
 		const comment = readFileSync(commentFile, "utf8");
@@ -767,13 +872,13 @@ test("dispatch(scenario-writer) BLOCKED labels the ticket dl/blocked and posts n
 		const n = createIssue(fx, "Cache hit skips recompute", SC_WRITER_BODY);
 		const res = await call(ctx, "devloop_dispatch", { role: "scenario-writer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
-		assert.match(textOf(res), /scenario-writer #\d+ .* -> blocked/, textOf(res));
+		assert.ok(textOf(res).includes(`DISPATCHED scenario-writer #${n} -> running`), textOf(res));
+		await waitTerminal(ctx, `scenario-writer-${n}`);
+		assert.equal(readState(ctx.stateDir)[`scenario-writer-${n}`].status, "blocked");
 		const labelFile = path.join(fx.dir, "gh", "labels", String(n));
 		assert.ok(existsSync(labelFile), "the label was recorded");
 		assert.ok(readFileSync(labelFile, "utf8").trim().split("\n").includes("dl/blocked"), "dl/blocked applied");
 		assert.ok(!existsSync(path.join(fx.dir, "gh", "comments", String(n))), "no scenario comment on a blocked ticket");
-		const state = JSON.parse(readFileSync(path.join(fx.dir, "home", "proj", "dispatch.json"), "utf8"));
-		assert.equal(state[`scenario-writer-${n}`].status, "blocked");
 	} finally {
 		delete process.env.FAKE_PI_REPORT;
 		fx.cleanup();
@@ -789,7 +894,8 @@ test("dispatch(scenario-writer) DONE with no scenario lines posts no comment", a
 		const n = createIssue(fx, "Cache hit skips recompute", SC_WRITER_BODY);
 		const res = await call(ctx, "devloop_dispatch", { role: "scenario-writer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
-		assert.match(textOf(res), /scenario-writer #\d+ .* -> done/, textOf(res));
+		assert.ok(textOf(res).includes(`DISPATCHED scenario-writer #${n} -> running`), textOf(res));
+		await waitTerminal(ctx, `scenario-writer-${n}`);
 		assert.ok(!existsSync(path.join(fx.dir, "gh", "comments", String(n))), "no comment without scenario lines");
 		assert.ok(!existsSync(path.join(fx.dir, "home", "proj", "worktrees")), "the writer ran at the repo root, no worktree");
 		const state = JSON.parse(readFileSync(path.join(fx.dir, "home", "proj", "dispatch.json"), "utf8"));
@@ -912,7 +1018,8 @@ test("dispatch(implementer) (store on, covered by a valid t<n>- scenario): proce
 		seedScenario(fx, `t${n}-the-behaviour`);
 		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
-		assert.match(textOf(res), new RegExp(`implementer #${n} .* -> done`), textOf(res));
+		assert.match(textOf(res), new RegExp(`DISPATCHED implementer #${n} \\(feat/${n}-covered-ticket-gets\\) -> running`), textOf(res));
+		await waitTerminal(ctx, String(n));
 		const labels = readFileSync(path.join(fx.dir, "gh", "labels", String(n)), "utf8").trim().split("\n");
 		assert.ok(labels.includes("dl/in-progress") && labels.includes("dl/in-review"), JSON.stringify(labels));
 	} finally { fx.cleanup(); }
@@ -986,31 +1093,36 @@ test("stop gate (store off): coverage fields absent — a store-less config beha
 	} finally { fx.cleanup(); }
 });
 
-test("dispatch streams a status line (elapsed, tokens, cost, activity) while the child runs", async () => {
+test("dispatch tolerates child output arriving after the receipt (settled-tool-call updates are dropped, not fatal, #133)", async () => {
 	const fx = makeFixture(JSON.stringify({ base_branch: "main", checks: [{ name: "unit", command: "true", heavy: false }], format: null, format_extensions: null, fast_check: "true" }));
 	setupEnv(fx);
+	process.env.FAKE_PI_MODE = "slow"; // child outlives the tool call by a wide margin
+	process.env.FAKE_PI_SLEEP = "2";
 	try {
 		const ctx = ctxWithAgents(fx);
-		const n = createIssue(fx, "Stream a status line");
-		const updates: string[] = [];
+		const n = createIssue(fx, "Settled call updates");
 		const tools = makeTools();
 		const tool = tools.find((t) => t.name === "devloop_dispatch")!;
+		let updates = 0;
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any -- test harness drives raw tool executes
 		const res = await (tool.execute as unknown as (id: string, p: Record<string, unknown>, s: unknown, u: (u: { content?: { text?: string }[] }) => void, tc: unknown) => Promise<any>)(
-			"tc-test",
+			"tc-settled",
 			{ role: "implementer", ticket: n },
 			new AbortController().signal,
-			(u: { content?: { text?: string }[] }) => {
-				const t = (u.content ?? []).map((c) => c.text ?? "").join("");
-				if (t) updates.push(t);
-			},
+			(u: { content?: { text?: string }[] }) => { updates++; },
 			{ cwd: ctx.cwd },
 		);
 		assert.equal(res.isError ?? false, false, textOf(res));
-		const statusLines = updates.filter((t) => /tok [^ ]* · \$\d/.test(t));
-		assert.ok(statusLines.length >= 1, "a status update streamed: " + JSON.stringify(updates).slice(0, 400));
-		assert.match(statusLines[statusLines.length - 1], /implementer/);
-	} finally { fx.cleanup(); }
+		assert.match(textOf(res), /-> running/);
+		// Whatever streamed (or not) before the receipt, the child that keeps emitting after the
+		// tool call has settled must not error the session: the terminal lands, no update throws.
+		await waitTerminal(ctx, String(n));
+		void updates; // the count is timing-dependent (pre- vs post-settle output); the pin is the non-fatality
+	} finally {
+		delete process.env.FAKE_PI_MODE;
+		delete process.env.FAKE_PI_SLEEP;
+		fx.cleanup();
+	}
 });
 
 // ---------------------------------------------------------------------------
@@ -1065,7 +1177,8 @@ test("reclaim: a running entry with a dead pid is reconciled to crashed on statu
 		// …and the #104 dead end is gone: the re-dispatch proceeds instead of "already running".
 		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
-		assert.match(textOf(res), new RegExp(`implementer #${n} .* -> done`));
+		assert.match(textOf(res), new RegExp(`DISPATCHED implementer #${n} \\(feat/${n}-orphaned\\) -> running`));
+		await waitTerminal(ctx, String(n));
 		// the re-dispatch reused the orphan's branch (resume semantics)
 		assert.ok(sh(fx.repo, "rev-parse", "--verify", "-q", `origin/${branch}`).toString().length > 0, "branch pushed under the same name");
 	} finally { fx.cleanup(); }

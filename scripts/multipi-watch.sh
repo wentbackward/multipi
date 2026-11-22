@@ -37,8 +37,28 @@
 #     sidecar (rc 0/6), and skips silently when gh is unavailable or a tracker call fails —
 #     it never fails the check and never changes the rc table. Log tokens: BLOCKED /
 #     BLOCKED-SKIP / BLOCKED-NO-TTY / BLOCKED-NO-AGE / BL-PROBE / BL-THROTTLED.
+#   • Report-landing wake (ticket #133, fire-and-poll dispatch): a child entry that turned
+#     terminal (done/crashed/interrupted) in <state>/dispatch.json whose generation is NOT in
+#     the ack ledger (<state>/reconcile-seen.json) → one wake line PER uncollected report,
+#     appended to the TTY target:
+#     REPORT LANDED (multipi-watch): #<key> <role> -> <status> — run devloop_status to collect it (act in this turn).
+#     (non-numeric keys — review-/analyst-/verifier- — name plainly, the late-report surface's rule).
+#     Priority: the WEDGE and the tool WAKE outrank it (a report stays due — unacked — until
+#     collected, so losing the race only delays it a tick). Dedupe is a SEPARATE axis:
+#     per report (per key+generation, ledgered by `REPORT n=<key> t=<t>` lines in the watch
+#     log — the same pattern as BLOCKED n=), and it participates in the 3600 s WALL axis:
+#     a WAKE/WEDGE inside the window suppresses it for the tick (`REPORT-SKIP n=<key>
+#     recent`) — the report then surfaces at the next stop-gate turn. A report that could
+#     not be delivered (`REPORT-NO-TTY`) starts no window (retried when a TTY returns) and
+#     yields the same rc 6 + kill-and-resume fallback as the other wakes. Honest limit,
+#     shared with multipi-interrupt: the wake is a TTY paste, not an RPC — a detached
+#     terminal is unreachable; with the watchdog down, the report surfaces at the next
+#     stop-gate turn. Missing or corrupt dispatch state reads as NO REPORTS (soft read,
+#     the state surface's "history is lossy" stance — never a spurious wake). The one-shot
+#     rc table is untouched (a due-but-undeliverable report is the existing rc 6 row).
 #   Every check appends one line to <state>/watch.log: "<now-ms> <HEALTHY|WAKE|WEDGE|
-#   SUPPRESSED:<reason>|IDLE:<reason>|NOTTY|BUMP-FAILED|BLOCKED…|BL-PROBE|BL-THROTTLED"]. BUMP-FAILED: a WAKE was due and
+#   SUPPRESSED:<reason>|IDLE:<reason>|NOTTY|BUMP-FAILED|BLOCKED…|BL-PROBE|BL-THROTTLED|
+#   REPORT|REPORT-SKIP|REPORT-NO-TTY]. BUMP-FAILED: a WAKE was due and
 #   injected but its lastWakeSeq bump failed (e.g. no python3) — the 3600 s wall axis caps
 #   the damage, the log surfaces the lost seq axis.
 #
@@ -306,7 +326,7 @@ bl_check() {
 
 core_check() {
   local now sc state pid tick ev hb toolseq toolname toolstart lastwakeseq
-  local wedge_age tool_age kind min_n msg lw
+  local wedge_age tool_age kind min_n msg lw reports
   now=$(lv_now) || return 4
   sc=$(lv_sidecar)
   if [ ! -f "$sc" ]; then
@@ -336,16 +356,18 @@ core_check() {
   [ "$wedge_age" -lt 0 ] && wedge_age=0
   tool_age=0
   [ "$toolseq" -gt 0 ] && tool_age=$((now - toolstart)) && [ "$tool_age" -lt 0 ] && tool_age=0
+  reports=$(report_scan)
   local wedge_cond=0 tool_cond=0
   [ "$wedge_age" -gt $((stale * 5)) ] && wedge_cond=1
   [ "$toolseq" -gt 0 ] && [ "$tool_age" -gt "$tool_bound" ] && tool_cond=1
-  if [ "$wedge_cond" = 0 ] && [ "$tool_cond" = 0 ]; then
+  if [ "$wedge_cond" = 0 ] && [ "$tool_cond" = 0 ] && [ -z "$reports" ]; then
     wlog "$now" "HEALTHY"
     echo "watch: healthy (pid ${pid})"
     return 0
   fi
 
-  # The stronger wake wins: the wedge.
+  # The strongest wake wins: the wedge, then the long tool, then an uncollected report
+  # (a report stays due — unacked — until collected, so losing the race only delays it a tick).
   kind=WAKE
   min_n=$((tool_age / 60000))
   msg="WAKE (multipi-watch): ${toolname} has been in flight ${min_n}min. If it is wedged, say so and abort/retry; otherwise continue."
@@ -353,6 +375,16 @@ core_check() {
     kind=WEDGE
     min_n=$((wedge_age / 60000))
     msg="WEDGE SUSPECTED (multipi-watch): no orchestrator heartbeat for ${min_n}min. Check scripts/multipi-status.sh; if dead, kill ${pid} and resume in a fresh session (step 0)."
+  elif [ "$tool_cond" = 0 ]; then
+    kind=REPORT
+  fi
+  if [ "$kind" = REPORT ]; then
+    # One wake line per report, per-report ledger + the shared 3600 s wall axis (ticket #133).
+    # Returns 0 (nothing injected, or all ledgred) or 6 (due but no usable TTY — the
+    # one-shot rc table's existing no-TTY row, with the kill-and-resume fallback printed).
+    local rc
+    report_check "$now" "$pid" "$reports" || rc=$?
+    return ${rc:-0}
   fi
 
   # Dedupe axis 1: per tool.seq (the sidecar's monotonic watermark).
@@ -390,6 +422,125 @@ core_check() {
     wlog "$now" "WEDGE hb-age=${wedge_age}"
   fi
   echo "watch: injected ${kind} to ${LV_TARGET} (pid ${pid})"
+  return 0
+}
+
+# report_scan: the uncollected terminal entries of <state>/dispatch.json, one line per
+# report: "key<TAB>role<TAB>status<TAB>t" — t = endedAt (or startedAt for legacy entries),
+# the SAME generation identity as the extension's terminalTime (state.ts). An entry is
+# UNCOLLECTED when its generation is absent from the ack ledger (reconcile-seen.json) —
+# the same rule as the status surface's unseenTerminals. Missing or corrupt state reads
+# as NO REPORTS (soft read, the state surface's "history is lossy" stance — never a
+# spurious wake, never a crash). jq first, python3 second (the common.sh rule).
+report_scan() {
+  local st="$DL_STATE/dispatch.json" sn="$DL_STATE/reconcile-seen.json"
+  [ -f "$st" ] || return 0
+  if dl_have_jq; then
+    { [ -f "$sn" ] && cat "$sn" 2>/dev/null || printf '{}'; } | jq -r --slurpfile st "$st" '
+      ($st[0] | if type == "object" then . else {} end) as $st
+      | (if type == "object" then . else {} end) as $sn
+      | [ $st | to_entries[]
+          | select((.value | type) == "object"
+                   and ((.value.status? | type) == "string")
+                   and .value.status != "running")
+          | ((.value.endedAt? // .value.startedAt? // 0) | if type == "number" then . else 0 end) as $t
+          | select((($sn[.key]) // -1) != $t)
+          | [.key, (.value.role? // "?"), .value.status, ($t | tostring)] | @tsv
+        ]
+      | .[]' 2>/dev/null || true
+  else
+    python3 -I - "$st" "$sn" <<'PY' 2>/dev/null || true
+import json, sys
+def load(p):
+    try:
+        with open(p) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+st, sn = load(sys.argv[1]), load(sys.argv[2])
+for k, v in st.items():
+    if not isinstance(v, dict):
+        continue
+    status = v.get("status")
+    if not isinstance(status, str) or status == "running":
+        continue
+    t = v.get("endedAt", v.get("startedAt", 0))
+    if isinstance(t, bool) or not isinstance(t, (int, float)):
+        t = 0
+    if sn.get(k, -1) == t:
+        continue
+    print("\t".join([str(k), str(v.get("role", "?")), status, str(int(t))]))
+PY
+  fi
+  return 0
+}
+
+# report_check NOW PID REPORTS — the report-landing wake (ticket #133). One wake line
+# per uncollected report, APPENDED to the TTY target (multiple reports accumulate, one
+# line each). Dedupe: per report (per key+generation, the REPORT n= t= ledger in the
+# watch log — an undelivered report retries, a delivered one never repeats) AND the
+# shared 3600 s wall axis (a WAKE/WEDGE inside the window suppresses it for the tick).
+# rc contribution: 0 (nothing due or all ledgred), 6 (due but no usable TTY — the
+# existing no-TTY row, with the kill-and-resume fallback printed).
+report_check() {
+  local now=$1 pid=$2 reports=$3
+  local rk rr rs rt rid last lw ok ntt msg newlines due_keys tab=$'\t'
+  # Wall axis: a safety wake within the last 3600 s suppresses report wakes for the tick.
+  lw=$(lv_last_wake_ts "$log")
+  if [ "$lw" -gt 0 ] && [ $((now - lw)) -lt "$WAKE_DEDUPE_WALL_MS" ]; then
+    while IFS=$'\t' read -r rk rr rs rt; do
+      [ -n "$rk" ] && wlog "$now" "REPORT-SKIP n=$rk recent"
+    done <<<"$reports"
+    echo "watch: report(s) due but suppressed (last WAKE/WEDGE < 3600 s ago)"
+    return 0
+  fi
+  # Split the due list: already-delivered (ledgred) vs new. All-delivered is a clean no-op.
+  newlines=""
+  while IFS=$'\t' read -r rk rr rs rt; do
+    [ -n "$rk" ] || continue
+    last=$(lv_last_report_ts "$log" "$rk" "$rt")
+    if [ "$last" -gt 0 ]; then
+      wlog "$now" "REPORT-SKIP n=$rk seen"
+    else
+      newlines="${newlines}${rk}${tab}${rr}${tab}${rs}${tab}${rt}"$'\n'
+    fi
+  done <<<"$reports"
+  [ -n "$newlines" ] || return 0
+  lv_inject_target "$pid"
+  local due_keys=""
+  while IFS=$'\t' read -r rk rr rs rt; do
+    [ -n "$rk" ] && due_keys="$due_keys $rk"
+  done <<<"${newlines%$'\n'}"
+  # No usable TTY (the seam may point at a path that does not exist; a detached
+  # terminal has no target at all): every due report stays due — the dedupe window does
+  # NOT start, so it is retried the next tick a target returns. Same fallback + rc 6 the
+  # other wakes use.
+  if [ -z "$LV_TARGET" ] || [ ! -e "$LV_TARGET" ]; then
+    for rk in $due_keys; do wlog "$now" "REPORT-NO-TTY n=$rk"; done
+    lv_no_tty_fallback "$pid" "${LV_TTY_RAW:-}"
+    return 6
+  fi
+  ok=0; ntt=0
+  while IFS=$'\t' read -r rk rr rs rt; do
+    [ -n "$rk" ] || continue
+    case "$rk" in '' | *[!0-9]*) rid="$rk" ;; *) rid="#$rk" ;; esac
+    msg="REPORT LANDED (multipi-watch): ${rid} ${rr} -> ${rs} — run devloop_status to collect it (act in this turn)."
+    # APPEND (never `>`): the target may already hold a WAKE/WEDGE line — multiple wake
+    # lines accumulate, one per report, one per tick.
+    if printf '%s\n' "$msg" >>"$LV_TARGET" 2>/dev/null; then
+      wlog "$now" "REPORT n=$rk t=$rt"
+      ok=1
+    else
+      wlog "$now" "REPORT-NO-TTY n=$rk"
+      ntt=1
+    fi
+  done <<<"${newlines%$'\n'}"
+  if [ "$ntt" = 1 ]; then
+    lv_no_tty_fallback "$pid" "${LV_TTY_RAW:-}"
+    return 6
+  fi
+  [ "$ok" = 1 ] && echo "watch: injected REPORT wake(s) to ${LV_TARGET} (pid ${pid})"
   return 0
 }
 

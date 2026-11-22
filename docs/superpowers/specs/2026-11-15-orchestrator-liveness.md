@@ -194,3 +194,39 @@ paste, not an RPC — if the session's terminal is detached/dead, rc 6 + printed
 
 Implemented on one branch, one ticket (cohesive scope, shared hot files). After it lands,
 the parked **#55** resumes: solo gate → merge.
+
+## 7. Addendum — the report-landing wake (ticket #133)
+
+Fire-and-poll dispatch (the 2026-10-27 design §2.2, amended) removed the BLOCKING wait: a
+dispatch call resolves at SPAWN with a receipt, and the child's report lands on the next
+`devloop_status` (the late-report ledger, presented exactly once). The watchdog gains a THIRD
+wake condition so a landed report does not sit until the orchestrator happens to call
+`devloop_status`:
+
+- **Condition:** a child entry in `<state_dir>/dispatch.json` is terminal
+  (`done`/`crashed`/`interrupted`) AND its generation (`endedAt || startedAt`, the
+  extension's `terminalTime` rule) is absent from the ack ledger
+  `<state_dir>/reconcile-seen.json` — i.e. a report the orchestrator has not collected.
+- **Message (one line PER uncollected report, APPENDED to the TTY target — other wake lines
+  survive):**
+  `REPORT LANDED (multipi-watch): #<key> <role> -> <status> — run devloop_status to collect it (act in this turn).`
+  Non-numeric keys (`review-…`/`analyst-…`/`verifier-…`) name plainly (the late-report
+  surface's own rule).
+- **Priority:** the WEDGE and the long-tool WAKE outrank it (a report stays due — unacked —
+  until collected, so losing the race delays it exactly one tick).
+- **Dedupe (a separate axis, mirroring the blocked-nudge pattern):** per report —
+  key+generation, ledgered by `REPORT n=<key> t=<t>` lines in the watch log; an
+  UNDELIVERED report (`REPORT-NO-TTY`) starts no window (it retries once a TTY returns),
+  a delivered one never repeats. PLUS the shared 3600 s WALL axis: a WAKE/WEDGE inside the
+  window suppresses report wakes for the tick (`REPORT-SKIP n=<key> recent`) — the report
+  then surfaces at the next stop-gate turn, as always.
+- **Soft read:** missing or corrupt dispatch state reads as NO REPORTS (the status surface's
+  "history is lossy" stance) — never a spurious wake, never a crash.
+- **Contract:** the one-shot rc table is UNTOUCHED — a due-but-undeliverable report is the
+  existing rc 6 row (kill-and-resume fallback printed); the honest limit is unchanged (the
+  wake is a TTY paste, not an RPC; a detached terminal is unreachable, and with the watchdog
+  down the report surfaces at the next stop-gate turn).
+
+The 45-minute `orchestrator.tool_timeout_minutes` bound (spec §2, part B) remains, now scoped
+to what a dispatch actually does: the bounded PREFLIGHT (brief/config/tracker readiness),
+not the child.
