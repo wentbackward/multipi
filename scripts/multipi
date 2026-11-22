@@ -15,12 +15,18 @@
 #   multipi help  (-h, --help)   this summary, with each script's rc contract
 #
 # The dispatcher's own rc (the only one it invents): 2 bad usage (unknown subcommand,
-# or a zero-arg default with NEITHER board nor status present — a broken install).
+# a NAMED subcommand whose sibling script is missing, or a zero-arg default with
+# NEITHER board nor status present — a broken install, always an explicit refusal).
 #
 # No new env seams: the dispatcher consults none — each underlying script's own
 # MULTIPI_* seams apply unchanged when it is exec'd.
 set -u
 scripts_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+# run SIBLING [args…]: exec the sibling script with the remaining arguments and
+# pass its exit code through; a MISSING sibling is the dispatcher's own explicit
+# refusal (rc 2), never bash's raw "No such file or directory" (127) — the
+# no-arg path's broken-install refusal applies to the named path too.
 
 usage() {
   cat <<'EOF'
@@ -43,6 +49,17 @@ named script and passes its exit code through; the scripts also work standalone.
 EOF
 }
 
+named_exec() {
+  local s=$1
+  shift
+  if [ ! -f "$scripts_dir/$s" ]; then
+    echo "multipi: $s is not present in $scripts_dir (broken install?)" >&2
+    usage >&2
+    exit 2
+  fi
+  exec bash "$scripts_dir/$s" "$@"
+}
+
 cmd=${1:-}
 case $cmd in
   "")
@@ -59,11 +76,11 @@ case $cmd in
     usage >&2
     exit 2
     ;;
-  status) exec bash "$scripts_dir/multipi-status.sh" "${@:2}" ;;
-  board) exec bash "$scripts_dir/multipi-board.sh" "${@:2}" ;;
-  interrupt) exec bash "$scripts_dir/multipi-interrupt.sh" "${@:2}" ;;
-  watch) exec bash "$scripts_dir/multipi-watch.sh" "${@:2}" ;;
-  doctor) exec bash "$scripts_dir/doctor.sh" "${@:2}" ;;
+  status) named_exec multipi-status.sh "${@:2}" ;;
+  board) named_exec multipi-board.sh "${@:2}" ;;
+  interrupt) named_exec multipi-interrupt.sh "${@:2}" ;;
+  watch) named_exec multipi-watch.sh "${@:2}" ;;
+  doctor) named_exec doctor.sh "${@:2}" ;;
   help) usage ;;
   -h | --help) usage ;;
   *)
