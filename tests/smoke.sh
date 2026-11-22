@@ -361,6 +361,11 @@ _88_out=$(LOCKDIR="$lockdir" HEAVY_FNS="$_heavy_fns" bash -c '
     || { echo fns-missing; exit 1; }   # an undefined function would return 127 and masquerade as not-sweepable
   echo declared
   poll_seconds=1                              # the fixture cadence (.devloop.json heavy.poll_seconds)
+  # Phase-gate the planting (bounded spin, <= 0.6 s worst case): the classifier reads the
+  # dir mtime truncated to WHOLE seconds, so a mkdir whose check crosses a second boundary
+  # ages artificially and flips the classification (observed ~0.7% gate flake). Planting in
+  # the early phase of the second keeps mkdir + check inside one second.
+  while [ "$(date +%N)" -ge 400000000 ]; do :; done
   mkdir -p "$LOCKDIR/slot1.d"                 # fresh ownerless dir, mtime now
   slot_holder_dead "$LOCKDIR/slot1.d" \
     || { echo precond-not-dead; exit 1; }     # it is the MTIME gate that must keep it, not the pid logic
