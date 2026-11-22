@@ -4988,19 +4988,41 @@ dl_out=$(bash "$DISP_FIX/multipi" 2>&1); dl_r=$?
 expect "bare multipi: falls back to status when the board is absent (rc 0)" "0" "$dl_r"
 expect "bare multipi: the fallback runs status" "STUB=multipi-status argc=0" "$(head -n 1 <<<"$dl_out")"
 
+# A NAMED subcommand whose sibling script is missing gets the dispatcher's own
+# explicit refusal (rc 2 + the broken-install line), never bash's raw 127 (the
+# #109 review's asymmetry, folded in #126).
+dl_out=$(bash "$DISP_FIX/multipi" board 2>&1); dl_r=$?
+expect "multipi board: a missing sibling is an explicit refusal (rc 2, not 127)" "2" "$dl_r"
+echo "$dl_out" | grep -qF "multipi-board.sh is not present" && pass "multipi board: names the missing sibling" || fail "multipi board: no missing-sibling line: $dl_out"
+
+# Bare multipi with NEITHER sibling present: the broken-install refusal the #109
+# review verified only manually gets its pin (rc 2 + the neither-present line).
+rm -f "$DISP_FIX/multipi-status.sh"
+dl_out=$(bash "$DISP_FIX/multipi" 2>&1); dl_r=$?
+expect "bare multipi: neither board nor status present is a broken install (rc 2)" "2" "$dl_r"
+echo "$dl_out" | grep -qF "neither multipi-board.sh nor multipi-status.sh present" && pass "bare multipi: the broken-install line is printed" || fail "bare multipi: no broken-install line: $dl_out"
+
 # Bad usage is the dispatcher's own error (rc 2 + a usage line on the offender).
 dl_out=$(bash "$DISP_FIX/multipi" bogus 2>&1); dl_r=$?
 expect "multipi bogus: unknown subcommand is dispatcher usage error rc 2" "2" "$dl_r"
 echo "$dl_out" | grep -qF "unknown subcommand" && pass "multipi bogus: names the offence" || fail "multipi bogus: no offence line: $dl_out"
 
 # The help: every sibling named, each with its rc contract — the discoverability win.
+# The per-script rc summaries are the one duplication the dispatcher mandately carries;
+# they can drift from the script headers (the source of truth), so EVERY line is pinned,
+# not just the names and a bare "rc 0" (the #109 review's finding, folded in #126).
 dl_out=$(bash "$DISP_FIX/multipi" help 2>&1); dl_r=$?
 expect "multipi help: exits 0" "0" "$dl_r"
 dl_helpok=1
-for dl_tok in multipi-status.sh multipi-board.sh multipi-interrupt.sh multipi-watch.sh doctor.sh "rc 0"; do
+for dl_tok in multipi-status.sh multipi-board.sh multipi-interrupt.sh multipi-watch.sh doctor.sh \
+  "rc 0 live · 1 idle · 2 STALE/wedge · 3 dead · 4 bad usage" \
+  "rc 0 clear · 1 ≥1 dl/blocked · 2 over-bound child or red gate · 4 usage/state" \
+  "rc 0 injected · 4 bad usage · 5 no live session · 6 no TTY (prints the fallback)" \
+  "rc 0 healthy · 4 bad usage/clock · 5 nothing to wake · 6 no usable TTY" \
+  "rc 0 ready · 1 ≥1 problem"; do
   echo "$dl_out" | grep -qF "$dl_tok" || { dl_helpok=0; echo "help missing: $dl_tok"; }
 done
-[ "$dl_helpok" -eq 1 ] && pass "multipi help: names all five scripts and their rc contracts" || fail "multipi help: incomplete (see 'help missing' above)"
+[ "$dl_helpok" -eq 1 ] && pass "multipi help: names all five scripts and pins each script's rc contract line" || fail "multipi help: incomplete (see 'help missing' above)"
 
 # The SHIPPED dispatcher (not just the fixture): help exits 0, usage error exits 2.
 dl_out=$(bash "$plugin/scripts/multipi" help 2>&1); dl_r=$?
@@ -5114,6 +5136,33 @@ expect "an unresolvable range is a usage error (rc 2)" "2" "$rc"
 out=$(bash "$plugin/scripts/verify-brief.sh" 2>&1); rc=$?
 expect "verify-brief with no args is a usage error (rc 2)" "2" "$rc"
 echo "$out" | grep -qF "usage: verify-brief.sh" && pass "the usage line is printed" || fail "no usage line: $out"
+# The brief's own template is a shared contract (the #108 review's #7, folded in
+# #126): it prescribes every future verifier's behaviour and is mirrored
+# byte-for-byte into every install — a train changing ONLY it dispatches.
+vb_pre=$(git rev-parse main)
+vb_land templates/verify-brief.md "an edited verifier brief"
+vb_post=$(git rev-parse main)
+out=$(bash "$plugin/scripts/verify-brief.sh" "$vb_pre..$vb_post" 2>&1); rc=$?
+expect "a train changing ONLY templates/verify-brief.md dispatches (rc 0)" "0" "$rc"
+expect "the template category is named" "touched: verify-brief template" "$(printf '%s\n' "$out" | grep '^touched:')"
+# (c2) credential hygiene (the #108 review's sharpest finding, folded in #126):
+# an origin whose URL embeds userinfo (https://user:token@…) must reach the
+# brief WITHOUT the credentials — they would ride into the verifier session
+# logs and the issue comment.
+vb_cred="$work/vbrief-cred"
+git init -q -b main "$vb_cred"
+( cd "$vb_cred" && git commit -q --allow-empty -m "base" )
+git -C "$vb_cred" remote add origin "https://ci-user:ci-token-abc123@github.example.invalid/fixture/repo.git"
+cd "$vb_cred" || exit 1
+vb_cpre=$(git rev-parse HEAD)
+mkdir -p scripts && printf '#!/usr/bin/env bash\n' >scripts/credcheck.sh && git add scripts/credcheck.sh && git commit -q -m "feat: scripts/credcheck.sh"
+vb_cpost=$(git rev-parse HEAD)
+out=$(bash "$plugin/scripts/verify-brief.sh" "$vb_cpre..$vb_cpost" 2>&1); rc=$?
+echo "$out"
+expect "a contract-touching train dispatches from a credentialed origin (rc 0)" "0" "$rc"
+echo "$out" | grep -qF "https://github.example.invalid/fixture/repo.git" && pass "the brief names the credential-free origin" || fail "the sanitized origin url is missing: $out"
+echo "$out" | grep -q "ci-token-abc123\|ci-user@" && fail "embedded userinfo leaked into the brief" || pass "no userinfo@ credentials in the rendered brief"
+cd "$vb/repo" || exit 1
 # (d) the installed twin: install.sh ships the template beside the scripts and
 # the installed script resolves it (installed targets have no templates/ dir).
 vb_inst="$work/vbrief-install"
@@ -5135,15 +5184,38 @@ expect "report attaches to the train's tickets (rc 0)" "0" "$rc"
 gh issue view "$VB_T1" --json comments | grep -q "Post-merge verification — PASS" && pass "the ticket carries the PASS verification comment" || fail "no PASS header comment on the ticket"
 gh issue view "$VB_T1" --json comments | grep -q "VERIFICATION: PASS" && pass "the report rides the comment verbatim" || fail "report body missing from the comment"
 gh issue view "$VB_T2" --json comments | grep -q "Post-merge verification — PASS" && pass "every train ticket carries the comment" || fail "the second ticket is missing the comment"
-out=$(printf 'VERIFICATION: FAIL — make check red in the clone\n\nSTATUS: DONE\n' | bash "$plugin/scripts/verify-brief.sh" report "$VB_T1" 2>&1); rc=$?
+# A failing report rides a FAIL header onto its OWN ticket (VB_T1 is already
+# verified above — one verification comment per ticket, the re-attach dedupe pin
+# below relies on it).
+VB_T3=$(gh issue create "Contract train three" "acceptance" | sed 's|.*/issues/||')
+out=$(printf 'VERIFICATION: FAIL — make check red in the clone\n\nSTATUS: DONE\n' | bash "$plugin/scripts/verify-brief.sh" report "$VB_T3" 2>&1); rc=$?
 expect "a failing report attaches too (rc 0)" "0" "$rc"
-gh issue view "$VB_T1" --json comments | grep -q "Post-merge verification — FAIL" && pass "the FAIL verdict rides the header" || fail "no FAIL header on the ticket"
+gh issue view "$VB_T3" --json comments | grep -q "Post-merge verification — FAIL" && pass "the FAIL verdict rides the header" || fail "no FAIL header on the ticket"
+# Re-attach de-dupe (the #108 review's #6, folded in #126): a ticket already
+# carrying the "Post-merge verification" header is skipped, never doubled — a
+# retry after a partial attach (or a manual re-run) appends nothing.
+out=$(printf 'VERIFICATION: PASS\n\nSTATUS: DONE\n' | bash "$plugin/scripts/verify-brief.sh" report "$VB_T1" 2>&1); rc=$?
+expect "re-attaching to an already-verified ticket is a skip (rc 0)" "0" "$rc"
+echo "$out" | grep -qF "already carries" && pass "the skip announces the verified ticket" || fail "no skip line: $out"
+expect "the verified ticket keeps exactly one verification comment" "1" "$(gh issue view "$VB_T1" --json comments | grep -o 'Post-merge verification' | wc -l | tr -d '[:space:]')"
+# Line-anchored verdict (the #108 review's #5, folded in #126): prose that merely
+# MENTIONS the markers — quoted, mid-line, or PASSING — is not a verdict; the
+# header stays plain.
+VB_T4=$(gh issue create "Contract train four" "acceptance" | sed 's|.*/issues/||')
+out=$(printf '> "VERIFICATION: PASSING — looked healthy at first glance"\nthe transcript ends with VERIFICATION: FAIL on its mid-line mention\n' | bash "$plugin/scripts/verify-brief.sh" report "$VB_T4" 2>&1); rc=$?
+expect "marker mentions buried in prose leave the header plain (rc 0)" "0" "$rc"
+vb_t4_json=$(gh issue view "$VB_T4" --json comments)
+echo "$vb_t4_json" | grep -q "Post-merge verification — PASS" && fail "prose set the PASS header" || pass "no PASS header from a quoted PASSING mention"
+echo "$vb_t4_json" | grep -q "Post-merge verification — FAIL" && fail "prose set the FAIL header" || pass "no FAIL header from a mid-line mention"
+echo "$vb_t4_json" | grep -qF "## Post-merge verification" && pass "the plain header still rides" || fail "no plain header on the ticket"
 out=$(bash "$plugin/scripts/verify-brief.sh" report "$VB_T1" </dev/null 2>&1); rc=$?
 expect "an empty report body is a usage error (rc 2)" "2" "$rc"
 out=$(bash "$plugin/scripts/verify-brief.sh" report 2>&1); rc=$?
 expect "report with no tickets is a usage error (rc 2)" "2" "$rc"
 gh issue close "$VB_T1" >/dev/null
 gh issue close "$VB_T2" >/dev/null
+gh issue close "$VB_T3" >/dev/null
+gh issue close "$VB_T4" >/dev/null
 cd "$work/project" || exit 1
 
 # --- extension: registration + hook wiring (stub ExtensionAPI, offline) ------
