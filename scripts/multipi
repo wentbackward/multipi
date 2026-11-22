@@ -23,11 +23,6 @@
 set -u
 scripts_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-# run SIBLING [args…]: exec the sibling script with the remaining arguments and
-# pass its exit code through; a MISSING sibling is the dispatcher's own explicit
-# refusal (rc 2), never bash's raw "No such file or directory" (127) — the
-# no-arg path's broken-install refusal applies to the named path too.
-
 usage() {
   cat <<'EOF'
 multipi — the devloop operator console: one command (ticket #109)
@@ -49,6 +44,10 @@ named script and passes its exit code through; the scripts also work standalone.
 EOF
 }
 
+# named_exec SIBLING [args…]: exec the sibling script with the remaining arguments
+# and pass its exit code through; a MISSING sibling is the dispatcher's own explicit
+# refusal (rc 2), never bash's raw "No such file or directory" (127) — the
+# no-arg path's broken-install refusal applies to the named path too.
 named_exec() {
   local s=$1
   shift
