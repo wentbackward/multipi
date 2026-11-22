@@ -85,19 +85,147 @@ upstream_of() {
   fi
 }
 
+# --- codified conflict rules (ticket #134) -------------------------------------
+# The rebase step auto-resolves a conflict only when EVERY unmerged file is covered by
+# a deterministic rule; a single uncovered file refuses exactly as before (exit 3,
+# branch named). The rules:
+#   docs/DECISIONS.md — decisions-chronological-union: keep both additions, ordered by
+#     the date line (`- YYYY-MM-DD …`), the lower train branch breaking ties; entries
+#     already present in the shared context collapse (union, not concatenation).
+#   tests/smoke.sh — smoke-additive-both: an additive hunk on either side survives
+#     (`git merge-file --union` keeps both, in file order, lower branch first).
+# Each resolution is logged `auto-resolved: <rule> on <file>` (the gate output) and
+# the resolved file is kept beside the gate logs. A rule that cannot be applied
+# (not a plain three-stage content conflict) refuses like any uncovered file.
+
+RULE_DECISIONS="decisions-chronological-union"
+RULE_SMOKE="smoke-additive-both"
+
+# conflict_rule FILE — echo the rule covering FILE, or nothing.
+conflict_rule() {
+  case "$1" in
+    docs/DECISIONS.md) printf '%s\n' "$RULE_DECISIONS" ;;
+    tests/smoke.sh) printf '%s\n' "$RULE_SMOKE" ;;
+  esac
+}
+
+# stage_blob FILE STAGE — the staged blob sha of an unmerged file (1 base, 2 ours, 3 theirs).
+stage_blob() {
+  git ls-files -u -- "$1" | awk -v s="$2" '$3 == s { print $2; exit }'
+}
+
+# resolve_decisions OURS-TMP THEIRS-TMP — the chronological union described above.
+# Shared head lines print verbatim; then every entry of either tail sorted by date,
+# branch rank (ours first) and position, deduped against each other AND against the
+# head (an entry the context already carries is not re-appended); any non-entry tail
+# line (the file is one line per entry — prose is the exception) rides after the
+# entries, ours first then theirs, never dropped.
+DECISIONS_ENTRY_RE='^- [0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]'
+resolve_decisions() {
+  local -a a b
+  mapfile -t a <"$1"
+  mapfile -t b <"$2"
+  local n=${#a[@]} m=${#b[@]} p=0 i
+  while [ "$p" -lt "$n" ] && [ "$p" -lt "$m" ] && [ "${a[$p]}" = "${b[$p]}" ]; do
+    p=$((p + 1))
+  done
+  for ((i = 0; i < p; i++)); do printf '%s\n' "${a[$i]}"; done
+  local seen
+  seen=$(mktemp)
+  for ((i = 0; i < p; i++)); do
+    [[ "${a[$i]}" =~ $DECISIONS_ENTRY_RE ]] && printf '%s\n' "${a[$i]}" >>"$seen"
+  done
+  {
+    for ((i = p; i < n; i++)); do
+      if [[ "${a[$i]}" =~ $DECISIONS_ENTRY_RE ]]; then
+        printf '%s\t0\t%s\t%s\n' "$(printf '%s' "${a[$i]}" | cut -c3-12)" "$i" "${a[$i]}"
+      fi
+    done
+    for ((i = p; i < m; i++)); do
+      if [[ "${b[$i]}" =~ $DECISIONS_ENTRY_RE ]]; then
+        printf '%s\t1\t%s\t%s\n' "$(printf '%s' "${b[$i]}" | cut -c3-12)" "$i" "${b[$i]}"
+      fi
+    done
+  } | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k2,2n -k3,3n | awk -F'\t' '
+    FILENAME == ARGV[1] { seen[$0] = 1; next }
+    { line = $4; for (i = 5; i <= NF; i++) line = line "\t" $i; if (!(line in seen)) { seen[line] = 1; print line } }
+  ' "$seen" -
+  rm -f "$seen"
+  for ((i = p; i < n; i++)); do
+    [[ "${a[$i]}" =~ $DECISIONS_ENTRY_RE ]] || printf '%s\n' "${a[$i]}"
+  done
+  for ((i = p; i < m; i++)); do
+    [[ "${b[$i]}" =~ $DECISIONS_ENTRY_RE ]] || printf '%s\n' "${b[$i]}"
+  done
+}
+
+# stack_branch BRANCH — replay BRANCH onto $base_ref: rule-resolve fully covered
+# conflicts (logging each), refuse everything else (exit 3, branch named — the
+# original contract). $logs holds the resolved-file artifacts.
+stack_branch() {
+  local branch=$1 advance rule file entry sb so st d unmerged unresolved
+  local -a covered=()
+  advance=rebase
+  while :; do
+    if [ "$advance" = rebase ]; then
+      git rebase -q --onto "$base_ref" "$(upstream_of "$branch")" >/dev/null 2>&1 && return 0
+    else
+      GIT_EDITOR=true git rebase --continue >/dev/null 2>&1 && return 0
+    fi
+    advance="continue"
+    unmerged=$(git diff --name-only --diff-filter=U)
+    [ -n "$unmerged" ] || break
+    covered=()
+    unresolved=""
+    while IFS= read -r file; do
+      [ -n "$file" ] || continue
+      rule=$(conflict_rule "$file")
+      sb=$(stage_blob "$file" 1); so=$(stage_blob "$file" 2); st=$(stage_blob "$file" 3)
+      if [ -z "$rule" ] || [ -z "$sb$so$st" ]; then
+        unresolved=$file
+        break
+      fi
+      covered+=("$file|$rule|$sb|$so|$st")
+    done <<<"$unmerged"
+    [ -z "$unresolved" ] || break
+    d=$logs/rebase-auto-$(printf '%s' "$branch" | tr '/' '_').d
+    mkdir -p "$d"
+    for entry in "${covered[@]}"; do
+      IFS='|' read -r file rule sb so st <<<"$entry"
+      git cat-file blob "$sb" >"$d/base"
+      git cat-file blob "$so" >"$d/ours"
+      git cat-file blob "$st" >"$d/theirs"
+      case "$rule" in
+        "$RULE_DECISIONS") resolve_decisions "$d/ours" "$d/theirs" >"$d/resolved" ;;
+        "$RULE_SMOKE") git merge-file -p --union "$d/ours" "$d/base" "$d/theirs" >"$d/resolved" ;;
+      esac
+      cp -f "$d/resolved" "$file"
+      git add -- "$file"
+      cp -f "$d/resolved" "$logs/rebase-auto-$(printf '%s' "$branch" | tr '/' '_')-$(printf '%s' "$file" | tr '/.' '__').txt"
+      printf 'auto-resolved: %s on %s\n' "$rule" "$file"
+    done
+    rm -rf "$d"
+    if git diff --cached --quiet; then
+      # The resolution reproduces the current state: the commit is empty — skip it.
+      GIT_EDITOR=true git rebase --skip >/dev/null 2>&1 && return 0
+    else
+      continue
+    fi
+  done
+  git rebase --abort >/dev/null 2>&1
+  git checkout -q --detach "$DL_REMOTE/$DL_BASE"
+  gate_record red "rebase-conflict-at-$branch"
+  echo "TRAIN rebase conflict at $branch"
+  exit 3
+}
+
 for branch in "$@"; do
   git rev-parse -q --verify "$DL_REMOTE/$branch^{commit}" >/dev/null ||
     dl_die "$DL_REMOTE/$branch does not exist (push the branch first)"
   source_head=$(git rev-parse "$DL_REMOTE/$branch")
   git branch -q -f "train-$branch" "$source_head"
   git checkout -q "train-$branch"
-  if ! git rebase -q --onto "$base_ref" "$(upstream_of "$branch")" >/dev/null 2>&1; then
-    git rebase --abort >/dev/null 2>&1
-    git checkout -q --detach "$DL_REMOTE/$DL_BASE"
-    gate_record red "rebase-conflict-at-$branch"
-    echo "TRAIN rebase conflict at $branch"
-    exit 3
-  fi
+  stack_branch "$branch"
   base_ref="train-$branch"
   previous=$branch
   records+="$branch $source_head $(git rev-parse HEAD) pending"$'\n'
