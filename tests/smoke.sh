@@ -3087,7 +3087,7 @@ switch (process.env.REC_CMD) {
     if (!r.isError) {
       // Fire-and-poll (#133): the receipt comes back with the child left running; the
       // completion handler writes the terminal entry IN THIS PROCESS. Wait for it (bounded
-      // poll) so the driver's exit does not orphan the child before its fate lands.
+      // poll) so the process exits only after the child fate has landed.
       const fs = await import("node:fs");
       const p = process.env.MULTIPI_HOME + "/project/dispatch.json";
       for (let i = 0; i < 150; i++) {
@@ -4250,6 +4250,9 @@ lvfresh
 mkstate active 1000 9 780000
 lvwatch
 expect "watch: the tool wake still fires on its own" "1" "$(grep -c '^WAKE ' "$WK")"
+# the long tool resolves (advances to a young seq 10); the report lands — the wall window
+# (this WAKE) still suppresses the report wake, on its own axis, with its own reason
+mkstate active 1000 10 1000
 plant_report_entry 43 implementer done
 lvwatch
 expect "watch: a due report inside the 3600 s wall window is suppressed with its reason" "1" "$(grep -cF 'REPORT-SKIP n=43 recent' "$wl" 2>/dev/null)"
