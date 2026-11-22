@@ -59,8 +59,8 @@ bootstrap another project, the **`devloop-setup` skill**.
   caller's own process group and answered "alive" for an ownerless lock. No-flock detection
   is behavioural (`have_flock`), so a dead `flock` stub emulates a flock-less system.
 - Label vocabulary: `dl/in-progress` → `dl/in-review` → `dl/approved` → `dl/gated` → `dl/merged`
-  (+ `dl/blocked`). The labels ARE the state; keep them truthful. Area labels (`area/extension`,
-  `area/smoke`, `area/skills`, `area/scripts`, `area/docs`) declare a ticket's file areas (ticket
+  (+ `dl/blocked`). The labels ARE the state; keep them truthful. Area labels (`dl/area/extension`,
+  `dl/area/smoke`, `dl/area/skills`, `dl/area/scripts`, `dl/area/docs`) declare a ticket's file areas (ticket
   #134): set by the orchestrator at ticket creation; the critical areas (extension, smoke, skills)
   serialize in-flight implementers (skill §2 policy, orchestrator discipline). An approved branch
   on a stale base is rebased onto origin/main pre-gate by its owning implementer under the standing
