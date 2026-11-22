@@ -444,7 +444,7 @@ report_scan() {
                    and ((.value.status? | type) == "string")
                    and .value.status != "running")
           | ((.value.endedAt? // .value.startedAt? // 0) | if type == "number" then . else 0 end) as $t
-          | select((((.value | .) as $_ | $sn[.key]) // -1) != $t)
+          | select((($sn[.key]) // -1) != $t)
           | [.key, (.value.role? // "?"), .value.status, ($t | tostring)] | @tsv
         ]
       | .[]' 2>/dev/null || true

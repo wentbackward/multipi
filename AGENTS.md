@@ -80,6 +80,12 @@ bootstrap another project, the **`devloop-setup` skill**.
   (`scripts/multipi-watch.sh --daemon`, auto-started by TUI sessions, single-instance
   pidfile, `MULTIPI_WATCH_TOOL_MS`/`MULTIPI_WATCH_NOW_MS` seams) wakes a tool in flight > 12 min
   or a heartbeat silent > 10 min — deduped to one wake per tool-seq and per 3600 s.
+  A report-landing wake (ticket #133, fire-and-poll dispatch) is the third condition: a
+  child entry that turned terminal in `dispatch.json` with an uncollected report (its
+  generation missing from the ack ledger `reconcile-seen.json`) gets one appended
+  `REPORT LANDED …` line per report — deduped per report (`REPORT n=<key> t=<t>`
+  watch-log ledger) and by the same 3600 s wall axis; the WEDGE and the tool WAKE
+  outrank it, and the one-shot rc table is untouched.
   A blocked-ticket nudge (ticket #104, `MULTIPI_WATCH_BLOCKED_MS`, default 4h; malformed
   ⇒ silent default) additionally wakes an open `dl/blocked` ticket past the age — at most
   once per ticket per 24h, naming the ticket and its first question line, with explicit

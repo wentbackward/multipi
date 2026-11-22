@@ -17,9 +17,10 @@ and act on them.
 2. `devloop_status` — in-flight children, open tickets with their `dl/` labels, capacity, last green
    gate. It RECONCILES as it runs: a child whose pid is dead is re-marked `crashed` (its slot frees
    and a re-dispatch is allowed — a "refused: already running" after a lost report means the child
-   died unannounced), and children that reached a terminal state since your last status are listed
-   under "Late reports" with their report tail. Act on them in the same turn: `done` → dispatch the
-   reviewer; `crashed`/`interrupted` with a live worktree → re-dispatch. Then `git worktree list`
+   died unannounced), and children that finished since your last status are listed under
+   "Late reports" — their report tail, presented EXACTLY ONCE (collected from the ledger on this
+   call). Act on them in the same turn: `done` → dispatch the reviewer; `crashed`/`interrupted`
+   with a live worktree → re-dispatch. Then `git worktree list`
    and `git fetch` for anything the state file misses.
 3. **Handoff:** if `HANDOFF.md` exists in the loop notes dir, read it — the loop was paused by the
    operator. Re-dispatch the listed interrupted children (same ticket -> same worktree; their
@@ -69,7 +70,7 @@ Then dispatch implementers per the normal rules. If the analyst came back `STATU
 ## 2. Scheduling
 
 - Up to `heavy.slots` implementers at once (check `devloop_status`); a fourth concurrent dispatch is
-  refused by the tool with the in-flight list — wait for a report, do not retry in a tight loop.
+  refused by the tool with the in-flight list — wait for the reports, do not retry in a tight loop.
 - A ticket is STARTABLE when unblocked and every dependency is merged or in-flight (stacking).
 - Never run two tickets that edit the same hot files at once — conflicts cost more than waiting. Pair
   tickets from different areas.
@@ -85,11 +86,18 @@ Then dispatch implementers per the normal rules. If the analyst came back `STATU
 ## 3. Dispatch
 
 `devloop_dispatch {role: "implementer", ticket: <n>}` — everything else (branch, worktree, ports,
-notes, brief) is computed for you. When a dependency's branch is pushed but unmerged and the ticket
+notes, brief) is computed for you. **Dispatch is fire-and-poll:** the tool returns a RECEIPT
+immediately (child key, branch, worktree, notes path, the report file path, an expected-duration
+hint) and the child runs in the BACKGROUND — the main thread stays free for the operator. The
+child's report arrives on your next `devloop_status` (the late-report ledger, §0): at most one
+devloop_status per turn, and the watchdog wakes the session when a report lands. Act on the
+receipt in the same turn: dispatch the next startable ticket.
+
+When a dependency's branch is pushed but unmerged and the ticket
 stacks on it, tell the child in a follow-up comment on the ticket before dispatching; the re-dispatch
 brief carries the stack-on context through the branch base.
 
-On the child's report:
+On the child's report (the report tail under "Late reports", once per child):
 - `STATUS: DONE` + label `dl/in-review`: dispatch the reviewer.
 - `STATUS: BLOCKED`: read the reason. Human-decision items: label `dl/blocked`, comment the question
   on the issue, and move to other startable work. Technical blockers the child misdiagnosed: reply
@@ -184,11 +192,12 @@ and where, and stop ONLY then.
   `scripts/multipi-board.sh` (pure-read; rc 1 = a `dl/blocked` ticket waits on their decision,
   rc 2 = a red last gate or an over-bound child — the blocked ticket renders first, with its
   question).
-- **Lost reports reconcile; they do not wait:** a dispatch that hits its bound resolves with the
-  child STILL RUNNING. Do not poll `dispatch.json` by hand — the child's fate arrives on the next
-  `devloop_status` (dead pid → `crashed` with `endedAt`; a finished child is listed under
-  "Late reports" with its report tail), and the stop-gate refuses to settle while a delivered
-  branch still awaits its reviewer.
+- **Lost reports reconcile; they do not wait:** every dispatch call is bounded (default 45 min,
+  the preflight safety net — the tool itself resolves at spawn) and a dispatched child is
+  ALWAYS a background child. Do not poll `dispatch.json` by hand — the child's fate arrives on
+  the next `devloop_status` (dead pid → `crashed` with `endedAt`; a finished child is listed
+  under "Late reports" with its report tail, once), the watchdog wakes the session when a report
+  lands, and the stop-gate refuses to settle while a delivered branch still awaits its reviewer.
 - `devloop_cancel {ticket}` kills one child (its worktree and branch are kept; a re-dispatch resumes).
   Ctrl+C kills everything — after it, recover via step 0.
 - **Pausing:** when the user asks to pause, stop, or checkpoint the loop, call `devloop_pause`:
