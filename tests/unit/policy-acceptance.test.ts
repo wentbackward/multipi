@@ -122,6 +122,23 @@ async function call(ctx: ReturnType<typeof buildContext>, name: string, args: Re
 const textOf = (r: { content: Array<{ type: string; text?: string }> }): string =>
 	r.content.map((c) => c.text ?? "").join("");
 
+/** Bounded wait for a dispatch entry to reach its terminal state (fire-and-poll, #133):
+ * the receipt resolves with the child running; the train's steps need the child's effects
+ * (the pushed branch, the verdict) to have landed. */
+async function waitTerminal(fx: ReturnType<typeof makeFixture>, key: string, timeoutMs = 30_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		try {
+			const st = JSON.parse(readFileSync(path.join(stateDir(fx), "dispatch.json"), "utf8")) as Record<string, { status: string }>;
+			if (st[key] && st[key].status !== "running") return;
+		} catch {
+			/* not written yet */
+		}
+		if (Date.now() > deadline) throw new Error(`entry '${key}' did not reach a terminal state within ${timeoutMs} ms`);
+		await new Promise((r) => setTimeout(r, 100));
+	}
+}
+
 test("P5 acceptance: the full train (dispatch -> review -> gate -> merge) runs zero-deny through the armed shims", async () => {
 	const fx = makeFixture(POLICY_TRAIN_CONFIG);
 	const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
@@ -138,7 +155,8 @@ test("P5 acceptance: the full train (dispatch -> review -> gate -> merge) runs z
 		const n = createIssue(fx, "Train ticket zero deny");
 		const dispatch = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
 		assert.equal(dispatch.isError ?? false, false, textOf(dispatch));
-		assert.match(textOf(dispatch), /implementer #\d+ .* -> done/);
+		assert.match(textOf(dispatch), /DISPATCHED implementer #\d+ .* -> running/);
+		await waitTerminal(fx, String(n)); // the background child must have pushed before the gate sees the branch
 		const branch = JSON.parse(readFileSync(path.join(stateDir(fx), "dispatch.json"), "utf8"))[String(n)].branch as string;
 		assert.ok(branch.startsWith("feat/"), "the dispatch branch is recorded");
 
@@ -149,7 +167,8 @@ test("P5 acceptance: the full train (dispatch -> review -> gate -> merge) runs z
 		const review = await call(ctx, "devloop_dispatch", { role: "code-reviewer", ticket: n });
 		delete process.env.FAKE_PI_REPORT;
 		assert.equal(review.isError ?? false, false, textOf(review));
-		assert.match(textOf(review), /code-reviewer #\d+ .* -> done/);
+		assert.match(textOf(review), /DISPATCHED code-reviewer #\d+ .* -> running/);
+		await waitTerminal(fx, `review-${n}`);
 
 		// GATE: green across the train; the train-green record is written.
 		const gate = await call(ctx, "devloop_gate", { branches: [branch] });

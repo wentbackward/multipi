@@ -81,6 +81,18 @@ function textOf(r: { content: Array<{ type: string; text?: string }> }): string 
 	return r.content.map((c) => c.text ?? "").join("");
 }
 
+/** Bounded wait for ANY dispatch key with the given prefix to reach a terminal state
+ * (the ad-hoc keys — verifier-<ts> — are not predictable, so the prefix is the handle). */
+async function waitTerminalPrefix(ctx: ReturnType<typeof ctxWithAgents>, prefix: string, timeoutMs = 20_000): Promise<string> {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		const hits = Object.entries(readState(ctx.stateDir)).filter(([k, e]) => k.startsWith(prefix) && e.status !== "running");
+		if (hits.length > 0) return hits[0][0];
+		if (Date.now() > deadline) throw new Error(`no '${prefix}-*' entry reached a terminal state within ${timeoutMs} ms`);
+		await new Promise((r) => setTimeout(r, 100));
+	}
+}
+
 /** Bounded wait for a dispatch entry to reach a terminal state. Fire-and-poll (#133):
  * the completion handler writes the terminal entry asynchronously, so tests poll the
  * shared state (a bounded poll, the smoke's #82 idiom) instead of assuming when it lands. */
@@ -137,6 +149,7 @@ test("dispatch stamps the child with its role (MULTIPI_CHILD_ROLE via the spawn 
 		const n = createIssue(fx, "Role plumbing check");
 		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
+		await waitTerminal(ctx, String(n)); // the (background) child wrote the role echo on exit
 		assert.ok(existsSync(roleFile), "the child saw the FAKE_PI_ECHO_ROLE seam");
 		assert.equal(readFileSync(roleFile, "utf8"), "implementer", "child env carried its role name");
 	} finally {
@@ -166,6 +179,7 @@ async function verifierArgv(extra: { session?: Record<string, unknown>; agentOve
 		const ctx = ctxWithAgents(fx);
 		const res = await call(ctx, "devloop_dispatch", { role: "verifier", task: "audit it" }, extra.session ?? {});
 		assert.equal(res.isError ?? false, false, textOf(res));
+		await waitTerminalPrefix(ctx, "verifier-"); // the background child wrote the argv echo on exit
 		return readFileSync(argvFile, "utf8");
 	} finally {
 		delete process.env.FAKE_PI_ECHO_TASK;
@@ -277,7 +291,7 @@ test("dispatch returns a receipt in bounded time with the child left running (fi
 		assert.match(t, new RegExp(`key: ${n}$`, "m"));
 		assert.ok(t.includes(`branch: feat/${n}-fire-and-poll`), t);
 		assert.match(t, /worktree: .*/);
-		assert.match(t, new RegExp(`notes: .*pr-feat_${n}_fire-and-poll\.md`), t);
+		assert.match(t, new RegExp(`notes: .*pr-feat_${n}-fire-and-poll\.md`), t);
 		assert.match(t, new RegExp(`report: .*reports/${n}\.md`));
 		assert.match(t, /expected: ~45 min/);
 		// The child is LEFT RUNNING: the entry is running and the report file is not written yet.
@@ -311,7 +325,7 @@ test("a completed child's report is presented exactly once at the next collectio
 		// First collection (devloop_status): the report is presented ...
 		const s1 = textOf(await call(ctx, "devloop_status", {}));
 		assert.match(s1, /## Late reports/);
-		assert.match(s1, new RegExp(`- #${n} implementer \(`));
+		assert.match(s1, new RegExp(`- #${n} implementer \\(`));
 		assert.match(s1, /STATUS: DONE/);
 		// ... and acked into the ledger: the next collection presents NOTHING (exactly once).
 		const s2 = textOf(await call(ctx, "devloop_status", {}));
@@ -681,7 +695,7 @@ test("dispatch(analyst) plans from a spec, writes no ticket, records a done entr
 		const res = await call(ctx, "devloop_dispatch", { role: "analyst", spec: "docs/prd.md" });
 		assert.equal(res.isError ?? false, false, textOf(res));
 		const out = textOf(res);
-		assert.match(out, /DISPATCHED analyst .* -> running/);
+		assert.match(out, /DISPATCHED analyst -> running/);
 		assert.match(out, /plan file: .*notes\/tickets-prd-md\.md/);
 		await waitTerminal(ctx, "analyst-prd-md");
 		const state = JSON.parse(execFileSync("cat", [path.join(fx.dir, "home", "proj", "dispatch.json")]).toString());
@@ -781,6 +795,7 @@ test("dispatch(scenario-writer) runs the child at the repo root (no worktree, no
 		const res = await call(ctx, "devloop_dispatch", { role: "scenario-writer", ticket: n });
 		assert.equal(res.isError ?? false, false, textOf(res));
 		assert.ok(textOf(res).includes(`DISPATCHED scenario-writer #${n} -> running`), textOf(res));
+		await waitTerminal(ctx, `scenario-writer-${n}`);
 		// The echoed task IS the brief (written verbatim to the echo file): it must carry the
 		// ticket number, its acceptance criteria, the cited spec section and the store dir.
 		assert.ok(existsSync(echo), "the FAKE_PI_ECHO_TASK seam captured the brief");
@@ -792,7 +807,6 @@ test("dispatch(scenario-writer) runs the child at the repo root (no worktree, no
 			path.join(fx.dir, "home", "proj", "scenarios"), // the store dir (default under the state dir)
 			fx.repo, // the repo root (cwd of the child)
 		]) assert.ok(t.includes(needle), `brief missing: ${needle}`);
-		await waitTerminal(ctx, `scenario-writer-${n}`);
 		// The child runs AT the repo root: no worktree, no branch, recorded under its own key.
 		const state = JSON.parse(readFileSync(path.join(fx.dir, "home", "proj", "dispatch.json"), "utf8"));
 		assert.equal(state[`scenario-writer-${n}`].worktree, fx.repo);

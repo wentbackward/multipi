@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type, type TSchema } from "typebox";
@@ -130,13 +130,170 @@ export function noteFilePath(ctx: ToolContext, branch: string): string {
 /** Abort controllers for children this session spawned (session-lifetime registry). */
 const controllers = new Map<string, AbortController>();
 
+/** Soft per-role duration hints for the receipt (a hint, not a timer — the child's silence
+ * watchdog, the board's OVER BOUND tag and devloop_cancel are the real net for a stuck child). */
+const EXPECTED_MINUTES: Record<string, number> = {
+	implementer: 45,
+	"code-reviewer": 15,
+	verifier: 20,
+	nalyst: 15,
+	"scenario-writer": 15,
+};
+
+/** The child's full report file (the receipt names it; written on completion). */
+export function reportFilePath(ctx: ToolContext, key: string): string {
+	return path.join(ctx.stateDir, "reports", `${key}.md`);
+}
+
+/** Persist the child's full report beside the dispatch state, after any side-effect
+ * warnings have been appended to the entry. Atomic (tmp + rename), like the state writers.
+ * Carries a usage footer (the pre-#133 tool result showed it; the report file is the
+ * post-mortem surface now). */
+function writeReportFile(ctx: ToolContext, key: string, res: ChildResult): void {
+	const e = readState(ctx.stateDir)[key];
+	if (!e || e.status === "running") return;
+	const p = reportFilePath(ctx, key);
+	mkdirSync(path.dirname(p), { recursive: true });
+	const u = res.usage;
+	const footer = `\n\n[usage: tokens in/out ${u.input}/${u.output} · $${u.cost.toFixed(4)}]`;
+	const tmp = `${p}.tmp.${process.pid}.${Date.now()}`;
+	writeFileSync(tmp, e.report ? `${e.report.replace(/\n+$/, "")}${footer}\n` : `(no report)${footer}\n`);
+	renameSync(tmp, p);
+}
+
+/** Fire-and-poll receipt (ticket #133): the dispatch contract the orchestrator acts on.
+ * The child key, ticket, role, branch, worktree, notes/plan path, the report file path and
+ * a duration hint — the session is free again, the child keeps running. */
+function dispatchReceipt(ctx: ToolContext, role: string, key: string, ticket: number | undefined, entry: DispatchEntry, extra: { notes?: string; plan?: string }): AgentToolResult<DispatchDetails | undefined> {
+	const id = ticket !== undefined ? ` #${ticket}` : "";
+	const branchPart = entry.branch ? ` (${entry.branch})` : "";
+	const minutes = EXPECTED_MINUTES[role] ?? 15;
+	const lines: string[] = [
+		`DISPATCHED ${role}${id}${branchPart} -> running`,
+		`  key: ${key}`,
+	];
+	if (entry.branch) lines.push(`  branch: ${entry.branch}`);
+	lines.push(`  worktree: ${entry.worktree}`);
+	if (extra.notes) lines.push(`  notes: ${extra.notes}`);
+	if (extra.plan) lines.push(`  plan file: ${extra.plan}`);
+	lines.push(`  report: ${reportFilePath(ctx, key)} (written when the child finishes)`);
+	lines.push(`  expected: ~${minutes} min — the child runs in the BACKGROUND; this session stays free. Poll devloop_status to collect the report (at most once per turn); the watchdog wakes the session when a report lands.`);
+	const details: DispatchDetails = {
+		role,
+		ticket,
+		key,
+		branch: entry.branch,
+		worktree: entry.worktree,
+		notes: extra.notes,
+		reportPath: reportFilePath(ctx, key),
+		expectedMinutes: minutes,
+		status: "dispatched",
+		aborted: false,
+	};
+	return { ...text(lines.join("\n")), details };
+}
+
+/** Role-specific side effects that run when the child reaches a terminal state. */
+type CompletionFn = (ctx: ToolContext, key: string, entry: DispatchEntry, res: ChildResult, warns: string[]) => Promise<void>;
+
+/** Wire the completion handler to the child's promise (fire-and-poll, #133): the terminal
+ * state, the report file and the outcome-driven side effects land AFTER the receipt has
+ * resolved — never inside the tool call. Failures are contained (a side effect that throws
+ * must never surface as an unhandled rejection of a settled tool call). */
+function attachCompletion(ctx: ToolContext, promise: Promise<ChildResult>, key: string, entry: DispatchEntry, completer?: CompletionFn): void {
+	void promise.then((res) => completeChild(ctx, key, entry, completer, res), () => {
+		/* spawnPi never rejects: a spawn failure resolves with exitCode 1 */
+	});
+}
+
+async function completeChild(ctx: ToolContext, key: string, entry: DispatchEntry, completer: CompletionFn | undefined, res: ChildResult): Promise<void> {
+	try {
+		finishEntry(ctx, key, entry, res);
+		const warns: string[] = [];
+		if (completer) await completer(ctx, key, entry, res, warns);
+		if (warns.length > 0) {
+			// A side effect that failed (PR open, scenario comment) is surfaced where the report
+			// is collected: appended to the entry's report, so the late-report tail shows it.
+			updateState(ctx.stateDir, (s) => {
+				const e = s[key];
+				if (e && e.status !== "running") {
+					e.report = `${e.report ?? ""}\n\nWARNING: ${warns.join("; ")}`.replace(/^\n+/, "");
+				}
+			});
+		}
+		writeReportFile(ctx, key, res);
+	} catch (e) {
+		console.error(`devloop child-complete handler error (${key}): ${(e as Error).message}`);
+	}
+}
+
+/** Implementer completion: refresh the remote view, then the outcome-driven side effects
+ * (PR + dl/in-review on DONE; dl/blocked on BLOCKED) — the terminal-line classifier decides,
+ * not the transport's stop reason (the pre-#133 rule, now running post-receipt). */
+async function implementerCompletion(ctx: ToolContext, key: string, entry: DispatchEntry, res: ChildResult, warns: string[]): Promise<void> {
+	const ticket = Number(key);
+	git(["fetch", "-q", ctx.cfg.remote], ctx.cfg.root); // child pushed; refresh the main repo's view
+	const verdict = classifyReport(entry.role, res.finalText);
+	if (verdict === "done" && !res.aborted) {
+		try {
+			execFileSync("bash", [path.join(ctx.scriptsDir, "open-pr.sh"), entry.branch ?? `feat/${ticket}`], {
+				cwd: ctx.cfg.root,
+				env: process.env,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+			addLabel(ctx.repoSlug, ticket, "dl/in-review");
+		} catch (e) {
+			warns.push(`could not open the PR: ${(e as Error).message.split("\n")[0]}`);
+		}
+	} else if (verdict === "blocked") {
+		try {
+			addLabel(ctx.repoSlug, ticket, "dl/blocked");
+		} catch {
+			/* labelling is best-effort; the report carries the reason */
+		}
+	}
+}
+
+/** Scenario-writer completion: DONE posts the scenario TITLES (the dark-mode review list);
+ * BLOCKED labels the ticket dl/blocked (the #11 rule, now running post-receipt). */
+async function scenarioWriterCompletion(ctx: ToolContext, key: string, entry: DispatchEntry, res: ChildResult, warns: string[]): Promise<void> {
+	const ticket = Number(key.replace("scenario-writer-", ""));
+	const verdict = classifyReport(entry.role, res.finalText);
+	if (verdict === "done" && !res.aborted) {
+		// Only this ticket's own lines (t<ticket>-) may land on its review list; a writer
+		// reporting a foreign id cannot pollute it.
+		const lines = scenarioLinesForTicket(ticket, parseScenarioLines(res.finalText));
+		if (lines.length > 0) {
+			try {
+				addComment(ctx.repoSlug, ticket, buildScenarioComment(ticket, lines));
+			} catch (e) {
+				warns.push(`could not comment the scenarios: ${(e as Error).message.split("\n")[0]}`);
+			}
+		}
+	} else if (verdict === "blocked") {
+		try {
+			addLabel(ctx.repoSlug, ticket, "dl/blocked");
+		} catch {
+			/* labelling is best-effort; the report carries the reason */
+		}
+	}
+}
+
 export interface DispatchDetails {
 	role: string;
 	ticket?: number;
+	/** The dispatch-state key the child runs under (the devloop_cancel target). */
+	key: string;
 	branch?: string;
 	worktree: string;
-	status: string;
-	aborted: boolean;
+	/** The notes file path (implementer). */
+	notes?: string;
+	/** Where the child's full report lands on completion. */
+	reportPath: string;
+	/** Soft expected-duration hint (minutes). */
+	expectedMinutes: number;
+	status: "dispatched";
+	aborted: false;
 }
 
 function text(result: string): { content: { type: "text"; text: string }[]; details: undefined } {
@@ -266,9 +423,8 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			ticket: params.ticket,
 			parentModel,
 		});
-		const res = await ac.promise;
-		finishEntry(ctx, key, entry, res, signal);
-		return reportResult(role.name, params.ticket, entry, res);
+		attachCompletion(ctx, ac.promise, key, entry);
+		return dispatchReceipt(ctx, role.name, key, params.ticket, entry, {});
 	}
 
 	// ---- analyst: spec/feedback -> ticket plan (no ticket, no capacity slot) --
@@ -297,9 +453,8 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			onUpdate,
 			parentModel,
 		});
-		const res = await ac.promise;
-		finishEntry(ctx, key, analystEntry, res, signal);
-		return reportResult(role.name, undefined, analystEntry, res, `\nplan file: ${planPath}`);
+		attachCompletion(ctx, ac.promise, key, analystEntry);
+		return dispatchReceipt(ctx, role.name, key, undefined, analystEntry, { plan: planPath });
 	}
 
 	// ---- scenario-writer: holdout scenarios for a ticket (repo root, no worktree, no capacity slot)
@@ -333,36 +488,8 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			repoRoot: ctx.cfg.root,
 		});
 		const ac = spawnAndTrack(ctx, key, role, { task: brief, worktree: ctx.cfg.root, signal, onUpdate, ticket, parentModel });
-		const res = await ac.promise;
-		finishEntry(ctx, key, entry, res, signal);
-
-		// Outcome-driven side effects, routed through the terminal-line classifier (#22):
-		// DONE -> the ticket gets the scenario TITLES only (the dark-mode review list);
-		// BLOCKED (e.g. the store lies inside the repository) -> dl/blocked.
-		let extra = "";
-		const verdict = classifyReport(role.name, res.finalText);
-		if (verdict === "done" && !res.aborted) {
-			// Only this ticket's own lines (t<ticket>-) may land on its review list; a writer
-			// reporting a foreign id cannot pollute it.
-			const lines = scenarioLinesForTicket(ticket, parseScenarioLines(res.finalText));
-			if (lines.length === 0) {
-				extra = "\n(no scenario lines for this ticket in the report; nothing commented)";
-			} else {
-				try {
-					addComment(ctx.repoSlug, ticket, buildScenarioComment(ticket, lines));
-					extra = `\nscenarios on the ticket (${lines.length}, titles only): ${lines.map((l) => l.id).join(", ")}`;
-				} catch (e) {
-					extra = `\nWARNING: could not comment the scenarios: ${(e as Error).message.split("\n")[0]}`;
-				}
-			}
-		} else if (verdict === "blocked") {
-			try {
-				addLabel(ctx.repoSlug, ticket, "dl/blocked");
-			} catch {
-				/* labelling is best-effort; the report carries the reason */
-			}
-		}
-		return reportResult(role.name, ticket, entry, res, extra);
+		attachCompletion(ctx, ac.promise, key, entry, scenarioWriterCompletion);
+		return dispatchReceipt(ctx, role.name, key, ticket, entry, {});
 	}
 
 	// ---- code-reviewer: reviews an existing pushed branch -------------------
@@ -401,9 +528,8 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 			branch,
 			parentModel,
 		});
-		const res = await ac.promise;
-		finishEntry(ctx, key, reviewEntry, res, signal);
-		return reportResult(role.name, ticket, reviewEntry, res);
+		attachCompletion(ctx, ac.promise, key, reviewEntry);
+		return dispatchReceipt(ctx, role.name, key, ticket, reviewEntry, {});
 	}
 
 	// ---- implementer: the full deterministic pipeline -----------------------
@@ -472,36 +598,8 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 	});
 	persistEntry(ctx, key, entry);
 	const ac = spawnAndTrack(ctx, key, role, { task: brief, worktree, signal, onUpdate, parentModel });
-	const res = await ac.promise;
-	finishEntry(ctx, key, entry, res, signal);
-	git(["fetch", "-q", ctx.cfg.remote], ctx.cfg.root); // child pushed; refresh the main repo's view
-
-	// Outcome-driven side effects: PR + labels. The report contract (STATUS line) decides, not the
-	// transport's stop reason — a child that delivered DONE but exited oddly still did the job.
-	let extra = "";
-	const verdict = classifyReport(role.name, res.finalText);
-	if (verdict === "done" && !res.aborted) {
-		try {
-			const out = execFileSync("bash", [path.join(ctx.scriptsDir, "open-pr.sh"), branch], {
-				cwd: ctx.cfg.root,
-				env: process.env,
-				stdio: ["ignore", "pipe", "pipe"],
-			})
-				.toString()
-				.trim();
-			addLabel(ctx.repoSlug, ticket, "dl/in-review");
-			extra = `\nPR: ${out}`;
-		} catch (e) {
-			extra = `\nWARNING: could not open the PR: ${(e as Error).message.split("\n")[0]}`;
-		}
-	} else if (verdict === "blocked") {
-		try {
-			addLabel(ctx.repoSlug, ticket, "dl/blocked");
-		} catch {
-			/* labelling is best-effort; the report carries the reason */
-		}
-	}
-	return reportResult(role.name, ticket, entry, res, extra);
+	attachCompletion(ctx, ac.promise, key, entry, implementerCompletion);
+	return dispatchReceipt(ctx, role.name, key, ticket, entry, { notes: noteFilePath(ctx, branch) });
 }
 
 function findRoleNames(ctx: ToolContext): string[] {
@@ -633,25 +731,6 @@ function statusStamp(ms: number): string {
 /** 123456 -> "123k" for the status line. */
 function compactTokens(n: number): string {
 	return n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n);
-}
-
-function usageLine(res: { usage: { input: number; output: number; cost: number; totalTokens: number } }): string {
-	const u = res.usage;
-	return `tokens in/out ${u.input}/${u.output} · $${u.cost.toFixed(4)}`;
-}
-
-function reportResult(role: string, ticket: number | undefined, entry: DispatchEntry, res: { finalText: string; aborted: boolean; stopReason?: string; errorMessage?: string; stderr: string; usage: { input: number; output: number; cost: number; totalTokens: number } }, extra = ""): AgentToolResult<DispatchDetails | undefined> {
-	const head = `${role} #${ticket ?? "?"} (${entry.branch ?? entry.worktree}) -> ${entry.status}`;
-	const transport = res.stopReason && res.stopReason !== "end" ? ` [transport: stopReason=${res.stopReason}${res.errorMessage ? ` error="${res.errorMessage}"` : ""}]` : "";
-	const body = res.aborted
-		? "interrupted before completion"
-		: res.finalText || res.errorMessage || res.stderr || `(no output; stopReason=${res.stopReason ?? "n/a"})` + transport;
-	const isError = res.aborted || (res.stopReason !== "end" && !res.aborted);
-	return {
-		...text(`${head}${transport}\n[${usageLine(res)}]\n\n${body}${extra}`),
-		details: { role, ticket, branch: entry.branch, worktree: entry.worktree, status: entry.status, aborted: res.aborted } as DispatchDetails,
-		...(isError ? { isError: true } : {}),
-	};
 }
 
 function ensureWorktree(ctx: ToolContext, branch: string, worktree: string, fresh: boolean): void {
@@ -975,9 +1054,26 @@ export function makeTools(instructions?: string): Array<ToolDefinition<TSchema, 
 		label: "Dispatch dev-loop role agent",
 		promptGuidelines: instructions ? [instructions] : undefined,
 		description:
-			"Dispatch one role agent (implementer / code-reviewer / verifier / analyst / scenario-writer) as an isolated headless child. Implementer runs in its own git worktree; analyst and scenario-writer run at the repo root (no worktree, no capacity slot). For implementer and scenario-writer pass the ticket; everything else (branch, worktree, ports, notes path, brief) is computed deterministically. Blocks until the child reports. At most N implementers run concurrently (N = heavy.slots); a further dispatch is refused with the in-flight list.",
+			"Dispatch one role agent (implementer / code-reviewer / verifier / analyst / scenario-writer) as an isolated headless child. Implementer runs in its own git worktree; analyst and scenario-writer run at the repo root (no worktree, no capacity slot). For implementer and scenario-writer pass the ticket; everything else (branch, worktree, ports, notes path, brief) is computed deterministically. FIRE-AND-POLL: spawns the child and returns a RECEIPT immediately (child key, branch, worktree, notes path, report file path, expected duration) — the child keeps running in the background and the session stays free; the report is collected at the next devloop_status (presented exactly once; the watchdog wakes the session when a report lands). At most N implementers run concurrently (N = heavy.slots); a further dispatch is refused with the in-flight list.",
 		parameters: DispatchSchema,
-		execute: (_id, params: Params<typeof DispatchSchema>, signal, onUpdate, toolCtx) => runBounded(TOOL_NAMES.dispatch, toolCtx, (c) => dispatchImpl(c, params, signal, onUpdate, parentModelArg(toolCtx.model))),
+		execute: (_id, params: Params<typeof DispatchSchema>, signal, onUpdate, toolCtx) => {
+			// The child outlives the tool call (fire-and-poll, #133): once the receipt resolves,
+			// further onUpdate calls would hit a settled call — drop them, never throw.
+			let live = true;
+			const guarded: AgentToolUpdateCallback<unknown> | undefined = onUpdate
+				? (u) => {
+					if (!live) return;
+					try {
+						onUpdate(u);
+					} catch {
+						/* settled tool call: post-receipt updates are dropped, not fatal */
+					}
+				}
+				: undefined;
+			return runBounded(TOOL_NAMES.dispatch, toolCtx, (c) => dispatchImpl(c, params, signal, guarded, parentModelArg(toolCtx.model))).finally(() => {
+				live = false;
+			});
+		},
 	});
 
 	const cancelSchema = Type.Object({
