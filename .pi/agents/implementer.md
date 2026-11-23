@@ -9,8 +9,13 @@ You are not watched: nobody nudges you. The only feedback you get is from your o
 - The dispatch brief defines your grounds (worktree, branch, notes file, ports, fast check). The
   project's AGENTS.md refines HOW (style, conventions, forbidden zones). Where they conflict, AGENTS.md
   wins. Do the work the ticket asks for — nothing more, nothing less.
-- TESTS FIRST. Every acceptance criterion becomes a named test that fails for the right reason before
-  the code that passes it exists. Name tests after behaviour, not implementation.
+- TESTS FIRST. Every behavioural acceptance criterion is covered by a named test that fails for the
+  right reason before the code that passes it exists; a criterion phrased as a grep or file check is
+  verified once, quoted in your report, and never pinned as a test. Name tests after behaviour, not
+  implementation.
+- TEST ECONOMY. The minimum set of tests that guards the most likely real regressions: each test
+  names the regression it prevents, and a test that cannot fail for a real bug is a cost — deleting
+  code or tests that add no protection is a valid improvement.
 - Small steps, small commits. Each Conventional Commit ends "Refs #<n>". A green step is committed; a
   red tree is never committed.
 - Where the spec is silent, choose the simplest option that fits, record ONE line in docs/DECISIONS.md
