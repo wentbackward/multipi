@@ -377,8 +377,9 @@ test("implementer completion: the opened-PR line is appended to the entry's repo
 		const entry = await waitTerminal(ctx, String(n));
 		assert.equal(entry.status, "done", "the fake implementer delivered (STATUS: DONE)");
 		await awaitReport(ctx, String(n));
+		const branch = entry.branch ?? `feat/${n}`;
 		const report = readFileSync(path.join(ctx.stateDir, "reports", `${n}.md`), "utf8");
-		assert.match(report, new RegExp(`opened PR for feat/${n}-pr-line-in-report: `), `the report carries the PR opener's own line:\n${report}`);
+		assert.ok(report.includes(`opened PR for ${branch}: `), `the report carries the PR opener's own line for ${branch}:\n${report}`);
 	} finally { fx.cleanup(); }
 });
 

@@ -240,11 +240,23 @@ async function implementerCompletion(ctx: ToolContext, key: string, entry: Dispa
 	const verdict = classifyReport(entry.role, res.finalText);
 	if (verdict === "done" && !res.aborted) {
 		try {
-			execFileSync("bash", [path.join(ctx.scriptsDir, "open-pr.sh"), entry.branch ?? `feat/${ticket}`], {
+			const prOut = execFileSync("bash", [path.join(ctx.scriptsDir, "open-pr.sh"), entry.branch ?? `feat/${ticket}`], {
 				cwd: ctx.cfg.root,
 				env: process.env,
 				stdio: ["ignore", "pipe", "pipe"],
-			});
+			}).toString();
+			// Post-mortem surface (#117, the #133 review tail): pre-#133 the tool result
+			// carried 'PR: <line>'; the report file is the post-mortem surface now —
+			// append the opener's own line so the report stays complete.
+			const prLine = prOut.split("\n").find((l) => l.startsWith("opened PR for "));
+			if (prLine) {
+				updateState(ctx.stateDir, (s) => {
+					const e = s[key];
+					if (e && e.status !== "running") {
+						e.report = `${e.report ?? ""}\n${prLine}`.replace(/^\n+/, "");
+					}
+				});
+			}
 			addLabel(ctx.repoSlug, ticket, "dl/in-review");
 		} catch (e) {
 			warns.push(`could not open the PR: ${(e as Error).message.split("\n")[0]}`);
