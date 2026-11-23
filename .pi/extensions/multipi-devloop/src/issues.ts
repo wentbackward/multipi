@@ -35,14 +35,41 @@ function ghJson(repo: string, args: string[]): unknown[] {
 	return parseGhOutput(out);
 }
 
+interface RawIssue {
+	number: number;
+	title: string;
+	labels?: { name: string }[];
+	body?: string;
+}
+
+function toIssue(r: RawIssue): Issue {
+	return { number: r.number, title: r.title, labels: (r.labels ?? []).map((l) => l.name), body: r.body ?? "" };
+}
+
 export function listOpenIssues(repo: string): Issue[] {
-	const rows = ghJson(repo, ["issue", "list", "--state", "open", "--limit", "200", "--json", "number,title,labels,body"]) as {
-		number: number;
-		title: string;
-		labels: { name: string }[];
-		body: string;
-	}[];
-	return rows.map((r) => ({ number: r.number, title: r.title, labels: (r.labels ?? []).map((l) => l.name), body: r.body ?? "" }));
+	const rows = ghJson(repo, ["issue", "list", "--state", "open", "--limit", "200", "--json", "number,title,labels,body"]) as RawIssue[];
+	return rows.map(toIssue);
+}
+
+/** Locate ONE open issue by EXACT title, via a title-specific search rather than the
+ * 200-capped `listOpenIssues` (ticket #117, the #105 review tail): on a tracker with
+ * >200 open issues the general list can drop an existing per-area backlog (or the source
+ * ticket), which would FORK the backlog and blind the label guard. A handful of search
+ * rows at most, whatever the tracker's open count. `undefined` when no open issue carries
+ * the title. */
+export function findOpenIssueByTitle(repo: string, title: string): Issue | undefined {
+	const rows = ghJson(repo, ["issue", "list", "--state", "open", "--search", `in:title "${title}"`, "--limit", "20", "--json", "number,title,labels,body"]) as RawIssue[];
+	return rows.map(toIssue).find((i) => i.title === title);
+}
+
+/** One issue by number (a direct view, not the capped list): a verdict that operates on
+ * a single ticket must never judge its labels off a listing that may not show it.
+ * THROWS when the issue cannot be read — the same rule as `issueComments` (a verdict
+ * never guesses on a silent state). */
+export function issueView(repo: string, number: number): Issue {
+	const rows = ghJson(repo, ["issue", "view", String(number), "--json", "number,title,labels,body"]) as RawIssue[];
+	if (!rows.length || !rows[0]) throw new Error(`cannot read issue #${number} from the tracker`);
+	return toIssue(rows[0]);
 }
 
 export function listClosedIssueNumbers(repo: string): number[] {
