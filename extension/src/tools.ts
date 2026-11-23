@@ -61,6 +61,16 @@ export interface ToolContext {
 /** DEFAULT when no config resolves at all (spec 2026-11-15 §2: absent ⇒ 45). */
 const DEFAULT_TOOL_TIMEOUT_MINUTES = 45;
 
+/** Soft per-role duration hints for the receipt (a hint, not a timer — the child's silence
+ * watchdog, the board's OVER BOUND tag and devloop_cancel are the real net for a stuck child). */
+const EXPECTED_MINUTES: Record<string, number> = {
+	implementer: 45,
+	"code-reviewer": 15,
+	verifier: 20,
+	analyst: 15,
+	"scenario-writer": 15,
+};
+
 /**
  * Explicit test seam (tools.test.ts single-construction pin): counts buildContext calls.
  * The bound probe and the guarded run historically constructed the context TWICE per
@@ -70,6 +80,10 @@ const DEFAULT_TOOL_TIMEOUT_MINUTES = 45;
 export const testSeams = {
 	/** buildContext invocations (the single-construction pin counts deltas of this). */
 	contextBuilds: 0,
+	/** The per-role receipt duration table: pinned so a mistyped DEAD key fails loudly in
+	 * the unit tests (the once-typo'd "analyst" rode the ?? 15 fallback unnoticed, #117).
+	 * Exposed as the module's own const — read-only to callers. */
+	expectedMinutes: EXPECTED_MINUTES,
 };
 
 export function buildContext(cwd: string): ToolContext {
@@ -129,16 +143,6 @@ export function noteFilePath(ctx: ToolContext, branch: string): string {
 
 /** Abort controllers for children this session spawned (session-lifetime registry). */
 const controllers = new Map<string, AbortController>();
-
-/** Soft per-role duration hints for the receipt (a hint, not a timer — the child's silence
- * watchdog, the board's OVER BOUND tag and devloop_cancel are the real net for a stuck child). */
-const EXPECTED_MINUTES: Record<string, number> = {
-	implementer: 45,
-	"code-reviewer": 15,
-	verifier: 20,
-	nalyst: 15,
-	"scenario-writer": 15,
-};
 
 /** The child's full report file (the receipt names it; written on completion). */
 export function reportFilePath(ctx: ToolContext, key: string): string {

@@ -358,13 +358,12 @@ test("a completed child's report is presented exactly once at the next collectio
 });
 
 test("dispatch receipts: every dispatch role has its OWN expected-minutes entry (the dead 'nalyst' key cannot come back, #117)", () => {
-	const table = (testSeams as unknown as { expectedMinutes?: Record<string, number> }).expectedMinutes;
-	assert.ok(table, "testSeams exposes the expected-minutes table");
+	const table = testSeams.expectedMinutes;
 	for (const role of ["implementer", "code-reviewer", "verifier", "analyst", "scenario-writer"]) {
 		assert.ok(Object.prototype.hasOwnProperty.call(table, role), `role '${role}' has its own entry (a mistyped dead key falls back to ?? 15 silently)`);
-		assert.ok(Number.isFinite(table![role]) && table![role] > 0, `${role} minutes are positive and finite`);
+		assert.ok(Number.isFinite(table[role]) && table[role] > 0, `${role} minutes are positive and finite`);
 	}
-	assert.equal(table!.analyst, 15);
+	assert.equal(table.analyst, 15);
 });
 
 test("implementer completion: the opened-PR line is appended to the entry's report (post-mortem surface, #117)", async () => {
