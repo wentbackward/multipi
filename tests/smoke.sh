@@ -4234,6 +4234,19 @@ expect "watch log: the delivered report wake is ledgered per key+generation" "1"
 lvwatch
 expect "watch dedupe: the second tick injects NOTHING for the same report" "1" "$(wc -l <"$WK")"
 expect "watch dedupe: the suppressed repeat is logged with its reason" "1" "$(grep -cF 'REPORT-SKIP n=42 seen' "$wl" 2>/dev/null)"
+# Dual-path reader lock (#117): MULTIPI_NO_JQ=1 forces report_scan onto its python3
+# fallback (dl_have_jq's seam, the same lock the other dual-path readers use) — the
+# fallback must deliver the IDENTICAL wake (the jq path above is the default pin).
+lvfresh
+mkstate idle 1000 0 0
+plant_report_entry 45 implementer done
+lvwatch MULTIPI_NO_JQ=1
+expect "watch rc 0: the python3 report_scan fallback (MULTIPI_NO_JQ=1) delivers the wake" "0" "$LV_RC"
+expect "watch: the fallback (python3) wake line is identical to the jq path" \
+  "REPORT LANDED (multipi-watch): #45 implementer -> done — run devloop_status to collect it (act in this turn)." \
+  "$(head -1 "$WK" 2>/dev/null)"
+expect "watch log: the fallback wake is ledgered identically" "1" "$(grep -cF 'REPORT n=45 t=999999000000' "$wl" 2>/dev/null)"
+plant_report_entry 42 implementer done # leave the state the section found it (the ack-ledger pin below drives on 42)
 # The ack ledger (reconcile-seen.json) is the extension's cursor: an acked generation never wakes.
 printf '{"42":999999000000}\n' >"$lvstate/reconcile-seen.json"
 lvfresh

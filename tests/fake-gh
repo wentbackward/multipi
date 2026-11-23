@@ -282,24 +282,57 @@ case "${1:-} ${2:-}" in
     [ "$show" = 1 ] && printf '[{%s"state":"%s"}]\n' "$numfield" "$st" || printf '[]\n'
     ;;
   "issue list")
-    state=open json=""
+    state=open json="" search="" limit=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --state) state=$2; shift 2 ;;
         --json) json=$2; shift 2 ;;
-        --limit) shift 2 ;;
+        --limit) limit=$2; shift 2 ;;
+        --search) search=$2; shift 2 ;;
         *) shift ;;
       esac
     done
     src=$dir/issues
     [ "$state" = closed ] && src=$dir/issues-closed
+    # Files in ASCENDING number order; the real CLI lists NEWEST first, so a --limit
+    # N keeps the LAST N lines (the cap cuts the OLDEST issues off the listing — the
+    # >200-open-issues scenario the #117 polish-backlog title lookup pins).
+    files=$(find "$src" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\n' 2>/dev/null | sort -n)
+    if [ -n "$search" ]; then
+      case "$search" in
+        'in:title '*)
+          # The one search qualifier the loop speaks (the polish-backlog title
+          # lookup, #117): an EXACT title match; a quoted phrase is tolerated.
+          needle=${search#'in:title '}
+          case "$needle" in
+            \"*\") needle=${needle#\"}; needle=${needle%\"}
+          esac
+          filtered=""
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            [ "$(sed -n 1p "$src/$f")" = "$needle" ] && filtered="$filtered$f
+"
+          done <<<"$files"
+          files=${filtered%$'\n'}
+          ;;
+        *) echo "fake gh: unsupported search qualifier: $search" >&2; exit 1 ;;
+      esac
+    fi
+    case "$limit" in
+      '' | *[!0-9]*) : ;; # non-canonical limits are ignored (every caller is canonical decimal)
+      *)
+        nfiles=$(printf '%s\n' "$files" | grep -c . || true)
+        [ "$nfiles" -gt "$limit" ] && files=$(printf '%s\n' "$files" | tail -n "$limit")
+        ;;
+    esac
     # Honour the REQUESTED --json fields (real CLI contract): of
     # number/title/labels/body, only the named ones are emitted. Emitting
     # unrequested body text into a --json number query would let JSON-shaped
     # bodies interfere with number extractors.
     want_field() { case ,$json, in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
     items=""
-    for f in $(find "$src" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\n' 2>/dev/null | sort -n); do
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
       if [ -n "$json" ]; then
         obj='{"number":'$f
         if want_field title; then
@@ -330,24 +363,56 @@ case "${1:-} ${2:-}" in
       else
         echo "#$f $(sed -n 1p "$src/$f")"
       fi
-    done
+    done <<<"$files"
     [ -n "$json" ] && printf '[%s]\n' "$items"
     exit 0
     ;;
   "issue view")
     n=$3
     fields=${5:-title}
-    state=""
-    title=$(sed -n 1p "$dir/issues/$n" 2>/dev/null)
-    if [ -n "$title" ]; then
+    title="" state="" srcf=""
+    if [ -f "$dir/issues/$n" ]; then
+      title=$(sed -n 1p "$dir/issues/$n")
       state=OPEN
+      srcf="$dir/issues/$n"
     else
       title=$(sed -n 1p "$dir/issues-closed/$n" 2>/dev/null)
-      [ -n "$title" ] && state=CLOSED
+      if [ -n "$title" ]; then
+        state=CLOSED
+        srcf="$dir/issues-closed/$n"
+      fi
     fi
     [ -n "$title" ] || exit 1
-    out="{\"title\":\"$(jesc "$title")\""
-    case ",$fields," in *,state,*) out="$out,\"state\":\"$state\"" ;; esac
+    out=""
+    sep=""
+    case ",$fields," in
+      *,number,*) out="{\"number\":$n"; sep="," ;;
+      *) out="{" ;;
+    esac
+    out="$out$sep\"title\":\"$(jesc "$title")\""
+    sep=","
+    case ",$fields," in *,state,*) out="$out$sep\"state\":\"$state\""; sep="," ;; esac
+    case ",$fields," in
+      *,labels,*)
+        labs="[]"
+        if [ -f "$dir/labels/$n" ]; then
+          labs=$(awk '{printf "%s{\"name\":\"%s\"}", (NR>1?",":""), $0}' "$dir/labels/$n")
+          labs="[$labs]"
+        fi
+        out="$out$sep\"labels\":$labs"
+        sep=","
+        ;;
+    esac
+    case ",$fields," in
+      *,body,*)
+        if [ -n "$srcf" ]; then
+          # Same encoding as the issue list: quote first, newlines as literal \n.
+          body=$(jesc "$(sed -n '2,$p' "$srcf")" | awk '{printf "%s%s", (NR>1?"\\n":""), $0}')
+          out="$out$sep\"body\":\"$body\""
+          sep=","
+        fi
+        ;;
+    esac
     if [ -z "${fields##*comments}" ]; then
       cmts="[]"
       if [ -d "$dir/comments/$n" ]; then
@@ -363,7 +428,7 @@ case "${1:-} ${2:-}" in
         done
         cmts="$cmts]"
       fi
-      out="$out,\"comments\":$cmts"
+      out="$out$sep\"comments\":$cmts"
     fi
     printf '%s}\n' "$out"
     ;;

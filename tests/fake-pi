@@ -2,8 +2,9 @@
 # Stand-in for: pi -p --no-session --mode json [--append-system-prompt F] [--tools ...] [--model M] TASK...
 # FAKE_PI_MODE: ok (default) | fail | slow. Streams the NDJSON events the real pi emits in JSON mode.
 # FAKE_PI_ECHO_TASK=F: append a final assistant message "TASK WAS: <task>", and ALSO write
-#                     the task verbatim to F (the brief the child got, inspectable as a file;
-#                     FAKE_PI_REPORT, if set, still emits after this and wins as finalText).
+#                     the child's full argv (space-joined) to F (the brief the child got,
+#                     inspectable as a file; FAKE_PI_REPORT, if set, still emits after this
+#                     and wins as finalText).
 # FAKE_PI_REPORT=F: append one more, FINAL assistant message holding F's content — the child's
 #                  report (finalText) is driven by it (contract tests for DONE/BLOCKED outcomes).
 set -u

@@ -24,7 +24,7 @@
 // Pure-node (testable without pi): the decision lives here, scripts/polish-tail.sh is its
 // thin hand, and the devloop skill §4 names the branch the orchestrator follows.
 import { loadConfig } from "./config.ts";
-import { addComment, addLabel, createIssue, issueComments, listOpenIssues } from "./issues.ts";
+import { addComment, addLabel, createIssue, findOpenIssueByTitle, issueComments, issueView } from "./issues.ts";
 
 /** The first-line marker of a should-fix re-dispatch comment. A comment counts a round
  * only when its first NON-EMPTY line IS the marker (end-of-line) or the marker followed by a
@@ -112,14 +112,20 @@ export function acceptTail(a: TailArgs): TailResult {
 	// the label by the ticket's current labels. A re-run (full or after a partial failure)
 	// changes nothing that already happened.
 	const entry = parkingEntry(a.ticket, a.findings);
-	const open = listOpenIssues(a.repo);
-	const source = open.find((i) => i.number === a.ticket);
-	const backlog = open.find((i) => i.title === title);
+	// Located by their own identity, never off the 200-capped open list (#117, the #105
+	// review tail): a backlog buried under >200 open issues would otherwise be FORKED
+	// (a second same-title ticket), and the source's label guard would go blind.
+	const backlog = findOpenIssueByTitle(a.repo, title);
+	const source = issueView(a.repo, a.ticket);
 	let backlogNumber: number;
 	let backlogAction: "created" | "appended" | "unchanged";
 	if (backlog) {
 		backlogNumber = backlog.number;
-		const alreadyParked = backlog.body === entry || issueComments(a.repo, backlogNumber).some((c) => c.trim() === entry);
+		// `.trim()` on the body: a tracker can normalise a round-tripped body (a padded
+		// trailing blank line) and the byte-exact comparison would then defeat the
+		// idempotency guard on a re-run after partial failure (double-park). The entry
+		// already ends trimmed; the comment-based guard below is already trimmed.
+		const alreadyParked = backlog.body.trim() === entry || issueComments(a.repo, backlogNumber).some((c) => c.trim() === entry);
 		if (alreadyParked) {
 			backlogAction = "unchanged";
 		} else {
@@ -137,6 +143,6 @@ export function acceptTail(a: TailArgs): TailResult {
 			`accept-tail: ${rounds} should-fix round(s) at the cap (${cap}) — findings parked in "${title}" (#${backlogNumber}); the ticket is dl/approved and proceeds to the gate.`,
 		);
 	}
-	if (!source?.labels.includes("dl/approved")) addLabel(a.repo, a.ticket, "dl/approved");
+	if (!source.labels.includes("dl/approved")) addLabel(a.repo, a.ticket, "dl/approved");
 	return { action: "accepted", rounds, cap, backlogTitle: title, backlogNumber, backlogAction };
 }
