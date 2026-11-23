@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { makeFixture } from "../fixtures.ts";
 import { loadConfig, parseReviewBlock, DEFAULT_MAX_FOLLOWUP_DEPTH } from "../../extension/src/config.ts";
@@ -398,5 +398,51 @@ test("acceptTail: a ticket the tracker does not know is a HARD error, never a si
 			() => acceptTail({ root: fx.repo, repo: "", ticket: 999, area: "cache", findings: "x" }),
 			/999|not|no issue|No issue/i,
 		);
+	} finally { fx.cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
+// #117 (the #105 review tail): locating the backlog must not ride the 200-capped
+// open list (a backlog buried under >200 open issues would be FORKED — a second
+// ticket with the same title — contradicting one backlog per area), and the body
+// idempotency guard must tolerate the tracker normalising a round-tripped body
+// (a re-run after partial failure would otherwise double-park).
+// ---------------------------------------------------------------------------
+
+test("acceptTail: the backlog is located by TITLE even when buried under 200 newer open issues (no fork, #117)", () => {
+	const fx = tailFx('{"base_branch":"main"}');
+	try {
+		const title = polishBacklogTitle("cache");
+		const b = createTicket(fx, title); // oldest of the open set — the 200-capped list loses it
+		const n = createTicket(fx, "Cache layer"); // buried under the decoys, too
+		roundComment(fx, n, 1);
+		roundComment(fx, n, 2);
+		// 200 NEWER open issues, seeded straight into the fake's store (the store layout is
+		// one file per number: line 1 title, line 2 body — the same contract the smoke keys):
+		const issueDir = path.join(process.env.FAKE_GH_DIR!, "issues");
+		for (let i = 0; i < 200; i++) writeFileSync(path.join(issueDir, String(3 + i)), `Decoy ${i}\ndecoy body\n`);
+		const res = acceptTail({ root: fx.repo, repo: "", ticket: n, area: "cache", findings: FINDINGS });
+		assert.equal(res.action, "accepted");
+		assert.equal(res.backlogNumber, b, "the EXISTING backlog is located (a second same-title ticket would fork it)");
+		assert.equal(res.backlogAction, "appended", "the entry rides as a comment on the located backlog");
+		assert.equal(openRows(fx, "number,title").filter((i) => i.title === title).length, 1, "exactly one backlog ticket per area");
+		assert.equal(commentBodies(fx, b).filter((c) => c === `#${n}\n${FINDINGS}`).length, 1, "the entry is parked exactly once");
+	} finally { fx.cleanup(); }
+});
+
+test("acceptTail: a body that round-trips with a trailing-whitespace pad is recognised as already parked (no double-park, #117)", () => {
+	const fx = tailFx('{"base_branch":"main"}');
+	try {
+		const n = createTicket(fx, "Normalised backlog body");
+		roundComment(fx, n, 1);
+		roundComment(fx, n, 2);
+		const title = polishBacklogTitle("cache");
+		const b = createTicket(fx, title);
+		// The tracker normalised the parked entry on round-trip (a padded trailing
+		// blank line — the body no longer byte-equals the entry):
+		writeFileSync(path.join(process.env.FAKE_GH_DIR!, "issues", String(b)), `${title}\n#${n}\n${FINDINGS}\n \n`);
+		const res = acceptTail({ root: fx.repo, repo: "", ticket: n, area: "cache", findings: FINDINGS });
+		assert.equal(res.backlogAction, "unchanged", "the trimmed comparison recognises the normalised body");
+		assert.deepEqual(commentBodies(fx, b), [], "the re-run parked nothing a second time");
 	} finally { fx.cleanup(); }
 });

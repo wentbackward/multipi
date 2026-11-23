@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync, chmodSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket, testSeams } from "../../extension/src/tools.ts";
+import { makeTools, evaluateSettle, buildContext, cancelImpl, classifyReport, finishEntry, findOpenTicket, reportFilePath, testSeams } from "../../extension/src/tools.ts";
 import { readState, type DispatchEntry } from "../../extension/src/state.ts";
 import { makeFixture } from "../fixtures.ts";
 
@@ -102,6 +102,20 @@ async function waitTerminal(ctx: ReturnType<typeof ctxWithAgents>, key: string, 
 		const e = readState(ctx.stateDir)[key];
 		if (e && e.status !== "running") return e;
 		if (Date.now() > deadline) throw new Error(`entry '${key}' did not reach a terminal state within ${timeoutMs} ms (last seen: ${JSON.stringify(e ?? null)})`);
+		await new Promise((r) => setTimeout(r, 100));
+	}
+}
+
+/** Bounded wait for the completion handler's DURABLE artifact — the report file,
+ * written as the LAST step of the async completion, after every side effect (#117):
+ * tearing the fixture down before it lands races the still-pending handler's git
+ * fetch (rm -rf under a live child-complete). */
+async function awaitReport(ctx: ReturnType<typeof ctxWithAgents>, key: string, timeoutMs = 20_000): Promise<void> {
+	const p = reportFilePath(ctx, key);
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		if (existsSync(p)) return;
+		if (Date.now() > deadline) throw new Error(`report file for '${key}' (${p}) was not written within ${timeoutMs} ms`);
 		await new Promise((r) => setTimeout(r, 100));
 	}
 }
@@ -247,6 +261,11 @@ test("cancel marks the entry interrupted and kills via the controller registry (
 	setupEnv(fx);
 	process.env.FAKE_PI_MODE = "slow";
 	process.env.FAKE_PI_SLEEP = "30";
+	// The completion handler runs ASYNC after cancel's optimistic mark: teardown must not
+	// outlive it (#117) — any handler error is captured and fails the test, not masked.
+	const origError = console.error;
+	let handlerErrors = "";
+	console.error = (msg: unknown) => { handlerErrors += `${msg}\n`; };
 	try {
 		const ctx = ctxWithAgents(fx);
 		const n = createIssue(fx, "Long task");
@@ -262,7 +281,10 @@ test("cancel marks the entry interrupted and kills via the controller registry (
 		// The completion handler settles the entry asynchronously once the killed child exits.
 		const entry = await waitTerminal(ctx, String(n));
 		assert.equal(entry.status, "interrupted");
+		await awaitReport(ctx, String(n)); // the handler's durable artifact: the report file (LAST step)
+		assert.ok(!handlerErrors.includes("child-complete handler error"), `the completion handler finished INSIDE the fixture (teardown outran it): ${handlerErrors}`);
 	} finally {
+		console.error = origError;
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.FAKE_PI_SLEEP;
 		fx.cleanup();
@@ -301,6 +323,7 @@ test("dispatch returns a receipt in bounded time with the child left running (fi
 		// Tidy: cancel the slow child and let the completion handler settle it.
 		assert.match(textOf(cancelImpl(ctx, String(n))), /cancel sent/);
 		assert.equal((await waitTerminal(ctx, String(n))).status, "interrupted");
+		await awaitReport(ctx, String(n)); // the handler's durable artifact: teardown must not outrun it
 	} finally {
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.FAKE_PI_SLEEP;
@@ -331,6 +354,32 @@ test("a completed child's report is presented exactly once at the next collectio
 		const s2 = textOf(await call(ctx, "devloop_status", {}));
 		const sec2 = s2.slice(s2.indexOf("## Late reports"), s2.indexOf("## Open tickets"));
 		assert.match(sec2, /\(none\)/, `the second collection must not re-present the report:\n${sec2}`);
+	} finally { fx.cleanup(); }
+});
+
+test("dispatch receipts: every dispatch role has its OWN expected-minutes entry (the dead 'nalyst' key cannot come back, #117)", () => {
+	const table = (testSeams as unknown as { expectedMinutes?: Record<string, number> }).expectedMinutes;
+	assert.ok(table, "testSeams exposes the expected-minutes table");
+	for (const role of ["implementer", "code-reviewer", "verifier", "analyst", "scenario-writer"]) {
+		assert.ok(Object.prototype.hasOwnProperty.call(table, role), `role '${role}' has its own entry (a mistyped dead key falls back to ?? 15 silently)`);
+		assert.ok(Number.isFinite(table![role]) && table![role] > 0, `${role} minutes are positive and finite`);
+	}
+	assert.equal(table!.analyst, 15);
+});
+
+test("implementer completion: the opened-PR line is appended to the entry's report (post-mortem surface, #117)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", checks: [{ name: "unit", command: "true", heavy: false }], format: null, format_extensions: null, fast_check: "true" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "PR line in report");
+		const res = await call(ctx, "devloop_dispatch", { role: "implementer", ticket: n });
+		assert.equal(res.isError ?? false, false, textOf(res));
+		const entry = await waitTerminal(ctx, String(n));
+		assert.equal(entry.status, "done", "the fake implementer delivered (STATUS: DONE)");
+		await awaitReport(ctx, String(n));
+		const report = readFileSync(path.join(ctx.stateDir, "reports", `${n}.md`), "utf8");
+		assert.match(report, new RegExp(`opened PR for feat/${n}-pr-line-in-report: `), `the report carries the PR opener's own line:\n${report}`);
 	} finally { fx.cleanup(); }
 });
 
@@ -1118,6 +1167,7 @@ test("dispatch tolerates child output arriving after the receipt (settled-tool-c
 		// tool call has settled must not error the session: the terminal lands, no update throws.
 		await waitTerminal(ctx, String(n));
 		void updates; // the count is timing-dependent (pre- vs post-settle output); the pin is the non-fatality
+		await awaitReport(ctx, String(n)); // the handler's durable artifact: teardown must not outrun it
 	} finally {
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.FAKE_PI_SLEEP;
