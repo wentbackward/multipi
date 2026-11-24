@@ -20,7 +20,7 @@ a loop label, a script exit code, a `.devloop.json` key, or the child protocol â
 document in the same change. The freshness check (`tests/unit/spec-freshness.test.ts`, part of
 the `unit` check that the batch gate runs) asserts this document against the code on the
 already-pinned surfaces (tool names, label vocabulary, exit tables, config keys, the dispatch
-parameter cell) and is red on drift. Grow it: a new pinned surface joins the test as it gains
+parameter cell, the roles' tool sets, the environment-seams inventory) and is red on drift. Grow it: a new pinned surface joins the test as it gains
 ground truth.
 
 ## 1. What multipi is
