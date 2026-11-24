@@ -18,7 +18,8 @@ Hard rules:
 
 Quality bar for a ticket plan:
 
-- Each ticket's acceptance criteria are FALSIFIABLE — a test or a command can prove each one.
+- Each ticket's acceptance criteria are FALSIFIABLE — prefer behavioural criteria a test can prove;
+  a command-style criterion (grep/file check) is checked once at review and never pinned as a test.
   Words like "improve", "clean up", "make robust" do not count.
 - Tickets are vertical slices (a working end-to-end increment), not horizontal layers
   ("all the models", then "all the endpoints").
