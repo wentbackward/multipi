@@ -24,7 +24,7 @@
 // Pure-node (testable without pi): the decision lives here, scripts/polish-tail.sh is its
 // thin hand, and the devloop skill §4 names the branch the orchestrator follows.
 import { loadConfig } from "./config.ts";
-import { addComment, addLabel, createIssue, issueComments, listOpenIssues } from "./issues.ts";
+import { addComment, setLifecycleLabel, createIssue, issueComments, listOpenIssues } from "./issues.ts";
 
 /** The first-line marker of a should-fix re-dispatch comment. A comment counts a round
  * only when its first NON-EMPTY line IS the marker (end-of-line) or the marker followed by a
@@ -137,6 +137,6 @@ export function acceptTail(a: TailArgs): TailResult {
 			`accept-tail: ${rounds} should-fix round(s) at the cap (${cap}) — findings parked in "${title}" (#${backlogNumber}); the ticket is dl/approved and proceeds to the gate.`,
 		);
 	}
-	if (!source?.labels.includes("dl/approved")) addLabel(a.repo, a.ticket, "dl/approved");
+	if (!source?.labels.includes("dl/approved")) setLifecycleLabel(a.repo, a.ticket, "dl/approved");
 	return { action: "accepted", rounds, cap, backlogTitle: title, backlogNumber, backlogAction };
 }

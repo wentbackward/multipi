@@ -24,7 +24,7 @@ import {
 import * as childreg from "./childreg.ts";
 import { spawnPi, parentModelArg, type ChildResult } from "./child.ts";
 import { discoverRoles, findRole } from "./roles.ts";
-import { listOpenIssues, listClosedIssueNumbers, addLabel, latestComment, issueComments, addComment, type Issue } from "./issues.ts";
+import { listOpenIssues, listClosedIssueNumbers, setLifecycleLabel, latestComment, issueComments, addComment, type Issue } from "./issues.ts";
 import { countShouldFixRounds, acceptTailDue } from "./polish.ts";
 import { scanStore, coveredTicketsFromScan } from "./scenarios.ts";
 import {
@@ -241,13 +241,15 @@ async function implementerCompletion(ctx: ToolContext, key: string, entry: Dispa
 				env: process.env,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
-			addLabel(ctx.repoSlug, ticket, "dl/in-review");
+			setLifecycleLabel(ctx.repoSlug, ticket, "dl/in-review");
 		} catch (e) {
 			warns.push(`could not open the PR: ${(e as Error).message.split("\n")[0]}`);
 		}
 	} else if (verdict === "blocked") {
 		try {
-			addLabel(ctx.repoSlug, ticket, "dl/blocked");
+			// dl/blocked REPLACES the in-flight state it pauses (ticket #143); the unblock
+			// drops it and the re-dispatch re-sets dl/in-progress (skill §1.2).
+			setLifecycleLabel(ctx.repoSlug, ticket, "dl/blocked");
 		} catch {
 			/* labelling is best-effort; the report carries the reason */
 		}
@@ -272,7 +274,7 @@ async function scenarioWriterCompletion(ctx: ToolContext, key: string, entry: Di
 		}
 	} else if (verdict === "blocked") {
 		try {
-			addLabel(ctx.repoSlug, ticket, "dl/blocked");
+			setLifecycleLabel(ctx.repoSlug, ticket, "dl/blocked");
 		} catch {
 			/* labelling is best-effort; the report carries the reason */
 		}
@@ -569,7 +571,7 @@ async function dispatchImpl(ctx: ToolContext, params: DispatchParams, signal: Ab
 	const branch = prev?.branch ?? (slug ? `feat/${ticket}-${slug}` : `feat/${ticket}`);
 	const worktree = prev?.worktree ?? worktreePath(ctx.cfg.root, ticket, ctx.paths.worktreeDir);
 	ensureWorktree(ctx, branch, worktree, !prev);
-	addLabel(ctx.repoSlug, ticket, "dl/in-progress");
+	setLifecycleLabel(ctx.repoSlug, ticket, "dl/in-progress");
 
 	const key = String(ticket);
 	const entry: DispatchEntry = {

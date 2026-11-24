@@ -108,6 +108,50 @@ export function addLabel(repo: string, number: number, label: string): void {
 	}
 }
 
+/** Remove one label. Tolerant of the real CLI's no-op contract: removing a label the
+ * issue does not carry is a success, so callers never need a present-first probe. */
+export function removeLabel(repo: string, number: number, label: string): void {
+	execFileSync("gh", repo ? ["--repo", repo, "issue", "edit", String(number), "--remove-label", label] : ["issue", "edit", String(number), "--remove-label", label], {
+		env: process.env,
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+}
+
+/** Every label currently on the issue ([] when the issue carries none). */
+export function issueLabels(repo: string, number: number): string[] {
+	const rows = ghJson(repo, ["issue", "view", String(number), "--json", "title,labels"]) as { labels?: { name: string }[] }[];
+	return (rows[0]?.labels ?? []).map((l) => l.name);
+}
+
+/** The lifecycle labels (ticket #143). The labels ARE the loop state, so at most one is
+ * current at a time: every transition retires the previous lifecycle label. `dl/blocked`
+ * and `dl/area/*` are NOT lifecycle labels — blocked pauses (its unblock is a separate
+ * step that drops the label), and area labels classify. */
+export const LIFECYCLE_LABELS: readonly string[] = [
+	"dl/in-progress",
+	"dl/in-review",
+	"dl/approved",
+	"dl/gated",
+	"dl/merged",
+];
+
+/**
+ * Set the ticket's current lifecycle state: remove every OTHER lifecycle label the issue
+ * carries, then add `label`. Idempotent — re-setting the carried label is a no-op — and
+ * tolerant of absent labels: nothing present means nothing removed, so a first-ever
+ * transition never throws. Every lifecycle transition goes through here (the bare
+ * addLabel accumulates and would leave a done ticket carrying its whole history).
+ */
+export function setLifecycleLabel(repo: string, number: number, label: string): void {
+	const present = issueLabels(repo, number);
+	for (const other of LIFECYCLE_LABELS) {
+		if (other !== label && present.includes(other)) {
+			removeLabel(repo, number, other);
+		}
+	}
+	addLabel(repo, number, label);
+}
+
 export function addComment(repo: string, number: number, body: string): void {
 	execFileSync("gh", repo ? ["--repo", repo, "issue", "comment", String(number), "--body", body] : ["issue", "comment", String(number), "--body", body], {
 		env: process.env,
