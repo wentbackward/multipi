@@ -135,6 +135,42 @@ test("the config-key pin is demonstrably red: dropping one key from the table is
 	assert.deepEqual(keySurfaces(mutated).undocumented, ["deploy"], "removing a documented key must make the pin red");
 });
 
+// --- environment seams: SPEC.md §13 ↔ the seams the code reads ──────────────────
+
+/** Every MULTIPI_* seam the loop's scripts and extension read, excluding the two
+ * trailing-underscore artifacts (glob patterns in comments). */
+function codeSeams(): string[] {
+	const files = [
+		...walk(path.join(ROOT, "scripts"), [".sh"]),
+		...walk(path.join(ROOT, "extension"), [".ts"]),
+	];
+	const found = new Set<string>();
+	for (const f of files)
+		for (const m of readFileSync(f, "utf8").matchAll(/\b(MULTIPI_[A-Z_]+)\b/g)) {
+			// A trailing-underscore match is a glob artifact in a comment
+			// (e.g. "$MULTIPI_SCENARIO_*"), not a seam.
+			if (!m[1].endsWith("_")) found.add(m[1]);
+		}
+	return [...found].sort();
+}
+
+// The smoke launcher's own seams (tests/smoke.sh), classified in the §13 closing note:
+// not operator/loop contracts. MULTIPI_SLOT is heavy.sh's per-slot export, read back by
+// the smoke; MULTIPI_TRUSTED is the trusted-programs forgery probe; MULTIPI_PLUGIN_DIR is
+// the module-path override for the smoke's node one-shots.
+const SMOKE_ONLY_SEAMS = new Set(["MULTIPI_TRUSTED", "MULTIPI_PLUGIN_DIR", "MULTIPI_SLOT"]);
+
+test("SPEC.md's environment-seams table is the inventory of the seams the code reads", () => {
+	const sec = section(SPEC, "Environment seams");
+	const claimed = new Set([...sec.matchAll(/`(MULTIPI_[A-Z_]+)`/g)].map((m) => m[1]));
+	// The closing note names the smoke-only seams — classified, not claimed as contracts.
+	for (const s of SMOKE_ONLY_SEAMS) claimed.delete(s);
+	const missing = codeSeams().filter((s) => !SMOKE_ONLY_SEAMS.has(s) && !claimed.has(s)).sort();
+	assert.deepEqual(missing, [], `SPEC.md §13 is missing seams the code reads: ${missing.join(", ")}`);
+	const extra = [...claimed].filter((s) => !codeSeams().includes(s)).sort();
+	assert.deepEqual(extra, [], `SPEC.md §13 claims seams the code does not read: ${extra.join(", ")}`);
+});
+
 // --- dispatch parameters: SPEC.md + design spec §2.2 ↔ makeTools() -------------
 
 /** The dispatch tool's parameter list, derived from its typebox schema (required first, `?` = optional). */
