@@ -64,6 +64,18 @@ Then dispatch implementers per the normal rules. If the analyst came back `STATU
   - `dl/gated` — included in a green gate
   - `dl/merged` — squash-merged; then close the issue (`gh issue close <n> --comment ...`)
   - `dl/blocked` — needs a human decision; the ticket body says what
+- **One lifecycle label at a time.** A lifecycle label is one of `dl/in-progress`,
+  `dl/in-review`, `dl/approved`, `dl/gated`, `dl/merged`; ADDING one REMOVES the previous
+  one — a replace, never an accumulate. The loop's own transitions go through
+  `setLifecycleLabel` (retire, then add), and `scripts/doctor.sh` notes any issue still
+  carrying a stale pile. A green report retires `dl/in-progress` when it sets
+  `dl/in-review`; a merged, closed issue ends carrying `dl/merged` + `dl/area/*` only.
+  When you set a lifecycle label by hand, do both halves in one edit:
+  `gh issue edit <n> --remove-label <old> --add-label <new>`.
+- `dl/blocked` is not a lifecycle label: it PAUSES. Blocking retires the in-flight
+  lifecycle label and leaves `dl/blocked` behind; unblocking drops `dl/blocked`, and the
+  re-dispatch re-sets `dl/in-progress`. `dl/area/*` labels classify — they survive every
+  transition.
 - Comment each transition on the issue (one line: what, which branch, evidence). Issues are the audit
   trail; future sessions and humans read them cold.
 

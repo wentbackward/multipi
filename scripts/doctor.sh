@@ -248,6 +248,55 @@ if [ -n "$DL_ROOT" ] && git -C "$DL_ROOT" remote get-url "$DL_REMOTE" >/dev/null
   done < <(git -C "$DL_ROOT" for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)
 fi
 
+# Stale lifecycle labels (ticket #143): the label line IS the loop state — at most one
+# lifecycle label (dl/in-progress, dl/in-review, dl/approved, dl/gated, dl/merged) is
+# current at a time, each transition retiring the previous. Accumulation — an OPEN issue
+# carrying >1, a CLOSED issue carrying one other than dl/merged — is NOTED, never counted
+# (the same collector-not-bulldozer stance as the orphan-branch scan above): the repair is
+# a one-line edit the operator makes with consent. dl/blocked and dl/area/* pause and
+# classify, respectively — they are not lifecycle labels and never count. The scan is
+# skipped silently when gh is missing, unauthenticated or the tracker query fails: a
+# degraded tracker is already named by the auth check above, and the scan must not turn
+# the outage into per-issue noise.
+LC_LIFECYCLE=(dl/in-progress dl/in-review dl/approved dl/gated dl/merged)
+lc_is_lifecycle() { local l; for l in "${LC_LIFECYCLE[@]}"; do [ "$1" = "$l" ] && return 0; done; return 1; }
+lc_pairs() { # LC_PAIRS ISSUE_LIST_JSON -> one "<number><TAB><label>" line per attached label
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.[] | .number as $n | (.labels // [])[] | "\($n)\t\(.name)"' <<<"$1"
+  else
+    python3 -c 'import json,sys
+for r in json.loads(sys.stdin.read()):
+    for l in (r.get("labels") or []):
+        print("%d\t%s" % (r["number"], l["name"]))' <<<"$1"
+  fi
+}
+lc_scan_state() { # LC_SCAN_STATE STATE — note the stale accumulations among that state's issues
+  local state=$1 rows
+  rows=$(gh issue list --state "$state" --json number,labels --limit 500 2>/dev/null) || return 0
+  local -A have=()
+  local n l
+  while IFS=$'\t' read -r n l; do
+    [ -n "$n" ] || continue
+    lc_is_lifecycle "$l" || continue
+    have[$n]="${have[$n]:+${have[$n]}, }$l"
+  done < <(lc_pairs "$rows")
+  local seps
+  for n in "${!have[@]}"; do
+    if [ "$state" = open ]; then
+      seps=${have[$n]//[^,]}
+      [ $(( ${#seps} + 1 )) -gt 1 ] &&
+        optional "stale lifecycle labels: open #${n} carries ${have[$n]} — each transition retires the previous (want at most one)"
+    else
+      [ "${have[$n]}" != "dl/merged" ] &&
+        optional "stale lifecycle labels: closed #${n} carries ${have[$n]} — a closed issue ends with dl/merged (+ dl/area/*, dl/blocked)"
+    fi
+  done
+}
+if [ -n "$DL_ROOT" ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  lc_scan_state open
+  lc_scan_state closed
+fi
+
 # Extension runtime: the installed extension imports typebox and the pi package at load time;
 # a repo missing either dies inside pi with an inscrutable load error, so doctor catches it here.
 # Resolution is probed with Node's own resolver FROM THE EXTENSION DIRECTORY — the same lookup

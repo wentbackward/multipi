@@ -40,9 +40,12 @@
 #     ones named in --json are emitted (unknown fields are ignored), so a body
 #     containing JSON-shaped text can never pollute a --json number query.
 #   issue view <n> --json <fields>
-#     "state" emits "OPEN"/"CLOSED" (open dir vs issues-closed dir); "comments"
-#     emits the real comments array; "title" is always included.
-#   issue edit <n> --add-label <l>
+#     "state" emits "OPEN"/"CLOSED" (open dir vs issues-closed dir); "labels" emits
+#     the attached labels (labels/<n>, [] when none); "comments" emits the real
+#     comments array; "title" is always included.
+#   issue edit <n> --add-label <l> [--remove-label <l2>]
+#     the real CLI's label semantics: re-adding a carried label is a no-op (dedupe),
+#     and removing a label the issue does not carry is a no-op (rc 0).
 #   issue close <n> [--comment <c>]
 #   api repos/<owner>/<repo>/issues/<n>/timeline [--paginate --slurp]
 #     the label-event timeline, for blocked-age detection (ticket #104): one line
@@ -348,6 +351,12 @@ case "${1:-} ${2:-}" in
     [ -n "$title" ] || exit 1
     out="{\"title\":\"$(jesc "$title")\""
     case ",$fields," in *,state,*) out="$out,\"state\":\"$state\"" ;; esac
+    case ",$fields," in *,labels,*)
+      labs="[]"
+      [ -f "$dir/labels/$n" ] && labs="[$(awk '{printf "%s{\"name\":\"%s\"}", (NR>1?",":""), $0}' "$dir/labels/$n")]"
+      out="$out,\"labels\":$labs"
+      ;;
+    esac
     if [ -z "${fields##*comments}" ]; then
       cmts="[]"
       if [ -d "$dir/comments/$n" ]; then
@@ -372,7 +381,20 @@ case "${1:-} ${2:-}" in
     shift 3
     while [ $# -gt 0 ]; do
       case "$1" in
-        --add-label) echo "$2" >>"$dir/labels/$n"; shift 2 ;;
+        --add-label)
+          # Real CLI dedupes: re-adding a carried label is a no-op (duplicate lines in
+          # labels/<n> would poison every label read downstream).
+          if ! grep -qxF "$2" "$dir/labels/$n" 2>/dev/null; then
+            echo "$2" >>"$dir/labels/$n"
+          fi
+          shift 2 ;;
+        --remove-label)
+          # Real CLI: removing a label the issue does not carry is a no-op (rc 0).
+          if [ -f "$dir/labels/$n" ]; then
+            grep -vxF "$2" "$dir/labels/$n" >"$dir/labels/$n.rm" || true
+            mv "$dir/labels/$n.rm" "$dir/labels/$n"
+          fi
+          shift 2 ;;
         *) shift ;;
       esac
     done

@@ -135,7 +135,9 @@ test("dispatch(implementer) spawns the child and the completion handler opens th
 		assert.ok(existsSync(path.join(fx.dir, "gh", `feat_${n}-add-a-feature.title`)), "PR title file exists");
 		// label dl/in-review applied
 		const labels = (existsSync(path.join(fx.dir, "gh", "labels", String(n))) ? execFileSync("cat", [path.join(fx.dir, "gh", "labels", String(n))]).toString().trim().split("\n") : []);
-		assert.ok(labels.includes("dl/in-progress") && labels.includes("dl/in-review"), JSON.stringify(labels));
+		// ticket #143: the DONE transition RETIRES dl/in-progress — the label line carries
+		// the CURRENT state, one lifecycle label at a time, never the accumulated history.
+		assert.ok(labels.includes("dl/in-review") && !labels.includes("dl/in-progress"), JSON.stringify(labels));
 	} finally { fx.cleanup(); }
 });
 
@@ -1021,7 +1023,8 @@ test("dispatch(implementer) (store on, covered by a valid t<n>- scenario): proce
 		assert.match(textOf(res), new RegExp(`DISPATCHED implementer #${n} \\(feat/${n}-covered-ticket-gets\\) -> running`), textOf(res));
 		await waitTerminal(ctx, String(n));
 		const labels = readFileSync(path.join(fx.dir, "gh", "labels", String(n)), "utf8").trim().split("\n");
-		assert.ok(labels.includes("dl/in-progress") && labels.includes("dl/in-review"), JSON.stringify(labels));
+		// ticket #143: in-review replaces in-progress (see the primary DONE pin above).
+		assert.ok(labels.includes("dl/in-review") && !labels.includes("dl/in-progress"), JSON.stringify(labels));
 	} finally { fx.cleanup(); }
 });
 

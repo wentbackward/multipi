@@ -1195,6 +1195,48 @@ printf '%s' "$out" | grep -q "orphaned local branch dl-orphan-pin" &&
 git remote rename origin-moved origin
 
 git branch -q -D dl-orphan-pin
+
+# Stale lifecycle labels (ticket #143): at most one lifecycle label (in-progress,
+# in-review, approved, gated, merged) is the CURRENT state — each transition retires
+# the previous (setLifecycleLabel). Doctor NOTES the stale accumulations (an open issue
+# carrying >1, a closed issue carrying a non-merged one) and stays ready — the same
+# collector-not-bulldozer stance as the orphan-branch scan; the repair is the operator's
+# consent. Fixtures are planted in the shared fake tracker and dropped again below.
+lc_open_pile=$(gh issue create "LC stale open pile" "pin body" | sed 's|.*/issues/||')
+gh issue edit "$lc_open_pile" --add-label dl/in-progress
+gh issue edit "$lc_open_pile" --add-label dl/in-review
+gh issue edit "$lc_open_pile" --add-label dl/area/extension
+lc_closed_stale=$(gh issue create "LC stale closed" "pin body" | sed 's|.*/issues/||')
+gh issue edit "$lc_closed_stale" --add-label dl/gated
+gh issue edit "$lc_closed_stale" --add-label dl/area/scripts
+gh issue close "$lc_closed_stale" >/dev/null
+lc_closed_ok=$(gh issue create "LC merged clean" "pin body" | sed 's|.*/issues/||')
+gh issue edit "$lc_closed_ok" --add-label dl/merged
+gh issue close "$lc_closed_ok" >/dev/null
+
+out=$(bash "$plugin/scripts/doctor.sh" 2>&1); rc=$?
+expect "doctor stays ready with stale lifecycle accumulations" "0" "$rc"
+echo "$out" | grep -q "note    stale lifecycle labels: open #$lc_open_pile carries dl/in-progress, dl/in-review" &&
+  pass "the open pile-up is noted" || fail "open pile-up not noted (want: note stale lifecycle labels: open #$lc_open_pile carries dl/in-progress, dl/in-review)"
+echo "$out" | grep -q "note    stale lifecycle labels: closed #$lc_closed_stale carries dl/gated" &&
+  pass "the closed non-merged lifecycle label is noted" || fail "closed stale label not noted (want: note stale lifecycle labels: closed #$lc_closed_stale carries dl/gated)"
+printf '%s\n' "$out" | grep -q "#$lc_closed_ok " &&
+  fail "a clean closed issue (dl/merged only) was noted" || pass "the dl/merged-only closed issue stays silent"
+echo "$out" | grep -q "problem(s)" &&
+  fail "the lifecycle note was counted as a problem" || pass "lifecycle notes are not problems"
+
+# A degraded tracker (the FAKE_GH_FAIL_ISSUE_LIST seam: simulated issue-list failure)
+# is skipped SILENTLY — no notes, and no problem invented out of the outage.
+out=$(FAKE_GH_FAIL_ISSUE_LIST=1 bash "$plugin/scripts/doctor.sh" 2>&1); rc=$?
+expect "the degraded tracker scan is a silent no-op" "0" "$rc"
+printf '%s\n' "$out" | grep -q "stale lifecycle" &&
+  fail "the degraded tracker produced lifecycle notes" || pass "no lifecycle notes from a degraded tracker"
+
+# Tidy: the fake has no issue delete — drop the files this pin planted in its own
+# tracker (test cleanup, not a deletion of anything the script owns).
+rm -f "$FAKE_GH_DIR/issues/$lc_open_pile" "$FAKE_GH_DIR/issues-closed/$lc_closed_stale" "$FAKE_GH_DIR/issues-closed/$lc_closed_ok"
+rm -f "$FAKE_GH_DIR/labels/$lc_open_pile" "$FAKE_GH_DIR/labels/$lc_closed_stale" "$FAKE_GH_DIR/labels/$lc_closed_ok"
+
 mv .devloop.json .devloop.json.bak
 out=$(bash "$plugin/scripts/doctor.sh" 2>&1)
 rc=$?
