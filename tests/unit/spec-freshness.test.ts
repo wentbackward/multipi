@@ -11,8 +11,7 @@ import { DEVLOOP_CONFIG_KEYS, LOOP_LABELS } from "../../extension/src/config.ts"
  * Spec-freshness pins (ticket #110 — the durable part of the living spec): when a
  * CONTRACT SURFACE changes (a tool, a loop label, an exit code, a config key, a
  * dispatch parameter, a role's tool set), docs/SPEC.md must describe it in the same change.
- * Each test
- * below asserts SPEC.md against the CODE (makeTools, the label vocabulary, the pinned
+ * Below, each test asserts SPEC.md against the CODE (makeTools, the label vocabulary, the pinned
  * exit tables, the parser's key list, the agent frontmatter), so drift is a red gate, not a silent decay.
  *
  * Deliberately conservative (the ticket's "grow over time"): it pins the surfaces
