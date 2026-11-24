@@ -259,8 +259,8 @@ open-ticket lookup (default 1500 ms).
 | `code-reviewer` | `read, grep, find, ls, bash` | the ticket's worktree | independent strict review of the branch diff vs base; must-fix / should-fix lists; terminal `VERDICT:` line; CHANGES REQUIRED re-dispatches until APPROVE |
 | `verifier` | `read, grep, find, ls, bash` | repo root, free-form task | read-only audit of real run outputs against expectations; terminal `STATUS:` line; the post-merge train verifier ends `VERIFICATION: PASS\|FAIL` |
 | `analyst` | `read, grep, find, ls, bash` (inspection only) | repo root, no slot | decompose a spec (`spec`) or operator feedback (`focus`) into an ordered ticket plan; the ORCHESTRATOR raises the issues — a child never creates scope |
-| `scenario-writer` | `read, grep, find, ls, bash` | repo root, no slot; reads the ticket + spec, NEVER the code | writes the ticket's holdout scenarios to the store; report lists the scenario titles and posts them as a review comment |
-| `scenario-judge` | — (spawned by the stage script, never dispatched) | per-scenario headless run | judges ONE scenario (`MULTIPI_SCENARIO_FILE/ID/TARGET`); the script decides green/red, never the agent |
+| `scenario-writer` | `read, write, edit, ls, bash` | repo root, no slot; reads the ticket + spec, NEVER the code | writes the ticket's holdout scenarios to the store; report lists the scenario titles and posts them as a review comment |
+| `scenario-judge` | `read, grep, find, ls, bash` (spawned by the stage script, never dispatched) | per-scenario headless run | judges ONE scenario (`MULTIPI_SCENARIO_FILE/ID/TARGET`); the script decides green/red, never the agent |
 
 Guarded roles (the role guard, §4): `implementer`, `code-reviewer`, `verifier`.
 
