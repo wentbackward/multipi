@@ -27,9 +27,11 @@ ground truth.
 
 multipi is an autonomous multi-agent development loop for the **pi** coding agent: one
 orchestrator pi session drives one-shot role children (implementer / code-reviewer / verifier /
-analyst / scenario-writer) in isolated git worktrees; their branches are reviewed independently,
-gated in batches, and squash-merged in order. GitHub issues are the tickets; issue labels are
-the loop state; the deterministic scripts and structured extension tools are the hands.
+analyst / scenario-writer) in isolated git worktrees, plus the stage-spawned scenario-judge
+of the dark-factory gate (no worktree); the dispatched children's branches are reviewed
+independently, gated in batches, and squash-merged in order. GitHub issues are the tickets;
+issue labels are the loop state; the deterministic scripts and structured extension tools are
+the hands.
 
 Core invariant: **the model orchestrates; the machine decides.** Reliability lives in
 deterministic scripts and structured tools; the LLM schedules, interprets and reports. The loop
@@ -69,9 +71,9 @@ Where state lives (everything is derivable; nothing is stored that cannot be rec
 - Repo git common dir: `devloop-stop-count` (stop-gate counter, never committed).
 - Runtime dir (`$XDG_RUNTIME_DIR/multipi-heavy-slots`): machine-wide heavy-job slot locks.
 
-Testing: fully offline — `make check` (tsc, unit, smoke, hygiene, shellcheck) runs with no
-network and no real GitHub; `tests/fake-gh` and `tests/fake-pi` are the stand-ins. A test that
-needs the network is a design smell, not a flake.
+Testing: fully offline — `make check` (tsc + unit tests, smoke, hygiene, shellcheck) runs with
+no network and no real GitHub; `tests/fake-gh` and `tests/fake-pi` are the stand-ins. A test
+that needs the network is a design smell, not a flake.
 
 ## 3. Control-plane tools
 
@@ -226,7 +228,10 @@ a present-but-invalid `review.max_followup_depth` falls back WITH a console warn
 analyst / scenario-writer / judge). Model: a role may pin its own via frontmatter; otherwise
 the child inherits the PARENT SESSION's model (the settings default is only the final fallback).
 The child runs `detached` in its own process group; `MULTIPI_CHILD=1` is stamped, and any
-inherited `MULTIPI_CHILD_ROLE` is deleted before the stamp unless the role is guarded.
+inherited `MULTIPI_CHILD_ROLE` is deleted unconditionally, before the stamp — the stamp is
+then applied to every spawned child that carries a role (an explicit `MULTIPI_CHILD_ROLE` is
+never inherited from the orchestrator's env; a stale role must never leak into a role-less
+child). The guard-only extension is loaded only for guarded roles (§4).
 
 **Streaming.** The child's NDJSON events stream turns/tokens/cost/current-activity to the
 dispatch tool output (per completed turn + heartbeat, rate-limited) and feed the in-process
@@ -239,12 +244,19 @@ an orchestrator `exit` hook SIGKILLs still-live child trees.
 process group, recorded crashed with `WATCHDOG: …` and exitCode 124, and re-dispatched by the
 ordinary crashed-entry recovery.
 
-**Report.** Every child's final message ends with exactly one terminal line — the LAST
-non-empty line, checked against the role's contract (mid-body marker quotes never decide):
+**Report.** Every dispatched child's final message ends with exactly one terminal line — the
+LAST non-empty line, checked against the role's contract (mid-body marker quotes never decide):
 implementer / scenario-writer / analyst / verifier end `STATUS: DONE` or
 `STATUS: BLOCKED — <reason>`; code-reviewer ends `VERDICT: APPROVE` or
 `VERDICT: CHANGES [REQUIRED]`. No terminal marker → `crashed` (a crashed child opens no PR).
 Preceded by the role's report body and a `## Questions` section (may say "none").
+
+**scenario-judge** (spawned by the stage script, never dispatched) is different: it ends with
+a single JSON verdict line on the last line — `{"id","satisfied","required","evidence","missing"}`
+(id must match the judged scenario; `satisfied` a number in 0..1; `required` a boolean; evidence
+and missing strings) — parsed by `scripts/scenario-stage.sh` (via `foldJudgeRun`), which decides
+green/red, never the agent. An invalid verdict, a non-zero judge exit or a spawn failure both
+score 0.
 
 **In-flight changes.** Edit the issue (source of truth) → `devloop_cancel` → re-dispatch; the
 resumed child re-reads the ticket first, discards invalidated partial work per brief and logs
@@ -305,8 +317,8 @@ an audit record for every non-default verdict. Two enforcement layers:
    binary (`shim_find_real` requires a compiled artifact outside the shim dir), consults
    `MULTIPI_SHIM_REAL_GH` / `MULTIPI_SHIM_REAL_GIT` first (a SET-but-unusable target fails
    closed with exit 127, never falling back), and refuses mutual-exec with itself
-   (`_POLICYSHIM_DEPTH` > 3 → exit 126). Denied/asked calls exit 126; anything else is the
-   real binary's own exit.
+   (`_POLICYSHIM_DEPTH` > 3 → exit 126). Denied/asked calls and the recursion-depth guard
+   all exit 126 (nothing executed); anything else is the real binary's own exit.
 
 Trusted programs (loop scripts in a checkout of THIS repo, verified by a `/proc` PPID-chain
 identity walk) are exempted from ONLY the base-branch/force-push denials and the
@@ -361,7 +373,7 @@ BOTH places plus this table (the freshness check scans it).
 | `scripts/multipi-status.sh` | 0 live · 1 idle · 2 STALE/wedge · 3 dead · 4 bad usage / unreadable sidecar |
 | `scripts/multipi-interrupt.sh` | 0 message injected · 4 bad usage · 5 no live session · 6 no TTY (kill-and-resume fallback printed) |
 | `scripts/multipi-board.sh` | 0 nothing needs the human · 1 ≥1 dl/blocked · 2 last gate red or over-bound child · 4 bad usage / unreadable state |
-| `scripts/policy-shims/{git,gh}` | 126 denied or asked · 127 real binary unlocatable (or seam target unusable) · anything else the real binary's own exit |
+| `scripts/policy-shims/{git,gh}` | 126 denied, asked or the recursion-depth guard (mutual-exec refusal) · 127 real binary unlocatable (or seam target unusable) · anything else the real binary's own exit |
 | child watchdog | 124 the child was killed for stream silence (`WATCHDOG: …` recorded) |
 
 ## 13. Environment seams
@@ -377,6 +389,8 @@ operator = set for the operator's own sessions/checks):
 | `MULTIPI_PI_BIN` | all | which `pi` binary to spawn |
 | `MULTIPI_AGENTS_DIR` | all | bundled role-prompts dir override |
 | `MULTIPI_LOCK_DIR` | all | heavy-slot lock dir override |
+| `MULTIPI_HEAVY_SLOTS` | loop-spawned processes | heavy.sh slot-count override (defaults to `heavy.slots`, 2) |
+| `MULTIPI_NO_JQ` | all | force the python3 fallback in the shared JSON readers (`jq` first when installed) |
 | `MULTIPI_CHILD` | child | child isolation marker (extension registers nothing) |
 | `MULTIPI_CHILD_ROLE` | child | guarded-role marker (guard-only extension loads) |
 | `MULTIPI_SCENARIO_FILE` / `MULTIPI_SCENARIO_ID` / `MULTIPI_SCENARIO_TARGET` | child (judge) | the scenario a judge run judges; the target's first printed line |
@@ -388,17 +402,26 @@ operator = set for the operator's own sessions/checks):
 | `MULTIPI_STATUS_STALE_MS` / `MULTIPI_STATUS_MEMINFO` / `MULTIPI_STATUS_PI_PAT` | operator | status-script test seams |
 | `MULTIPI_WATCH_TOOL_MS` / `MULTIPI_WATCH_NOW_MS` / `MULTIPI_WATCH_BLOCKED_MS` | operator | watchdog cadence/threshold overrides |
 | `MULTIPI_BOARD_REPO` / `MULTIPI_BOARD_CHILD_BOUND_MIN` | operator | board tracker-slug override; over-bound child threshold (default 480 min) |
+| `MULTIPI_INTERRUPT_TTY` | operator | interrupt-paste target override, shared with multipi-watch.sh (smoke tests; trusted — bypasses the /dev/tty or /dev/pts check) |
+| `MULTIPI_GH_SETTLE_SECONDS` | loop-spawned processes | merge-train: sleep between PR open and the merge-wait poll (default 3 s) |
 | `MULTIPI_PROVIDER` / `MULTIPI_PROBE_TOOL_NAMES` | operator | provider tool-name grammar probe (what-if rename without shipping) |
 
 `_POLICYSHIM_DEPTH` is internal plumbing, not a `MULTIPI_*` operator seam. The fake stand-ins
 carry their own seams (`FAKE_PI_*`, `FAKE_GH_*`) — test infrastructure, not loop contracts.
+The smoke launcher's own seams are test-only, not operator contracts: `MULTIPI_TRUSTED` (the
+trusted-programs forgery probe — answered with rc 126), `MULTIPI_PLUGIN_DIR` (the module-path
+override for the smoke's node one-shots) and `MULTIPI_SLOT` (heavy.sh's per-slot export, read
+back by the smoke).
 
 ## 14. Checks, gate and freshness
 
-`make check` (offline): `ts` (`npx tsc --noEmit`) · `unit` (`node --test tests/unit/*.test.ts`,
-INCLUDING the freshness pins) · `smoke` (`tests/smoke.sh`: throwaway repo + local bare origin +
-`fake-gh` + `fake-pi`) · `hygiene` (`tests/hygiene.sh`: shellcheck-clean corpus, gate wiring,
-`fake-gh` contract) · `shellcheck`.
+`make check` (offline, this repo) runs four Makefile targets: `ts` (`npm run check` —
+`tsc --noEmit` then `node --test tests/unit/*.test.ts`, INCLUDING the freshness pins) · `smoke`
+(`tests/smoke.sh`: throwaway repo + local bare origin + `fake-gh` + `fake-pi`) · `hygiene`
+(`tests/hygiene.sh`: shellcheck-clean corpus, gate wiring, `fake-gh` contract) · `shellcheck`.
+The five named checks — `ts`, `unit` (`node --test tests/unit/*.test.ts`, INCLUDING the
+freshness pins), `smoke`, `hygiene`, `shellcheck` — live in the repo's `.devloop.json` and are
+what the batch gate runs.
 
 The **batch gate** (`devloop_gate` / `gate-train.sh`) runs the checks from the MAIN repo's
 `.devloop.json` ONCE per train — never per branch — in the gate worktree, heavy checks through
@@ -407,9 +430,12 @@ verifies against. A branch that ADDs a check gets it at the gate only after it l
 
 **Post-merge verification** (default ON): `scripts/verify-brief.sh <pre>..<post> [exercise]`
 classifies a merged train against the shared contracts (extension incl. its `.pi` mirror,
-scripts, agents, skills, the config schema, the verifier brief template, a spec doc) —
+scripts, agents, skills, the config schema, the verifier brief template, the historical
+spec docs under `docs/superpowers/specs/`) —
 rc 0 `VERIFY DISPATCH` (contract-touching → dispatch the verifier with the rendered brief) or
-rc 10 `VERIFY SKIP` (docs/test-only; the one sanctioned skip). The verifier ends
+rc 10 `VERIFY SKIP` (docs/test-only; the one sanctioned skip — note a train touching only
+`docs/SPEC.md` itself is docs/test-only and skips, verify-brief.sh classifies only the
+historical spec docs). The verifier ends
 `VERIFICATION: PASS|FAIL`; the report attaches to each covered ticket.
 
 ## 15. Learnings and history
