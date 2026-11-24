@@ -45,7 +45,10 @@ export const LOOP_LABELS = ["dl/in-progress", "dl/in-review", "dl/approved", "dl
  * `scripts/cleanup-worktrees.sh` (via the shared `cfg` reader) — it is part of the same
  * `.devloop.json` surface even though the TS parser does not consume it. Adding a key the
  * parser (or a loop script) honours WITHOUT adding it here AND in docs/SPEC.md's configuration
- * table is what the config-key freshness pin makes red. */
+ * table is what the config-key freshness pin makes red. Residual, by design (the conservative
+ * mandate): the pin enforces equivalence between THIS LIST and the SPEC table, not between
+ * the list and the parser — a key omitted from BOTH list and SPEC stays green; the list's
+ * own completeness is held by review, and each parser-accepting site adds its keys here. */
 export const DEVLOOP_CONFIG_KEYS = [
 	"base_branch",
 	"remote",

@@ -10,9 +10,10 @@ import { DEVLOOP_CONFIG_KEYS, LOOP_LABELS } from "../../extension/src/config.ts"
 /**
  * Spec-freshness pins (ticket #110 — the durable part of the living spec): when a
  * CONTRACT SURFACE changes (a tool, a loop label, an exit code, a config key, a
- * dispatch parameter), docs/SPEC.md must describe it in the same change. Each test
+ * dispatch parameter, a role's tool set), docs/SPEC.md must describe it in the same change.
+ * Each test
  * below asserts SPEC.md against the CODE (makeTools, the label vocabulary, the pinned
- * exit tables, the parser's key list), so drift is a red gate, not a silent decay.
+ * exit tables, the parser's key list, the agent frontmatter), so drift is a red gate, not a silent decay.
  *
  * Deliberately conservative (the ticket's "grow over time"): it pins the surfaces
  * that ALREADY have pins. New surfaces join here as they gain their own ground truth.
@@ -112,25 +113,27 @@ test("SPEC.md's exit-code table carries every pinned per-script rc contract", ()
 
 // --- config keys: SPEC.md ↔ DEVLOOP_CONFIG_KEYS (the single source) ------------
 
-/** Keys the parser accepts that SPEC.md's configuration table does NOT document. */
-function undocumentedKeys(specText: string): string[] {
+/** SPEC.md's configuration table: the documented key set, plus the residual views the pins assert.
+ * Returned together so the two-directional pin shares ONE extraction (a drift between two
+ * separately parsed copies would mask the very drift the pin exists to catch). */
+function keySurfaces(specText: string): { documented: Set<string>; undocumented: string[]; extra: string[] } {
 	const sec = section(specText, "Configuration");
 	const documented = new Set([...sec.matchAll(/^\|\s*`([a-z0-9_\[\].]+)`\s*\|/gm)].map((m) => m[1]));
-	return [...DEVLOOP_CONFIG_KEYS].filter((k) => !documented.has(k));
+	const undocumented = [...DEVLOOP_CONFIG_KEYS].filter((k) => !documented.has(k));
+	const extra = [...documented].filter((k) => !(DEVLOOP_CONFIG_KEYS as readonly string[]).includes(k));
+	return { documented, undocumented, extra };
 }
 
 test("every config key the loop accepts is documented in SPEC.md (and vice versa)", () => {
-	assert.deepEqual(undocumentedKeys(SPEC), [], "parser-accepted keys undocumented in SPEC.md: " + undocumentedKeys(SPEC).join(", "));
-	const sec = section(SPEC, "Configuration");
-	const documented = new Set([...sec.matchAll(/^\|\s*`([a-z0-9_\[\].]+)`\s*\|/gm)].map((m) => m[1]));
-	const extra = [...documented].filter((k) => !(DEVLOOP_CONFIG_KEYS as readonly string[]).includes(k));
+	const { undocumented, extra } = keySurfaces(SPEC);
+	assert.deepEqual(undocumented, [], "parser-accepted keys undocumented in SPEC.md: " + undocumented.join(", "));
 	assert.deepEqual(extra, [], `SPEC.md documents keys the loop does not accept (add them to DEVLOOP_CONFIG_KEYS or remove): ${extra.join(", ")}`);
 });
 
 test("the config-key pin is demonstrably red: dropping one key from the table is detected", () => {
-	assert.equal(undocumentedKeys(SPEC).length, 0, "precondition: the table is currently complete");
+	assert.equal(keySurfaces(SPEC).undocumented.length, 0, "precondition: the table is currently complete");
 	const mutated = SPEC.split("\n").filter((l) => !l.startsWith("| `deploy` |")).join("\n");
-	assert.deepEqual(undocumentedKeys(mutated), ["deploy"], "removing a documented key must make the pin red");
+	assert.deepEqual(keySurfaces(mutated).undocumented, ["deploy"], "removing a documented key must make the pin red");
 });
 
 // --- dispatch parameters: SPEC.md + design spec §2.2 ↔ makeTools() -------------
@@ -185,6 +188,36 @@ test("the design spec §2.2 dispatch row matches makeTools()' DispatchSchema (re
 	const text = read("docs/superpowers/specs/2026-10-27-devloop-pi-design.md");
 	const row = text.split("\n").find((l) => l.startsWith("| `devloop_dispatch` |")) ?? "";
 	assertDispatchRow(row, "design spec §2.2");
+});
+
+// --- role tools: SPEC.md §8 ↔ the agent frontmatter ----------------------------
+
+/** The `tools:` list of each bundled agent's frontmatter (absent = pi defaults). */
+function agentRoleTools(): Map<string, string> {
+	const out = new Map<string, string>();
+	for (const f of readdirSync(path.join(ROOT, "agents")).sort()) {
+		if (!f.endsWith(".md")) continue;
+		const lines = read(path.join("agents", f)).split("\n");
+		if (lines[0]?.trim() !== "---") continue;
+		const fm = lines.slice(1, lines.indexOf("---", 1));
+		const name = fm.find((l) => l.startsWith("name: "))?.slice(6).trim();
+		const tools = fm.find((l) => l.startsWith("tools: "))?.slice(7).trim();
+		if (name) out.set(name, tools ?? "");
+	}
+	return out;
+}
+
+test("SPEC.md's roles table lists each role's frontmatter tool set (drift guard)", () => {
+	const sec = section(SPEC, "Roles");
+	for (const [name, tools] of [...agentRoleTools()].sort()) {
+		const row = sec.split("\n").find((l) => l.startsWith(`| \`${name}\` |`));
+		assert.ok(row, `SPEC.md's roles table has no row for the ${name} role`);
+		if (tools)
+			assert.ok(
+				row!.includes(`\`${tools}\``),
+				`SPEC.md's ${name} row must list its frontmatter tools verbatim (expected: \`${tools}\`)`,
+			);
+	}
 });
 
 // --- the discipline line + rebuild-source naming --------------------------------
