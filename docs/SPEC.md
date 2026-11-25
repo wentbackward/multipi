@@ -26,10 +26,11 @@ ground truth.
 ## 1. What multipi is
 
 multipi is an autonomous multi-agent development loop for the **pi** coding agent: one
-orchestrator pi session drives one-shot role children — implementer / code-reviewer / verifier
-in isolated git worktrees, analyst / scenario-writer at the repo root — plus the stage-spawned
-scenario-judge of the dark-factory gate (no worktree); the dispatched children's branches are
-reviewed independently, gated in batches, and squash-merged in order. GitHub issues are the tickets;
+orchestrator pi session drives one-shot role children: implementer and code-reviewer in the
+ticket's isolated git worktree, analyst / scenario-writer / verifier at the repo root (the
+verifier only leaves it for an explicit `worktree`) — plus the stage-spawned scenario-judge of
+the dark-factory gate (no worktree); the dispatched children's branches are reviewed
+independently, gated in batches, and squash-merged in order. GitHub issues are the tickets;
 issue labels are the loop state; the deterministic scripts and structured extension tools are
 the hands.
 
@@ -226,7 +227,8 @@ a present-but-invalid `review.max_followup_depth` falls back WITH a console warn
 
 **Spawn.** `pi -p --no-session --mode json [--model m] [--tools …] --append-system-prompt
 <role.md>` with the role brief as the prompt, cwd = the child's worktree (repo root for
-analyst / scenario-writer / judge). Model: a role may pin its own via frontmatter; otherwise
+analyst / scenario-writer / judge; the verifier takes the repo root unless dispatched with an
+explicit `worktree`). Model: a role may pin its own via frontmatter; otherwise
 the child inherits the PARENT SESSION's model (the settings default is only the final fallback).
 The child runs `detached` in its own process group; `MULTIPI_CHILD=1` is stamped, and any
 inherited `MULTIPI_CHILD_ROLE` is deleted unconditionally, before the stamp — the stamp is

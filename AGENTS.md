@@ -1,9 +1,10 @@
 # AGENTS.md — multipi
 
 multipi is an autonomous multi-agent development loop for the **pi** coding agent: an orchestrator
-session, one-shot role children — implementer / code-reviewer / verifier in isolated git worktrees,
-analyst / scenario-writer at the repo root — plus the stage-spawned scenario-judge of the dark-factory
-gate, one batched check gate per train of ready branches, and ordered squash merges. GitHub issues are
+session, one-shot role children: implementer and code-reviewer in the ticket's isolated git worktree,
+analyst / scenario-writer / verifier at the repo root (the verifier only leaves it for an explicit
+`worktree`) — plus the stage-spawned scenario-judge of the dark-factory gate, one
+batched check gate per train of ready branches, and ordered squash merges. GitHub issues are
 the tickets; labels are the loop state; the deterministic scripts + extension tools are the hands.
 
 `docs/SPEC.md` is the LIVING SPEC — the rebuild source of truth: the complete current-state
