@@ -26,10 +26,10 @@ ground truth.
 ## 1. What multipi is
 
 multipi is an autonomous multi-agent development loop for the **pi** coding agent: one
-orchestrator pi session drives one-shot role children (implementer / code-reviewer / verifier /
-analyst / scenario-writer) in isolated git worktrees, plus the stage-spawned scenario-judge
-of the dark-factory gate (no worktree); the dispatched children's branches are reviewed
-independently, gated in batches, and squash-merged in order. GitHub issues are the tickets;
+orchestrator pi session drives one-shot role children — implementer / code-reviewer / verifier
+in isolated git worktrees, analyst / scenario-writer at the repo root — plus the stage-spawned
+scenario-judge of the dark-factory gate (no worktree); the dispatched children's branches are
+reviewed independently, gated in batches, and squash-merged in order. GitHub issues are the tickets;
 issue labels are the loop state; the deterministic scripts and structured extension tools are
 the hands.
 
@@ -179,7 +179,7 @@ a present-but-invalid `review.max_followup_depth` falls back WITH a console warn
 | `checks[].heavy` | boolean | `true` | route through `heavy.sh` (machine-wide slots) |
 | `checks[].summary` | string | — | regex that extracts the one-line summary from the check output |
 | `gate_setup` | string | (unset) | run in the gate worktree before the checks |
-| `gate_worktree` | path | `<worktree_dir>/gate` | absolute, `~/`, or relative to the repo parent |
+| `gate_worktree` | path | `<worktree_dir>/gate` | absolute, `~/`, or relative to the repo root |
 | `worktree_dir` | path | `<state_dir>/worktrees/<repo>` | one dir holds every issue worktree + the gate worktree; relative resolves against the repo PARENT |
 | `factory` | `"collaborative"` \| `"dark"` | `collaborative` | operating-mode preset: only sets defaults; any explicit option wins; any other value coerces to collaborative |
 | `scenarios` | object \| false | (absent) | the scenario store: the block's presence turns it ON in any mode; `false` is the only off-switch; absent, `dark` turns it on |
