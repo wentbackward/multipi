@@ -112,7 +112,8 @@ child, a pushed branch) continue, and the text tells the operator how to reconci
   and the file matches `format_extensions` (plain suffix matching — list every distinct
   extension), run the format command with `{file}` substituted.
 - **Child isolation**: `spawnPi` stamps `MULTIPI_CHILD=1` in the child env; the extension
-  registers NOTHING (no tools, no hooks) for such a process. Children are executors; only the
+  registers NOTHING (no tools, no hooks) for such a process — with one exception: a child of a
+  guarded role loads the guard-only extension (next bullet). Children are executors; only the
   orchestrator drives (an isolated child that loaded the loop sat in the stop-gate continue loop
   for 30+ minutes — learned the hard way, `docs/LEARNINGS.md`).
 - **Role guard** (dark factory): a child of a guarded role (`implementer`, `code-reviewer`,
@@ -158,9 +159,9 @@ every ticket stands; interrupted children re-dispatch into the same worktree.
 
 Repo-root `.devloop.json`, committed. The schema has ONE source of truth:
 `DEVLOOP_CONFIG_KEYS` in `extension/src/config.ts` (next to the parser that consumes it).
-This table asserts against that list — a key the parser (or a loop script reading the same
-file) accepts but the table lacks, and a table row the loop does not accept, both make the
-freshness check red. Add the key to `DEVLOOP_CONFIG_KEYS` first, then here.
+This table asserts against that list — a key in that list missing from the table, or a table
+row that the loop does not accept, both make the freshness check red (add the key to the
+list first, then here); the list's own completeness against the parser is held by review.
 
 Unknown keys are ignored; malformed values coerce to the default (config-layer discipline), and
 a present-but-invalid `review.max_followup_depth` falls back WITH a console warning.
@@ -296,7 +297,8 @@ it starts the system under test (`scenarios.run`, first printed line = target), 
 valid scenario through a judge, scores against `pass` / `min_satisfaction`, and folds its
 verdict into the gate's UNCHANGED exit contract (red stage → the gate is TRAIN RED exit 1 with
 no train record; stage usage/config → exit 2 without the TRAIN RED word; store off → the gate
-prints `scenarios skipped` and its pre-stage behaviour). Judges are one-shot headless children
+keeps its pre-stage behaviour (the stage is not run and nothing is printed); store on but a
+check failed → the gate prints `scenarios skipped`). Judges are one-shot headless children
 spawned by the script itself (own process group, TERM→KILL); a non-zero judge exit scores 0
 even with a well-formed verdict line. **Log hygiene (pinned):** `train-scenario-results.jsonl`,
 `train-scenario-judge/` and `train-scenarios-run.log` hold judge evidence and sealed ids — they

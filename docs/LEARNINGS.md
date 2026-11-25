@@ -5,7 +5,7 @@ distilled. Each entry: **symptom** (what was observed) → **root cause** (why i
 **now prevents** (the mechanism that makes it impossible or visible) → **pinned at** (where
 the prevention is asserted, so it cannot silently regress). Companion to `docs/SPEC.md`
 (what the system IS) — this file is why the system is shaped that way. Newest lessons keep
-land here; `docs/DECISIONS.md` carries the full decision record.
+landing here; `docs/DECISIONS.md` carries the full decision record.
 
 ## 1. The wedge: an orchestrator silent for ~6 hours
 
