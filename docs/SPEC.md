@@ -181,10 +181,10 @@ a present-but-invalid `review.max_followup_depth` falls back WITH a console warn
 | `checks[].summary` | string | — | regex that extracts the one-line summary from the check output |
 | `gate_setup` | string | (unset) | run in the gate worktree before the checks |
 | `gate_worktree` | path | `<worktree_dir>/gate` | absolute, `~/`, or relative to the repo root |
-| `worktree_dir` | path | `<state_dir>/worktrees/<repo>` | one dir holds every issue worktree + the gate worktree; relative resolves against the repo PARENT |
+| `worktree_dir` | path | `<state_dir>/worktrees/<repo>` | one dir holds every issue worktree + the gate worktree; relative resolves against the repo parent, absolute passes through |
 | `factory` | `"collaborative"` \| `"dark"` | `collaborative` | operating-mode preset: only sets defaults; any explicit option wins; any other value coerces to collaborative |
 | `scenarios` | object \| false | (absent) | the scenario store: the block's presence turns it ON in any mode; `false` is the only off-switch; absent, `dark` turns it on |
-| `scenarios.dir` | path | `<state_dir>/scenarios` | resolves like `worktree_dir` (can never live inside the repo) |
+| `scenarios.dir` | path | `<state_dir>/scenarios` | resolves like `worktree_dir`; relative resolves against the repo parent, absolute passes through |
 | `scenarios.run` | string | (unset) | shell snippet that starts the system under test; its first printed line is the target |
 | `scenarios.run_seconds` | number | `120` | run cap |
 | `scenarios.judge` | string | (unset) | shell snippet judging one scenario (default: headless `scenario-judge` child) |

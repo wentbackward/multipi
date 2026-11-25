@@ -77,7 +77,8 @@ landing here; `docs/DECISIONS.md` carries the full decision record.
   inspecting the worktree (`git status`/`git log`) before acting — the git state outranks
   the old report; (5) reports are post-mortems (exactly-once late-report ledger), never
   instructions to a future child.
-- **Pinned at:** `tests/unit/state.test.ts` (reap-then-redispatch race, generation guard);
+- **Pinned at:** `tests/unit/tools.test.ts` (reap-then-redispatch race, generation guard);
+  `tests/unit/state.test.ts` (reapDead primitives, unseen-terminals ledger);
   `tests/unit/brief.test.ts` (the resume directive); `tests/smoke.sh` (cancel/re-dispatch
   reuses the worktree, dead-pid pruning).
 
