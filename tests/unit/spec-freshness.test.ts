@@ -112,6 +112,10 @@ test("SPEC.md's exit-code table carries every pinned per-script rc contract", ()
 });
 
 // --- config keys: SPEC.md ↔ DEVLOOP_CONFIG_KEYS (the single source) ------------
+//
+// Note (the residual this pin cannot see): it enforces LIST↔TABLE equivalence. A key the
+// parser accepts that is missing from DEVLOOP_CONFIG_KEYS (and the table) stays green — the
+// list's own completeness against the parser is held by review (§6 names the same residual).
 
 /** SPEC.md's configuration table: the documented key set, plus the residual views the pins assert.
  * Returned together so the two-directional pin shares ONE extraction (a drift between two
@@ -128,6 +132,20 @@ test("every config key the loop accepts is documented in SPEC.md (and vice versa
 	const { undocumented, extra } = keySurfaces(SPEC);
 	assert.deepEqual(undocumented, [], "parser-accepted keys undocumented in SPEC.md: " + undocumented.join(", "));
 	assert.deepEqual(extra, [], `SPEC.md documents keys the loop does not accept (add them to DEVLOOP_CONFIG_KEYS or remove): ${extra.join(", ")}`);
+});
+
+test("SPEC.md's gate_worktree row states the repo-root resolution rule (the code resolves it inside the repo)", () => {
+	const sec = section(SPEC, "Configuration");
+	const row = sec.split("\n").find((l) => l.startsWith("| `gate_worktree` |"));
+	assert.ok(row, "SPEC.md's configuration table has no gate_worktree row");
+	assert.ok(
+		row!.includes("relative to the repo root"),
+		"the gate_worktree row must state that a relative value resolves against the repo ROOT (config.ts resolveOpt and scripts/lib/common.sh dl_resolve both resolve it inside the repo; the parent-relative rule is worktree_dir's)",
+	);
+	assert.ok(
+		!row!.includes("repo parent"),
+		"the gate_worktree row must not repeat the parent-relative rule (that is worktree_dir's rule, not gate_worktree's)",
+	);
 });
 
 test("the config-key pin is demonstrably red: dropping one key from the table is detected", () => {
@@ -274,7 +292,23 @@ test("AGENTS.md names docs/SPEC.md as the rebuild source of truth", () => {
 
 // --- LEARNINGS.md: the institutional memory -------------------------------------
 
-test("docs/LEARNINGS.md carries each round's lesson with symptom/cause/prevention/pin structure", () => {
+/** Every `## n.` entry's body, in file order, split at the numbered headings. */
+function learningEntries(text: string): string[] {
+	const bodies: string[] = [];
+	let current: string[] | null = null;
+	for (const line of text.split("\n")) {
+		if (/^## \d+\. /.test(line)) {
+			if (current !== null) bodies.push(current.join("\n"));
+			current = [];
+		} else if (current !== null) {
+			current.push(line);
+		}
+	}
+	if (current !== null) bodies.push(current.join("\n"));
+	return bodies;
+}
+
+test("docs/LEARNINGS.md carries each lesson with symptom/cause/prevention/pin structure", () => {
 	const t = read("docs/LEARNINGS.md");
 	for (const topic of [
 		"wedge", // the ~6h silent orchestrator
@@ -288,7 +322,15 @@ test("docs/LEARNINGS.md carries each round's lesson with symptom/cause/preventio
 	]) {
 		assert.ok(t.toLowerCase().includes(topic.toLowerCase()), `LEARNINGS.md is missing the "${topic}" lesson`);
 	}
-	for (const field of ["symptom", "root cause", "now prevents", "pinned"]) {
-		assert.ok(t.toLowerCase().includes(field), `every LEARNINGS.md entry must carry the "${field}" dimension`);
+	const entries = learningEntries(t);
+	assert.ok(entries.length >= 8, `expected at least 8 lessons, found ${entries.length}`);
+	for (const [i, body] of entries.entries()) {
+		for (const field of ["**Symptom:**", "**Root cause:**", "**Now prevents:**", "**Pinned at:**"]) {
+			assert.ok(body.includes(field), `lesson #${i + 1} must carry ${field}`);
+		}
 	}
+	// The per-entry check must be able to fail: a half-empty lesson is detected.
+	const mutated = t.replace(/\n- \*\*Pinned at:\*\*[^\n]*/, "");
+	const hollow = learningEntries(mutated).filter((b) => !b.includes("**Pinned at:**"));
+	assert.ok(hollow.length >= 1, "the per-entry check must detect a lesson with a missing pin");
 });

@@ -200,6 +200,22 @@ test("resolvePaths: scenarios.dir absolute passes through", () => {
 	} finally { fx.cleanup(); }
 });
 
+test("resolvePaths: gate_worktree relative resolves against the repo ROOT (not the parent)", () => {
+	const fx = makeFixture('{"gate_worktree": "gate-wt"}');
+	try {
+		const p = resolvePaths(loadConfig(fx.repo)!, { MULTIPI_HOME: path.join(fx.dir, "home") });
+		assert.equal(p.gateDir, path.join(fx.repo, "gate-wt"));
+	} finally { fx.cleanup(); }
+});
+
+test("resolvePaths: gate_worktree absolute passes through", () => {
+	const fx = makeFixture('{"gate_worktree": "/abs/gate"}');
+	try {
+		const p = resolvePaths(loadConfig(fx.repo)!, { MULTIPI_HOME: path.join(fx.dir, "home") });
+		assert.equal(p.gateDir, "/abs/gate");
+	} finally { fx.cleanup(); }
+});
+
 test("setup templates ship no factory and no scenarios keys (fresh = collaborative, scenarios off)", () => {
 	const here = path.dirname(fileURLToPath(import.meta.url));
 	for (const rel of ["templates/devloop.json", ".pi/templates/devloop.json"]) {
