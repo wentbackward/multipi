@@ -148,6 +148,28 @@ test("SPEC.md's gate_worktree row states the repo-root resolution rule (the code
 	);
 });
 
+test("SPEC.md's worktree_dir and scenarios.dir rows state the parent-relative rule with absolute passthrough", () => {
+	const sec = section(SPEC, "Configuration");
+	const wt = sec.split("\n").find((l) => l.startsWith("| `worktree_dir` |"));
+	const sc = sec.split("\n").find((l) => l.startsWith("| `scenarios.dir` |"));
+	assert.ok(wt, "SPEC.md's configuration table has no worktree_dir row");
+	assert.ok(sc, "SPEC.md's configuration table has no scenarios.dir row");
+	for (const [name, row] of [["worktree_dir", wt], ["scenarios.dir", sc]] as const) {
+		assert.ok(
+			row.includes("relative resolves against the repo parent"),
+			`${name}: the row must state that a relative value resolves against the repo PARENT (resolveWt: path.join(path.dirname(root), p))`,
+		);
+		assert.ok(
+			row.includes("absolute passes through"),
+			`${name}: the row must state that an absolute value passes through (resolveWt returns it verbatim), so an absolute store/worktree dir can live inside the repo`,
+		);
+		assert.ok(
+			!/can never live inside/i.test(row),
+			`${name}: the row must not claim the dir can never live inside the repo (absolute paths pass through)`,
+		);
+	}
+});
+
 test("the config-key pin is demonstrably red: dropping one key from the table is detected", () => {
 	assert.equal(keySurfaces(SPEC).undocumented.length, 0, "precondition: the table is currently complete");
 	const mutated = SPEC.split("\n").filter((l) => !l.startsWith("| `deploy` |")).join("\n");
