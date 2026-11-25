@@ -29,8 +29,8 @@ multipi is an autonomous multi-agent development loop for the **pi** coding agen
 orchestrator pi session drives one-shot role children: implementer and code-reviewer in the
 ticket's isolated git worktree, analyst / scenario-writer / verifier at the repo root (the
 verifier only leaves it for an explicit `worktree`) — plus the stage-spawned scenario-judge of
-the dark-factory gate (no worktree); the dispatched children's branches are reviewed
-independently, gated in batches, and squash-merged in order. GitHub issues are the tickets;
+the dark-factory gate (running in the gate worktree); the dispatched children's branches are
+reviewed independently, gated in batches, and squash-merged in order. GitHub issues are the tickets;
 issue labels are the loop state; the deterministic scripts and structured extension tools are
 the hands.
 
@@ -226,10 +226,11 @@ a present-but-invalid `review.max_followup_depth` falls back WITH a console warn
 ## 7. Child protocol
 
 **Spawn.** `pi -p --no-session --mode json [--model m] [--tools …] --append-system-prompt
-<role.md>` with the role brief as the prompt, cwd = the child's worktree (repo root for
-analyst / scenario-writer / judge; the verifier takes the repo root unless dispatched with an
-explicit `worktree`). Model: a role may pin its own via frontmatter; otherwise
-the child inherits the PARENT SESSION's model (the settings default is only the final fallback).
+<role.md>` with the role brief as the prompt, cwd = the child's worktree (repo root for the
+dispatched analyst / scenario-writer / verifier — the verifier only leaves it for an explicit
+`worktree`; the stage-spawned judge runs in the gate worktree). Model: a role may pin its own
+via frontmatter; otherwise the child inherits the PARENT SESSION's model (the settings default
+is only the final fallback).
 The child runs `detached` in its own process group; `MULTIPI_CHILD=1` is stamped, and any
 inherited `MULTIPI_CHILD_ROLE` is deleted unconditionally, before the stamp — the stamp is
 then applied to every spawned child that carries a role (an explicit `MULTIPI_CHILD_ROLE` is
@@ -275,7 +276,7 @@ open-ticket lookup (default 1500 ms).
 | `verifier` | `read, grep, find, ls, bash` | repo root, free-form task | read-only audit of real run outputs against expectations; terminal `STATUS:` line; the post-merge train verifier ends `VERIFICATION: PASS\|FAIL` |
 | `analyst` | `read, grep, find, ls, bash` (inspection only) | repo root, no slot | decompose a spec (`spec`) or operator feedback (`focus`) into an ordered ticket plan; the ORCHESTRATOR raises the issues — a child never creates scope |
 | `scenario-writer` | `read, write, edit, ls, bash` | repo root, no slot; reads the ticket + spec, NEVER the code | writes the ticket's holdout scenarios to the store; report lists the scenario titles and posts them as a review comment |
-| `scenario-judge` | `read, grep, find, ls, bash` (spawned by the stage script, never dispatched) | per-scenario headless run | judges ONE scenario (`MULTIPI_SCENARIO_FILE/ID/TARGET`); the script decides green/red, never the agent |
+| `scenario-judge` | `read, grep, find, ls, bash` (spawned by the stage script, never dispatched) | per-scenario headless run in the gate worktree | judges ONE scenario (`MULTIPI_SCENARIO_FILE/ID/TARGET`); the script decides green/red, never the agent |
 
 Guarded roles (the role guard, §4): `implementer`, `code-reviewer`, `verifier`.
 
