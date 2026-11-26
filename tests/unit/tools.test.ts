@@ -1440,6 +1440,42 @@ test("stop gate: a done entry on an UNLABELLED ticket (or a label-less tracker) 
 	} finally { fx.cleanup(); }
 });
 
+test("stop gate: the K-cycle release clears the repeat state — a drive state that vanishes and returns re-blocks a FRESH 3-block cycle, not an inherited pass (ticket #147 review follow-up)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", fast_check: "true" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Dispatchable, then orphaned");
+		// Phase 1 — three identical drive blocks, then the K-repeat release passes.
+		for (const settleNo of [1, 2, 3]) {
+			const d = await evaluateSettle(ctx.cwd);
+			assert.ok(d, `settle ${settleNo}: a dispatchable ticket must drive the block`);
+			assert.match(d!.entries[0].content, new RegExp(`#${n}`), `settle ${settleNo} names the ticket:`);
+			assert.match(d!.entries[0].content, /startable/i, `settle ${settleNo}: the dispatch clause stands`);
+		}
+		assert.equal(await evaluateSettle(ctx.cwd), undefined, "the 4th identical settle passes the K-repeat release");
+		// Phase 2 — the model acts: the implementer for the ticket is in flight, so no clause
+		// drives (a VANISHED drive state; the settle passes with no fingerprint).
+		plantDispatch(ctx, {
+			[String(n)]: { pid: process.pid, role: "implementer", branch: `feat/${n}-orphaned`, worktree: "/wt", startedAt: 1000, status: "running" },
+		});
+		assert.equal(await evaluateSettle(ctx.cwd), undefined, "a child in flight drives nothing — the drive state vanishes");
+		// Phase 3 — the child dies: reconcile flips the entry to crashed, the ticket is
+		// dispatchable again — the SAME drive state (same clause lists, running 0) returns.
+		plantDispatch(ctx, {
+			[String(n)]: { pid: await deadPid(), role: "implementer", branch: `feat/${n}-orphaned`, worktree: "/wt", startedAt: 1000, status: "running" },
+		});
+		const r1 = await evaluateSettle(ctx.cwd);
+		assert.ok(r1, "the RETURNED drive state re-blocks (a fresh K-cycle) — a released state that vanished and came back must not inherit the stale (fingerprint, 3) and pass immediately");
+		assert.match(r1!.entries[0].content, new RegExp(`#${n}`));
+		assert.match(r1!.entries[0].content, /startable/i, "the dispatch clause stands again for the returned state");
+		// Phase 4 — the fresh cycle is itself complete: two more blocks, then its own release.
+		assert.ok(await evaluateSettle(ctx.cwd), "fresh cycle, block 2");
+		assert.ok(await evaluateSettle(ctx.cwd), "fresh cycle, block 3");
+		assert.equal(await evaluateSettle(ctx.cwd), undefined, "the fresh cycle releases after its own 3 identical blocks");
+	} finally { fx.cleanup(); }
+});
+
 // ---------------------------------------------------------------------------
 // Grammar pin (#99): providers validating tool names against the OpenAI
 // function-name grammar reject a DOT (observed: Kimi 400 "function name is
