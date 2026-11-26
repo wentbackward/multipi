@@ -67,13 +67,25 @@ Two hooks:
      Bounded by `stop_gate.max_blocks` (default 5), counted in `.git/devloop-stop-count`; the
      counter resets when green. An unfixable state cannot loop the session forever.
   2. Dirty tree (when `stop_gate.require_clean_tree`) → force one continuation (same bound).
-  3. **Loop drive**: a *startable* ticket exists and a dispatch slot is free → force one
-     continuation ("N tickets startable, slot free — start the next one"). *Unbounded*, because
-     this is the loop's job. "Startable" = open, not labelled `dl/blocked`, and all dependencies
-     either merged or stackable on an in-flight/`dl/in-review`+ branch — so a stalled dependency
-     never spins the loop. Settles when no ticket is startable (all merged, all blocked, or all
-     waiting on a blocked dependency). This makes "continues coding while there are requirements"
-     a property of the harness, not of the model's discipline.
+  3. **Phased loop drive** (ticket #147): every open, non-`dl/blocked` ticket classifies into
+     exactly one drive clause from its phase labels + child entries — (a) *dispatchable*: no
+     child in flight, no delivered entry, dependencies satisfied (closed or in flight; scenario-
+     covered when the store is on) → drive a dispatch (`devloop_dispatch`), firing only while a
+     slot is free; (b) *delivered, awaiting review*: implementer entry `done` with no RUNNING
+     review (any/absent phase label — a label anomaly must not re-dispatch the implementer) →
+     drive the code-reviewer; (c) `dl/approved` not yet `dl/gated` → drive the gate
+     (`devloop_gate`); (d) `dl/gated` → drive the merge (`devloop_merge`). A child in flight —
+     implementer running, or a review running — drives NOTHING. Each clause NAMES the tickets it
+     counts: the 2026-11-25 livelock was an identical, unnamed "2 tickets startable" that named
+     an impossible action (an in-review ticket counted as startable). All four clauses are
+     *unbounded* (the harness invariant) and never bump the bounded counter. **Repeat breaker**:
+     consecutive settles against an UNCHANGED drive state (stable fingerprint over the four clause
+     lists, running/cap, fast-check and tree-dirtiness) block at most `DRIVE_REPEAT_LIMIT` = 3
+     times, after which the gate passes and emits a console AUDIT line — an identical repeated
+     message must not livelock the session; any change to the drive state re-blocks (count
+     restarts). State: per-repo `devloop-stop-drive` next to the counter file. Settles when no
+     clause names a ticket. This makes "continues coding while there are requirements" a
+     property of the harness, not of the model's discipline.
 - **Format-on-edit** (`tool_result`): after a successful `write`/`edit`, if `format` is configured
   and the file matches `format_extensions`, run the format command on that file (`{file}` = path).
 
