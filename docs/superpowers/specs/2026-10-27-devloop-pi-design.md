@@ -84,7 +84,7 @@ no long-lived processes started in the factory — the ONE sanctioned exception 
 
 | Script | Job | Carried over from reference |
 |---|---|---|
-| `heavy.sh` | Machine-wide queue: `heavy.sh <cmd>` waits for one of `heavy.slots` (default 2) `flock`ed slots in `$XDG_RUNTIME_DIR/multipi-heavy-slots`, optional systemd user-scope memory cap (`heavy.memory_max`), per-slot port env (`port_env/base/step`), stale-temp cleanup. | Yes, near-verbatim. |
+| `heavy.sh` | Machine-wide queue: `heavy.sh <cmd>` waits for one of `heavy.slots` (default 2) `flock`ed slots in `${MULTIPI_LOCK_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}/multipi-heavy-slots` (override or TMPDIR/`/tmp` fallback), optional systemd user-scope memory cap (`heavy.memory_max`), per-slot port env (`port_env/base/step`), stale-temp cleanup. | Yes, near-verbatim. |
 | `gate-train.sh b1 b2 ...` | Stack branches in the gate worktree, run configured checks once on top; heavy checks via `heavy.sh`; parse `summary` regexes; write log to `logs_dir`; post nothing (no identity mode). Exit: 0 green, 1 red (incl. gate_setup failure), 2 usage/config, 3 rebase conflict (branch named). | Yes, near-verbatim. |
 | `merge-train.sh b1 b2 ...` | Replay each branch on current base; assert tree equality with the gated tree; push; open PR from notes file (leading `#` stripped); squash-merge exactly that head; delete branch. Exit: 0 ok, 2 usage/config, 3 replay conflict, 4 tree differs (re-gate), 5 notes missing, 6 branch changed since gate, 7 PR not merged / gh failed, 8 not gated green. | Yes, minus identity-mode status/approval code (no exit 9). |
 | `paths.sh` | Resolve `notes <branch>` / `logs` paths (`~/.multipi/<repo>/{notes,logs}`, or configured). | Yes. |
