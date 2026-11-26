@@ -1372,16 +1372,16 @@ test("stop gate: a done implementer entry whose branch awaits the reviewer drive
 		assert.equal(d!.continue, true);
 		assert.match(d!.entries[0].content, /await the reviewer/);
 		assert.match(d!.entries[0].content, new RegExp(`#${n}`));
-		// The moment a reviewer is dispatched, the review clause retires (the startable
-		// clause stays: the ticket is still open and unblocked).
+		// The moment a reviewer is dispatched, the review clause retires — and the incident
+		// shape pins here (ticket #147): a delivered in-pipeline ticket with a RUNNING review
+		// drives NOTHING (no dispatch, no review claim). The old startable count was the
+		// 2026-11-25 livelock.
 		plantDispatch(ctx, {
 			[String(n)]: { pid: 1, role: "implementer", branch: `feat/${n}-delivered`, worktree: "/wt", startedAt: 1000, status: "done", report: "STATUS: DONE", endedAt: 2000 },
 			[`review-${n}`]: { pid: process.pid, role: "code-reviewer", branch: `feat/${n}-delivered`, worktree: "/wt", startedAt: 3000, status: "running" },
 		});
 		const d2 = await evaluateSettle(ctx.cwd);
-		assert.ok(d2, "the ticket is still startable — the gate keeps driving, on the dispatch clause");
-		assert.match(d2!.entries[0].content, /startable/i);
-		assert.ok(!d2!.entries[0].content.includes("await the reviewer"), "the review clause is gone once the reviewer exists");
+		assert.equal(d2, undefined, "delivered + running review drives nothing (the incident shape) — settle passes");
 	} finally { fx.cleanup(); }
 });
 
@@ -1412,20 +1412,18 @@ test("stop gate: a crashed or interrupted reviewer re-arms the review drive — 
 		assert.ok(di, "an interrupted reviewer is terminal too: the review clause must stand");
 		assert.match(di!.entries[0].content, /await the reviewer/);
 		assert.match(di!.entries[0].content, new RegExp(`#${n}`));
-		// Contrast pin: a LIVE running reviewer still suppresses the clause (the startable
-		// clause stays — the ticket is still open and unblocked).
+		// Contrast pin: a LIVE running reviewer suppresses the clause entirely (ticket #147
+		// incident shape): delivered + running review drives NOTHING — settle passes.
 		plantDispatch(ctx, {
 			[String(n)]: doneImpl,
 			[`review-${n}`]: { pid: process.pid, role: "code-reviewer", branch: `feat/${n}-delivered`, worktree: "/wt", startedAt: 3000, status: "running" },
 		});
 		const dr = await evaluateSettle(ctx.cwd);
-		assert.ok(dr, "the ticket is still startable — the gate keeps driving, on the dispatch clause");
-		assert.match(dr!.entries[0].content, /startable/i);
-		assert.ok(!dr!.entries[0].content.includes("await the reviewer"), "only a running review suppresses the clause");
+		assert.equal(dr, undefined, "a running review suppresses every clause — settle passes (the incident shape)");
 	} finally { fx.cleanup(); }
 });
 
-test("stop gate: a done entry on an UNLABELLED ticket (or a label-less tracker) does not claim a review", async () => {
+test("stop gate: a done entry on an UNLABELLED ticket (or a label-less tracker) still claims the review clause — a label anomaly must not re-dispatch the implementer (ticket #147)", async () => {
 	const fx = makeFixture(JSON.stringify({ base_branch: "main", fast_check: "true" }));
 	setupEnv(fx);
 	try {
@@ -1435,8 +1433,10 @@ test("stop gate: a done entry on an UNLABELLED ticket (or a label-less tracker) 
 			[String(n)]: { pid: 1, role: "implementer", branch: `feat/${n}-x`, worktree: "/wt", startedAt: 1000, status: "done", report: "STATUS: DONE", endedAt: 2000 },
 		});
 		const d = await evaluateSettle(ctx.cwd);
-		assert.ok(d, "the ticket is startable regardless");
-		assert.ok(!d!.entries[0].content.includes("await the reviewer"), "no review claim without the in-progress/in-review label");
+		assert.ok(d, "the delivered branch is work-to-do: the review clause claims it regardless of the label");
+		assert.match(d!.entries[0].content, /await the reviewer/);
+		assert.match(d!.entries[0].content, new RegExp(`#${n}`));
+		assert.ok(!d!.entries[0].content.toLowerCase().includes("startable"), "the dispatch clause must NOT claim a delivered ticket");
 	} finally { fx.cleanup(); }
 });
 
