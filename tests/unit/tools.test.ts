@@ -1476,6 +1476,41 @@ test("stop gate: the K-cycle release clears the repeat state — a drive state t
 	} finally { fx.cleanup(); }
 });
 
+test("stop gate: an exhausted red-check pass (gaveUp) leaves the drive-repeat state INTACT — a returned identical fingerprint CONTINUES the K-cycle to release instead of re-burning 3 blocks (ticket #147 review round 2)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", fast_check: "true" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "A red-check pass must not clear the drive-repeat state");
+		// Phase 1 — three identical dispatch blocks: the repeat state holds (fingerprint, 3).
+		for (const settleNo of [1, 2, 3]) {
+			const d = await evaluateSettle(ctx.cwd);
+			assert.ok(d, `settle ${settleNo}: a dispatchable ticket must drive the block`);
+			assert.match(d!.entries[0].content, new RegExp(`#${n}`), `settle ${settleNo} names the ticket`);
+		}
+		// Phase 2 — the fast check goes RED and exhausts the bounded counter: the next settle
+		// is a gaveUp pass, one the red clause produces WITHOUT ever classifying the drive (the
+		// red check precedes it). Flipping the config back restores the repo tree byte-identically,
+		// so the Phase-3 settle is green and clean exactly as in Phase 1.
+		writeFileSync(fx.config, JSON.stringify({ base_branch: "main", fast_check: "false" }));
+		for (let redNo = 1; ; redNo++) {
+			const d = await evaluateSettle(ctx.cwd);
+			if (d === undefined) {
+				assert.equal(redNo, 6, "the bounded counter exhausts after 5 red blocks (default maxBlocks 5) — the 6th settle is the gaveUp pass");
+				break;
+			}
+			assert.match(d!.entries[0].content, /fast check is RED/, `settle ${redNo}: the red clause stands`);
+			assert.ok(redNo <= 5, `settle ${redNo}: a red block before exhaustion is the bounded-counter contract, not the gaveUp pass`);
+		}
+		// Phase 3 — green again, the SAME dispatchable state (same clause lists, running 0/2,
+		// clean tree): the (fingerprint, 3) must have survived the gaveUp pass, so the gate
+		// CONTINUES the cycle straight into its release. The unfixed code clears the state on
+		// the gaveUp pass and re-blocks here (n=1 of a fresh, full 3-block cycle).
+		writeFileSync(fx.config, JSON.stringify({ base_branch: "main", fast_check: "true" }));
+		assert.equal(await evaluateSettle(ctx.cwd), undefined, "a returned identical fingerprint continues the cycle (n=3 → release) — a gaveUp pass must NOT clear the drive-repeat state");
+	} finally { fx.cleanup(); }
+});
+
 // ---------------------------------------------------------------------------
 // Grammar pin (#99): providers validating tool names against the OpenAI
 // function-name grammar reject a DOT (observed: Kimi 400 "function name is
