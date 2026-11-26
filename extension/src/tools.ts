@@ -38,6 +38,7 @@ import {
 	driveStatePath,
 	readDriveState,
 	writeDriveState,
+	resetDriveState,
 } from "./stopgate.ts";
 import { runGateTrain, type GateOutcome } from "./gate.ts";
 import { runMergeTrain, type MergeOutcome } from "./merge.ts";
@@ -1001,6 +1002,12 @@ export async function evaluateSettle(cwd: string): Promise<{ entries: { type: "c
 		});
 		if (decision.action === "pass") {
 			if (decision.gaveUp) resetCounter(counterPath(ctx.cfg.root));
+			// A passed settle ends the repeat state: the gate blocks only while the same
+			// fingerprint keeps arriving, so a drive state that vanishes (child in flight) and
+			// later returns must restart the K-cycle from block 1, not inherit a stale
+			// (fingerprint, K) — the audit line's "any change re-blocks" promise (ticket #147
+			// review follow-up). The pass is the only path that clears the file.
+			resetDriveState(dpath);
 			// The K-repeat release audit rides the console — never the bounded-counter file.
 			if (decision.audit) console.error(decision.audit);
 			return undefined; // let the agent settle
