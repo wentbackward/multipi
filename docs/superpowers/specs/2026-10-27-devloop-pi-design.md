@@ -83,10 +83,13 @@ Two hooks:
      lists, running/cap, fast-check and tree-dirtiness) block at most `DRIVE_REPEAT_LIMIT` = 3
      times, after which the gate passes and emits a console AUDIT line — an identical repeated
      message must not livelock the session; any change to the drive state re-blocks (count
-     restarts). State: per-repo `devloop-stop-drive` next to the counter file, CLEARED on every
-     passed settle (the K-cycle release or a settle where no clause drives) — a drive state
-     that vanishes and later returns under the same fingerprint restarts the K-cycle from
-     block 1 rather than inheriting the stale count. Settles when no
+     restarts). State: per-repo `devloop-stop-drive` next to the counter file, CLEARED on the
+     passed settles that evaluated the drive (the K-cycle release or a settle where no clause
+     drives) — a drive state that vanishes and later returns under the same fingerprint
+     restarts the K-cycle from block 1 rather than inheriting the stale count. A gaveUp pass
+     (exhausted red fast-check / dirty clause) gave up before the drive classification and
+     leaves the state INTACT: the identical fingerprint that returns continues the cycle
+     (n=K → release) instead of re-burning the full 3-block cycle. Settles when no
      clause names a ticket. This makes "continues coding while there are requirements" a
      property of the harness, not of the model's discipline.
 - **Format-on-edit** (`tool_result`): after a successful `write`/`edit`, if `format` is configured
