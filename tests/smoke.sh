@@ -3152,18 +3152,18 @@ switch (process.env.REC_CMD) {
   grep -q "SETTLE=block" "$RECBASE/set1.out" && grep -q "await the reviewer" "$RECBASE/set1.out" && \
     pass "reclaim: the stop gate refuses to settle while the delivered branch awaits the reviewer" || \
     fail "reclaim settle: $(cat "$RECBASE/set1.out") | $(head -3 "$RECBASE/driver.err" | tr '\n' ' ')"
-  # A reviewer entry retires the review clause; the open ticket still drives the startable clause.
+  # Incident shape (ticket #147): with the reviewer entry present, the lone delivered
+  # in-progress ticket drives NOTHING — no startable/await line, settle passes. The old
+  # pin here ("the open ticket still drives the startable clause") was the blessed
+  # miscount; it is inverted by design.
   printf '{"1":{"pid":1,"role":"implementer","branch":"feat/1-orphaned","worktree":"%s","startedAt":1,"status":"done","report":"STATUS: DONE","endedAt":2},"review-1":{"pid":%s,"role":"code-reviewer","branch":"feat/1-orphaned","worktree":"%s","startedAt":%s,"status":"running"}}\n' \
     "$REC_WT" "$$" "$REC_WT" "$(date +%s%3N)" >"$REC_HOME/project/dispatch.json"
   recdriver settle >"$RECBASE/set2.out"
-  if grep -q "await the reviewer" "$RECBASE/set2.out"; then
-    fail "reclaim: the review clause must retire once a reviewer is dispatched: $(cat "$RECBASE/set2.out")"
+  if grep -q "SETTLE=block" "$RECBASE/set2.out"; then
+    fail "reclaim: a lone delivered in-progress ticket with a running review must drive nothing (no startable/await line): $(cat "$RECBASE/set2.out")"
   else
-    pass "reclaim: the review clause retires once the reviewer is dispatched"
+    pass "reclaim: the delivered ticket with a running review drives nothing — settle passes (ticket #147)"
   fi
-  grep -q "startable" "$RECBASE/set2.out" && \
-    pass "reclaim: the open ticket still drives the startable clause" || \
-    fail "reclaim startable: $(cat "$RECBASE/set2.out")"
   # Teardown: my branch, worktree, tracker and state home (all created by this section).
   FAKE_GH_DIR="$REC_GH" gh issue close 1 >/dev/null 2>&1 || true
   git -C "$work/project" worktree remove --force "$REC_WT" 2>/dev/null || true

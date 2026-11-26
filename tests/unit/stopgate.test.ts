@@ -273,19 +273,19 @@ test("drive repeat breaker: identical drive state blocks 3 times, the 4th settle
 		evaluateStopGate({ ...base, issues: incidentIssues, running: 0, cap: 2, lastDriveFingerprint: last, driveBlocks: blocks });
 	// 1st, 2nd, 3rd identical attempt: block, carrying the same fingerprint.
 	const b1 = mustBlock(attempt(undefined, 0));
-	assert.equal(b1.fingerprint, attempt(b1.fingerprint, 1).fingerprint, "the unchanged state carries the same fingerprint");
+	assert.ok(b1.fingerprint, "a drive block carries its fingerprint");
 	const b2 = mustBlock(attempt(b1.fingerprint, 1));
 	const b3 = mustBlock(attempt(b1.fingerprint, 2));
-	assert.equal(b2.fingerprint, b1.fingerprint);
+	assert.equal(b2.fingerprint, b1.fingerprint, "the unchanged state carries the same fingerprint");
 	assert.equal(b3.fingerprint, b1.fingerprint);
 	// 4th identical attempt: the gate PASSES with an audit line (console, not the counter file).
 	const p4 = attempt(b1.fingerprint, 3);
 	assert.equal(p4.action, "pass");
-	assert.ok((p4 as { audit?: string }).audit, "the release emits an audit line");
+	assert.ok(p4.audit, "the release emits an audit line");
 	// The release is sticky while the state stays unchanged: it does not re-block.
 	const p5 = attempt(b1.fingerprint, 3);
 	assert.equal(p5.action, "pass");
-	assert.ok((p5 as { audit?: string }).audit);
+	assert.ok(p5.audit);
 });
 
 test("drive repeat breaker: a changed drive state re-blocks — the count restarts at the new state", () => {
