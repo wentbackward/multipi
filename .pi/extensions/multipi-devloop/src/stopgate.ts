@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { collectStream } from "./streamcap.ts";
 
@@ -284,6 +284,20 @@ export function readDriveState(p: string): DriveRepeat | null {
 export function writeDriveState(p: string, fp: string, n: number): void {
 	mkdirSync(path.dirname(p), { recursive: true });
 	writeFileSync(p, `${fp}\n${n}\n`);
+}
+
+/** Clears the drive-repeat state (best effort; no-op when the file is absent). The gate calls
+ * it on EVERY pass (the K-cycle release or a settle where no clause drives): a drive state
+ * that vanishes and later RETURNS under the same fingerprint must restart the K-cycle from
+ * block 1 — the stale (fingerprint, K) must not ride a passed settle (ticket #147 review
+ * follow-up). A zero count has no file representation (readDriveState requires n > 0), so the
+ * clear is an unlink, not a write. */
+export function resetDriveState(p: string): void {
+	try {
+		unlinkSync(p);
+	} catch {
+		/* best effort */
+	}
 }
 
 /** Run the configured fast check; timeout/error count as RED (fail safe). */
