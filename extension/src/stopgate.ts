@@ -287,11 +287,14 @@ export function writeDriveState(p: string, fp: string, n: number): void {
 }
 
 /** Clears the drive-repeat state (best effort; no-op when the file is absent). The gate calls
- * it on EVERY pass (the K-cycle release or a settle where no clause drives): a drive state
- * that vanishes and later RETURNS under the same fingerprint must restart the K-cycle from
- * block 1 — the stale (fingerprint, K) must not ride a passed settle (ticket #147 review
- * follow-up). A zero count has no file representation (readDriveState requires n > 0), so the
- * clear is an unlink, not a write. */
+ * it only on the passed settles that evaluated the drive — the K-cycle release and the settle
+ * where no clause drives: a drive state that vanishes and later RETURNS under the same
+ * fingerprint must restart the K-cycle from block 1 — the stale (fingerprint, K) must not ride
+ * a passed settle (ticket #147 review follow-up). A gaveUp pass (exhausted red-fast-check or
+ * dirty clause) gave up BEFORE the drive classification and therefore LEAVES THE STATE INTACT:
+ * the identical fingerprint that returns continues the cycle (n=K → release), it does not
+ * re-burn the full 3-block cycle (ticket #147 review round 2). A zero count has no file
+ * representation (readDriveState requires n > 0), so the clear is an unlink, not a write. */
 export function resetDriveState(p: string): void {
 	try {
 		unlinkSync(p);

@@ -1001,13 +1001,22 @@ export async function evaluateSettle(cwd: string): Promise<{ entries: { type: "c
 			driveBlocks: dstate?.n ?? 0,
 		});
 		if (decision.action === "pass") {
-			if (decision.gaveUp) resetCounter(counterPath(ctx.cfg.root));
-			// A passed settle ends the repeat state: the gate blocks only while the same
-			// fingerprint keeps arriving, so a drive state that vanishes (child in flight) and
-			// later returns must restart the K-cycle from block 1, not inherit a stale
-			// (fingerprint, K) — the audit line's "any change re-blocks" promise (ticket #147
-			// review follow-up). The pass is the only path that clears the file.
-			resetDriveState(dpath);
+			if (decision.gaveUp) {
+				// The exhausted red-fast-check/dirty clause gives up BEFORE classifying the
+				// drive: that settle never evaluated the drive state, so its repeat file
+				// survives — a green return under the identical fingerprint CONTINUES the
+				// K-cycle (n=K → release) instead of re-burning a full 3-block cycle (ticket
+				// #147 review round 2).
+				resetCounter(counterPath(ctx.cfg.root));
+			} else {
+				// A passed settle that DID evaluate the drive (the K-cycle release or a
+				// settle where no clause drives) ends the repeat state: a drive state that
+				// vanishes and later returns must restart the K-cycle from block 1, not
+				// inherit a stale (fingerprint, K) — the audit line's "any change re-blocks"
+				// promise (ticket #147 review follow-up). The non-gaveUp pass is the only
+				// path that clears the file.
+				resetDriveState(dpath);
+			}
 			// The K-repeat release audit rides the console — never the bounded-counter file.
 			if (decision.audit) console.error(decision.audit);
 			return undefined; // let the agent settle
