@@ -91,7 +91,10 @@ upstream_of() {
 # branch named). The rules:
 #   docs/DECISIONS.md — decisions-chronological-union: keep both additions, ordered by
 #     the date line (`- YYYY-MM-DD …`), the lower train branch breaking ties; entries
-#     already present in the shared context collapse (union, not concatenation).
+#     already present in the shared context collapse (union, not concatenation) — and a
+#     context entry that the upper side rewrote to a same-dated amendment is dropped
+#     together with its stale twin (modify-vs-append, ticket #145 folded into #134):
+#     the upper side's final line survives, a stale duplicate never does.
 #   tests/smoke.sh — smoke-additive-both: an additive hunk on either side survives
 #     (`git merge-file --union` keeps both, in file order, lower branch first).
 # Each resolution is logged `auto-resolved: <rule> on <file>` (the gate output) and
@@ -114,26 +117,69 @@ stage_blob() {
   git ls-files -u -- "$1" | awk -v s="$2" '$3 == s { print $2; exit }'
 }
 
-# resolve_decisions OURS-TMP THEIRS-TMP — the chronological union described above.
-# Shared head lines print verbatim; then every entry of either tail sorted by date,
-# branch rank (ours first) and position, deduped against each other AND against the
-# head (an entry the context already carries is not re-appended); any non-entry tail
-# line (the file is one line per entry — prose is the exception) rides after the
-# entries, ours first then theirs, never dropped.
+# resolve_decisions BASE-TMP OURS-TMP THEIRS-TMP — the chronological union described
+# above, with the modify-vs-append extension (ticket #145 folded into #134). Shared
+# head lines print verbatim; then every entry of either tail sorted by date, branch
+# rank (ours first) and position, deduped against each other AND against the head
+# (an entry the context already carries is not re-appended); any non-entry tail line
+# (the file is one line per entry — prose is the exception) rides after the entries,
+# ours first then theirs, never dropped.
+# THE AMENDMENT EXTENSION: a stale line is a dated ours-tail entry that base carried
+# past the shared prefix and theirs no longer carries (ours kept it, theirs rewrote
+# or deleted it); a novel line is a dated theirs-tail entry base never carried (the
+# rewrite). A stale line is dropped — its amendment kept, the duplicate gone — only
+# when the counts of stale and novel entries on its date line agree exactly and are
+# non-zero: the amend keeps the entry's date (it rewords the decision line, not the
+# decision day), so a same-day rewrite yields exactly one new line per old line. Any
+# disagreement keeps the plain union for that date — conservative: an amendment line
+# is never lost, and an ambiguous shape at worst leaves the stale line beside it
+# instead of inventing a drop. Detection is over the three stage blobs (content
+# level); no git diff is consulted.
 DECISIONS_ENTRY_RE='^- [0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]'
 resolve_decisions() {
-  local -a a b
-  mapfile -t a <"$1"
-  mapfile -t b <"$2"
-  local n=${#a[@]} m=${#b[@]} p=0 i
+  local -a a b c
+  mapfile -t c <"$1"
+  mapfile -t a <"$2"
+  mapfile -t b <"$3"
+  local n=${#a[@]} m=${#b[@]} clen=${#c[@]} p=0 i j
   while [ "$p" -lt "$n" ] && [ "$p" -lt "$m" ] && [ "${a[$p]}" = "${b[$p]}" ]; do
     p=$((p + 1))
   done
   for ((i = 0; i < p; i++)); do printf '%s\n' "${a[$i]}"; done
-  local seen
-  seen=$(mktemp)
-  for ((i = 0; i < p; i++)); do
-    [[ "${a[$i]}" =~ $DECISIONS_ENTRY_RE ]] && printf '%s\n' "${a[$i]}" >>"$seen"
+  local seen drop btmp ctmp d cs cn
+  seen=$(mktemp); drop=$(mktemp); btmp=$(mktemp); ctmp=$(mktemp)
+  { for ((i = 0; i < m; i++)); do printf '%s\n' "${b[i]}"; done } >"$btmp"
+  { for ((i = p; i < clen; i++)); do printf '%s\n' "${c[i]}"; done } >"$ctmp"
+  # stale/novel as the block above describes; dates parallel the line arrays.
+  local -a stale=() novel=() stale_dates=() novel_dates=()
+  for ((i = p; i < n; i++)); do
+    [[ "${a[$i]}" =~ $DECISIONS_ENTRY_RE ]] || continue
+    grep -Fxq -- "${a[$i]}" "$ctmp" || continue
+    grep -Fxq -- "${a[$i]}" "$btmp" && continue
+    stale+=("${a[$i]}")
+  done
+  for ((i = p; i < m; i++)); do
+    [[ "${b[$i]}" =~ $DECISIONS_ENTRY_RE ]] || continue
+    grep -Fxq -- "${b[$i]}" "$1" && continue
+    novel+=("${b[$i]}")
+  done
+  for ((i = 0; i < ${#stale[@]}; i++)); do
+    stale_dates[i]=$(printf '%s' "${stale[i]}" | cut -c3-12)
+  done
+  for ((i = 0; i < ${#novel[@]}; i++)); do
+    novel_dates[i]=$(printf '%s' "${novel[i]}" | cut -c3-12)
+  done
+  for ((i = 0; i < ${#stale[@]}; i++)); do
+    d=${stale_dates[i]} cs=0 cn=0
+    for ((j = 0; j < ${#stale[@]}; j++)); do
+      [ "${stale_dates[j]}" = "$d" ] && cs=$((cs + 1))
+    done
+    for ((j = 0; j < ${#novel[@]}; j++)); do
+      [ "${novel_dates[j]}" = "$d" ] && cn=$((cn + 1))
+    done
+    if [ "$cs" = "$cn" ] && [ "$cs" -ge 1 ]; then
+      printf '%s\n' "${stale[i]}" >>"$drop"
+    fi
   done
   {
     for ((i = p; i < n; i++)); do
@@ -148,9 +194,10 @@ resolve_decisions() {
     done
   } | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k2,2n -k3,3n | awk -F'\t' '
     FILENAME == ARGV[1] { seen[$0] = 1; next }
-    { line = $4; for (i = 5; i <= NF; i++) line = line "\t" $i; if (!(line in seen)) { seen[line] = 1; print line } }
-  ' "$seen" -
-  rm -f "$seen"
+    FILENAME == ARGV[2] { drop[$0] = 1; next }
+    { line = $4; for (i = 5; i <= NF; i++) line = line "\t" $i; if (!(line in seen) && !(line in drop)) { seen[line] = 1; print line } }
+  ' "$seen" "$drop" -
+  rm -f "$seen" "$drop" "$btmp" "$ctmp"
   for ((i = p; i < n; i++)); do
     [[ "${a[$i]}" =~ $DECISIONS_ENTRY_RE ]] || printf '%s\n' "${a[$i]}"
   done
@@ -196,7 +243,7 @@ stack_branch() {
       git cat-file blob "$so" >"$d/ours"
       git cat-file blob "$st" >"$d/theirs"
       case "$rule" in
-        "$RULE_DECISIONS") resolve_decisions "$d/ours" "$d/theirs" >"$d/resolved" ;;
+        "$RULE_DECISIONS") resolve_decisions "$d/base" "$d/ours" "$d/theirs" >"$d/resolved" ;;
         "$RULE_SMOKE") git merge-file -p --union "$d/ours" "$d/base" "$d/theirs" >"$d/resolved" ;;
       esac
       cp -f "$d/resolved" "$file"
