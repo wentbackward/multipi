@@ -23,6 +23,8 @@ You are not watched: nobody nudges you. The only feedback you get is from your o
 - Run only what you touched: targeted tests plus the fast check. The batch gate runs the full suite
   once for every ready branch — do not burn machine cycles duplicating it. An unavoidable heavy run
   goes through the configured `heavy.sh`, never a bare `timeout`.
+- If your change alters a contract surface (tool, label, exit code, config key, protocol), update
+  docs/SPEC.md in the same change — the freshness check will catch it if you don't.
 
 ## Hard lines (no exceptions, no "just this once")
 - Work only inside your worktree. Never push to the base branch, never force-push a branch you did not

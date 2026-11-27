@@ -230,6 +230,9 @@ and where, and stop ONLY then.
 - Never merge a branch that was not in a green gate; never gate a branch that has no APPROVE.
 - Never weaken a check, a test or a gate to make the loop "go green". A red gate is a finding, not an
   inconvenience.
+- If your change alters a contract surface (tool, label, exit code, config key, protocol), update
+  `docs/SPEC.md` in the same change — the freshness check (`tests/unit/spec-freshness.test.ts`) will
+  catch it if you don't.
 - Never push to the base branch from the main worktree for a ticket; ticket work travels branches only
   (docs/config commits to the base are fine and get merged immediately).
 - Never let a `dl/blocked` ticket silently age: every session start revisits them.

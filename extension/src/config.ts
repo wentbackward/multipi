@@ -33,6 +33,78 @@ export interface ReviewConfig {
 /** The polish budget default (ticket #105): two should-fix rounds, then the tail is accepted. */
 export const DEFAULT_MAX_FOLLOWUP_DEPTH = 2;
 
+/** The loop's label state machine — the ONLY loop state (GitHub issue labels), pinned here as the
+ * single vocabulary so code, docs/SPEC.md and the freshness pin (tests/unit/spec-freshness.test.ts)
+ * cannot drift (ticket #110). The flow: in-progress → in-review → approved → gated → merged,
+ * with blocked reachable from any phase. A new label enters here AND in SPEC.md in the same change. */
+export const LOOP_LABELS = ["dl/in-progress", "dl/in-review", "dl/approved", "dl/gated", "dl/merged", "dl/blocked"] as const;
+
+/** Every key of `.devloop.json` the loop ACCEPTS — the single source of truth for the config
+ * schema (ticket #110). Dot-path form, nested groups listed before their leaves; `checks[].*`
+ * are the element keys of the `checks` array. `cleanup.stale_days` is read shell-side by
+ * `scripts/cleanup-worktrees.sh` (via the shared `cfg` reader) — it is part of the same
+ * `.devloop.json` surface even though the TS parser does not consume it. Adding a key the
+ * parser (or a loop script) honours WITHOUT adding it here AND in docs/SPEC.md's configuration
+ * table is what the config-key freshness pin makes red. Residual, by design (the conservative
+ * mandate): the pin enforces equivalence between THIS LIST and the SPEC table, not between
+ * the list and the parser — a key omitted from BOTH list and SPEC stays green; the list's
+ * own completeness is held by review, and each parser-accepting site adds its keys here. */
+export const DEVLOOP_CONFIG_KEYS = [
+	"base_branch",
+	"remote",
+	"fast_check",
+	"format",
+	"format_extensions",
+	"checks",
+	"checks[].name",
+	"checks[].command",
+	"checks[].heavy",
+	"checks[].summary",
+	"gate_setup",
+	"gate_worktree",
+	"worktree_dir",
+	"factory",
+	"scenarios",
+	"scenarios.dir",
+	"scenarios.run",
+	"scenarios.run_seconds",
+	"scenarios.judge",
+	"scenarios.judge_seconds",
+	"scenarios.pass",
+	"scenarios.min_satisfaction",
+	"scenarios.sealed",
+	"child_silence_minutes",
+	"notes_dir",
+	"logs_dir",
+	"heavy",
+	"heavy.slots",
+	"heavy.memory_max",
+	"heavy.port_env",
+	"heavy.port_base",
+	"heavy.port_step",
+	"heavy.clean_temp",
+	"heavy.clean_temp_minutes",
+	"heavy.poll_seconds",
+	"stop_gate",
+	"stop_gate.require_clean_tree",
+	"stop_gate.max_blocks",
+	"merge",
+	"merge.method",
+	"merge.delete_branch",
+	"policy",
+	"policy.posture",
+	"policy.repos",
+	"policy.secondaries",
+	"policy.token_ttl_minutes",
+	"orchestrator",
+	"orchestrator.tool_timeout_minutes",
+	"review",
+	"review.max_followup_depth",
+	"cleanup",
+	"cleanup.stale_days",
+	"deploy",
+] as const;
+
 /** Permission-policy posture (permission-policy spec §3): what an UNMATCHED call does. */
 export type PolicyPosture = "allow" | "ask";
 
