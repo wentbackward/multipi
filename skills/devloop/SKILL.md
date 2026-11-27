@@ -72,8 +72,10 @@ Then dispatch implementers per the normal rules. If the analyst came back `STATU
 - Up to `heavy.slots` implementers at once (check `devloop_status`); a fourth concurrent dispatch is
   refused by the tool with the in-flight list — wait for the reports, do not retry in a tight loop.
 - **Area-aware scheduling (ticket #134):** every ticket declares its file areas, and you set them at
-  ticket creation — one `dl/area/*` label per area (labels self-heal on first use, same as the `dl/`
-  labels): `dl/area/extension` (extension/src + its `.pi/extensions` mirror), `dl/area/smoke`
+  ticket creation — one `dl/area/*` label per area (unlike the `dl/` state labels, which the
+  extension's labelling self-heals, area labels are applied via raw gh: on a fresh install a
+  one-time `gh label create <label>` per label keeps the first `gh issue create --label` from
+  failing): `dl/area/extension` (extension/src + its `.pi/extensions` mirror), `dl/area/smoke`
   (tests/smoke.sh), `dl/area/skills` (skills/ + the agents/ mirror), `dl/area/scripts` (scripts/),
   `dl/area/docs` (docs/). The CRITICAL areas — `dl/area/extension`, `dl/area/smoke`, `dl/area/skills` —
   SERIALIZE: never dispatch a second in-flight implementer that shares a critical area with one

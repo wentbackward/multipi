@@ -53,8 +53,13 @@ command string). Defaults worth knowing: gate worktree `../<repo>-gate`, notes/l
 `~/.multipi/<repo>/`, `heavy.slots=2`, `stop_gate.{require_clean_tree=true,max_blocks=5}`,
 `merge.method=squash`.
 
-Label note: the `dl/*` labels (`dl/in-progress`, `dl/in-review`, `dl/approved`, `dl/gated`,
-`dl/merged`, `dl/blocked`) are created automatically on first use — no manual pre-creation needed.
+Label note: the `dl/*` state labels (`dl/in-progress`, `dl/in-review`, `dl/approved`, `dl/gated`,
+`dl/merged`, `dl/blocked`) are created automatically on first use by the extension's labelling
+(a missing label is created, the edit retried) — no manual pre-creation needed. The `dl/area/*`
+ticket-area labels (ticket #134: `dl/area/extension`, `dl/area/smoke`, `dl/area/skills`,
+`dl/area/scripts`, `dl/area/docs`) are applied by the orchestrator via raw gh, which does not
+self-heal — on a fresh install, `gh label create` each area label you will use so the first
+labelled ticket does not fail.
 
 ## 5. Wire the repo docs
 
