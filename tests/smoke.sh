@@ -572,7 +572,7 @@ echo "$out" | grep -qF 'auto-resolved: decisions-chronological-union on docs/DEC
   pass "the modify-vs-append resolution is logged with rule and file" ||
   fail "no auto-resolved line for the modify-vs-append replay"
 grep -qF '— branch B entry (amended)' \
-  "$work/home/project/logs/rebase-auto-feat_134-mva_b-docs__DECISIONS_md.txt" &&
+  "$work/home/project/logs/rebase-auto-feat_134-mva-b-docs_DECISIONS_md.txt" &&
   pass "the keep-beside-logs artifact carries the amended line" ||
   fail "the auto-resolution artifact lacks the amended line"
 
