@@ -522,25 +522,71 @@ section A
 section B' \
 "$(git -C "$gate" show train-feat/134-smk-b:tests/smoke.sh)"
 
-# Duplicate DECISIONS entry (the second branch re-logs what the first landed):
-# the union collapses it, the commit is empty, the train still proceeds green.
+# Duplicate DECISIONS entry (the second branch re-logs what the first landed, plus
+# its own): a genuine three-way tail collision whose only resolution is the rule's
+# dedup — the identical line lands once, each distinct line once, the train green.
 git checkout -q -B feat/134-dup-a origin/main
-printf -- '- 2026-01-09 — shared entry\n' >>docs/DECISIONS.md
-git commit -q -am "docs: shared entry (Refs #134)" && git push -q -u origin feat/134-dup-a
+printf -- '- 2026-01-09 — shared entry\n- 2026-01-10 — A distinct entry\n' >>docs/DECISIONS.md
+git commit -q -am "docs: shared + A distinct entry (Refs #134)" && git push -q -u origin feat/134-dup-a
 git checkout -q -B feat/134-dup-b origin/main
-printf -- '- 2026-01-09 — shared entry\n' >>docs/DECISIONS.md
-git commit -q -am "docs: shared entry again (Refs #134)" && git push -q -u origin feat/134-dup-b
+printf -- '- 2026-01-09 — shared entry\n- 2026-01-11 — B distinct entry\n' >>docs/DECISIONS.md
+git commit -q -am "docs: shared + B distinct entry (Refs #134)" && git push -q -u origin feat/134-dup-b
 out=$(bash "$plugin/scripts/gate-train.sh" feat/134-dup-a feat/134-dup-b 2>&1)
 rc=$?
 echo "$out"
-expect "a duplicate DECISIONS entry collapses and the train proceeds" "0" "$rc"
-expect "the collapsed entry appears exactly once" \
+expect "a duplicate-plus-distinct DECISIONS collision auto-resolves and the train proceeds" "0" "$rc"
+echo "$out" | grep -qF 'auto-resolved: decisions-chronological-union on docs/DECISIONS.md' &&
+  pass "the dedup collision is logged with rule and file" ||
+  fail "no auto-resolved line for the duplicate-plus-distinct replay"
+expect "the shared entry lands once, the distinct entries keep their order" \
 '# Decisions
 - 2026-01-01 — base entry
-- 2026-01-09 — shared entry' \
+- 2026-01-09 — shared entry
+- 2026-01-10 — A distinct entry
+- 2026-01-11 — B distinct entry' \
 "$(git -C "$gate" show train-feat/134-dup-b:docs/DECISIONS.md)"
 expect "both branches still ride the green train record" "2" \
 "$(wc -l <"$work/home/project/train-green.txt" | tr -d ' ')"
+
+# Add/add conflict shape (both branches CREATE docs/DECISIONS.md — the shared base
+# stage does not exist): the rule still applies (an empty base IS the add/add base)
+# and the gate output must not leak a `git cat-file` fatal for the missing stage-1 blob.
+git checkout -q main
+git rm -q docs/DECISIONS.md
+git commit -q -m "chore: drop the decisions fixture for the add/add pin (Refs #134)"
+git push -q origin main
+git checkout -q -B feat/134-add-a origin/main
+mkdir -p docs
+printf '# Decisions\n- 2026-01-15 — A only entry\n- 2026-01-16 — shared add/add entry\n' >docs/DECISIONS.md
+git add docs/DECISIONS.md && git commit -q -m "docs: create decisions A (Refs #134)" && git push -q -u origin feat/134-add-a
+git checkout -q -B feat/134-add-b origin/main
+mkdir -p docs
+printf '# Decisions\n- 2026-01-16 — shared add/add entry\n- 2026-01-17 — B only entry\n' >docs/DECISIONS.md
+git add docs/DECISIONS.md && git commit -q -m "docs: create decisions B (Refs #134)" && git push -q -u origin feat/134-add-b
+out=$(bash "$plugin/scripts/gate-train.sh" feat/134-add-a feat/134-add-b 2>&1)
+rc=$?
+echo "$out"
+expect "an add/add DECISIONS collision auto-resolves (missing base stage) and the train proceeds" "0" "$rc"
+echo "$out" | grep -qF 'auto-resolved: decisions-chronological-union on docs/DECISIONS.md' &&
+  pass "the add/add resolution is logged with rule and file" ||
+  fail "no auto-resolved line for the add/add replay"
+expect "the add/add union keeps both branches' entries, the shared one once" \
+'# Decisions
+- 2026-01-15 — A only entry
+- 2026-01-16 — shared add/add entry
+- 2026-01-17 — B only entry' \
+"$(git -C "$gate" show train-feat/134-add-b:docs/DECISIONS.md)"
+echo "$out" | grep -q '^fatal:' &&
+  fail "the add/add resolution leaked a cat-file fatal into the gate output" ||
+  pass "the add/add resolution leaks no fatal into the gate output"
+# Restore the fixture (byte-identical tree) so the later pins branch from the same tree.
+# Explicit add: the file is UNTRACKED after the drop commit, so -am would not stage it.
+git checkout -q main
+mkdir -p docs
+printf '# Decisions\n- 2026-01-01 — base entry\n' >docs/DECISIONS.md
+git add docs/DECISIONS.md
+git commit -q -m "chore: restore the decisions fixture (Refs #134)"
+git push -q origin main
 
 # Modify-vs-append (ticket #145 folded into #134): the lower branch appends a dated
 # entry; the upper branch appends the SAME entry, and a fix commit amends that very
