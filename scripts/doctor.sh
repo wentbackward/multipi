@@ -22,11 +22,19 @@ if command -v gh >/dev/null 2>&1; then
   if gh auth status >/dev/null 2>&1; then ok "gh (authenticated)"; else missing "gh is not logged in (gh auth login)"; fi
 else missing "gh (GitHub CLI) for issues and PRs"; fi
 if command -v flock >/dev/null 2>&1; then ok "flock"; else optional "flock not found: heavy.sh uses lock directories"; fi
-if command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
-  ok "systemd user scopes (heavy.memory_max is enforced)"
-else optional "no systemd user manager: heavy.memory_max is not enforced"; fi
-
+# Loaded before the systemd check so the report can say whether a memory cap is even configured:
+# "heavy.memory_max is enforced" is only true when the config actually sets one.
 dl_load_config
+memcap=$(cfg heavy.memory_max "")
+if command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  if [ -n "$memcap" ]; then ok "systemd user scopes (heavy.memory_max is enforced)"
+  else ok "systemd user scopes (ready; no heavy.memory_max configured)"; fi
+elif [ -n "$memcap" ]; then
+  optional "no systemd user manager: heavy.memory_max is not enforced"
+else
+  optional "no systemd user manager (no heavy.memory_max configured — nothing to enforce)"
+fi
+
 if [ -z "$DL_ROOT" ]; then
   missing "a git repository (run inside the project)"
 elif [ ! -f "$DL_CONFIG" ]; then
