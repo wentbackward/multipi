@@ -98,8 +98,9 @@ upstream_of() {
 #   tests/smoke.sh — smoke-additive-both: an additive hunk on either side survives
 #     (`git merge-file --union` keeps both, in file order, lower branch first).
 # Each resolution is logged `auto-resolved: <rule> on <file>` (the gate output) and
-# the resolved file is kept beside the gate logs. A rule that cannot be applied
-# (not a plain three-stage content conflict) refuses like any uncovered file.
+# the resolved file is kept beside the gate logs. An uncovered file, or one with no
+# stage blob at all, refuses exactly as before; a missing single stage (add/add: no
+# base, delete/modify: no ours/theirs) resolves against an empty side.
 
 RULE_DECISIONS="decisions-chronological-union"
 RULE_SMOKE="smoke-additive-both"
@@ -239,9 +240,12 @@ stack_branch() {
     mkdir -p "$d"
     for entry in "${covered[@]}"; do
       IFS='|' read -r file rule sb so st <<<"$entry"
-      git cat-file blob "$sb" >"$d/base"
-      git cat-file blob "$so" >"$d/ours"
-      git cat-file blob "$st" >"$d/theirs"
+      # A missing stage blob (add/add: no base; delete/modify: no ours/theirs) is an
+      # EMPTY side — resolve against it; a bare cat-file would print a fatal into the
+      # gate output.
+      [ -n "$sb" ] && git cat-file blob "$sb" >"$d/base" || : >"$d/base"
+      [ -n "$so" ] && git cat-file blob "$so" >"$d/ours" || : >"$d/ours"
+      [ -n "$st" ] && git cat-file blob "$st" >"$d/theirs" || : >"$d/theirs"
       case "$rule" in
         "$RULE_DECISIONS") resolve_decisions "$d/base" "$d/ours" "$d/theirs" >"$d/resolved" ;;
         "$RULE_SMOKE") git merge-file -p --union "$d/ours" "$d/base" "$d/theirs" >"$d/resolved" ;;
