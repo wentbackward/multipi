@@ -542,6 +542,40 @@ expect "the collapsed entry appears exactly once" \
 expect "both branches still ride the green train record" "2" \
 "$(wc -l <"$work/home/project/train-green.txt" | tr -d ' ')"
 
+# Modify-vs-append (ticket #145 folded into #134): the lower branch appends a dated
+# entry; the upper branch appends the SAME entry, and a fix commit amends that very
+# line. Replaying the fix must keep the amended line and drop the stale original —
+# never a stale duplicate beside its own fix.
+git checkout -q -B feat/134-mva-a origin/main
+printf -- '- 2026-01-11 — branch A entry\n' >>docs/DECISIONS.md
+git commit -q -am "docs: A entry (Refs #134)" && git push -q -u origin feat/134-mva-a
+git checkout -q -B feat/134-mva-b origin/main
+printf -- '- 2026-01-12 — branch B entry\n' >>docs/DECISIONS.md
+git add docs/DECISIONS.md && git commit -q -m "docs: B entry (Refs #134)"
+# The fix commit MODIFIES (not appends) the line its predecessor appended.
+{
+  head -n -1 docs/DECISIONS.md
+  printf -- '- 2026-01-12 — branch B entry (amended)\n'
+} >docs/DECISIONS.md.new && mv docs/DECISIONS.md.new docs/DECISIONS.md
+git commit -q -am "docs: B entry fix (Refs #134)" && git push -q -u origin feat/134-mva-b
+out=$(bash "$plugin/scripts/gate-train.sh" feat/134-mva-a feat/134-mva-b 2>&1)
+rc=$?
+echo "$out"
+expect "a modify-vs-append DECISIONS collision auto-resolves and the train proceeds" "0" "$rc"
+expect "the amended line survives and the stale duplicate is dropped" \
+'# Decisions
+- 2026-01-01 — base entry
+- 2026-01-11 — branch A entry
+- 2026-01-12 — branch B entry (amended)' \
+"$(git -C "$gate" show train-feat/134-mva-b:docs/DECISIONS.md)"
+echo "$out" | grep -qF 'auto-resolved: decisions-chronological-union on docs/DECISIONS.md' &&
+  pass "the modify-vs-append resolution is logged with rule and file" ||
+  fail "no auto-resolved line for the modify-vs-append replay"
+grep -qF '— branch B entry (amended)' \
+  "$work/home/project/logs/rebase-auto-feat_134-mva_b-docs__DECISIONS_md.txt" &&
+  pass "the keep-beside-logs artifact carries the amended line" ||
+  fail "the auto-resolution artifact lacks the amended line"
+
 # Semantic collision (the ticket's tools.ts case): still refuses, branch named,
 # exit 3 — the refusal contract is untouched.
 git checkout -q -B feat/134-sem-a origin/main
