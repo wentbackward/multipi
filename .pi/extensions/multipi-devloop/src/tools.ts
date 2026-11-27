@@ -35,6 +35,10 @@ import {
 	readCounter,
 	writeCounter,
 	resetCounter,
+	driveStatePath,
+	readDriveState,
+	writeDriveState,
+	resetDriveState,
 } from "./stopgate.ts";
 import { runGateTrain, type GateOutcome } from "./gate.ts";
 import { runMergeTrain, type MergeOutcome } from "./merge.ts";
@@ -952,30 +956,20 @@ export async function evaluateSettle(cwd: string): Promise<{ entries: { type: "c
 		// crashed here, not phantom-running — its slot and its ticket free for the drive below.
 		const { state } = reconcileState(ctx.stateDir);
 		const running = Object.values(state).filter((e) => e.status === "running" && e.role === "implementer").length;
-		// Late-report loop drive (#121): an implementer that DELIVERED (entry done) but whose
-		// ticket still sits at dl/in-progress/dl/in-review with no RUNNING review (ticket #124
-		// — a dispatched review that died re-arms the clause) is work-to-do. Open issues only —
-		// a merged/closed ticket is not pending.
-		// Count ONLY a `running` review entry as "review dispatched" (ticket #124):
-		// reapDead permanently keeps the terminal `crashed`/`interrupted` review entry in the
-		// state, so any historical entry would suppress the review drive forever and leave
-		// a delivered branch unreviewed. A terminal entry re-arms the clause instead.
-		const openByNumber = new Map(issues.map((i) => [i.number, i] as const));
-		const pendingReviews = Object.entries(state)
-			.filter(([k, e]) => e.role === "implementer" && e.status === "done" && /^\d+$/.test(k))
-			.map(([k]) => Number(k))
-			.filter((n) => {
-				const issue = openByNumber.get(n);
-				return (
-					issue &&
-					(issue.labels.includes("dl/in-progress") || issue.labels.includes("dl/in-review")) &&
-					state[`review-${n}`]?.status !== "running"
-				);
-			});
-		// Startability rule (spec §4): with the store on, only tickets covered by a valid
-		// t<ticket>- scenario drive the loop; a missing store dir scans to [] (nothing covered)
-		// and an unreadable store likewise covers nothing (fail-closed).
+		// Phased loop drive (ticket #147): each open issue carries its own facts (phase labels,
+		// its implementer entry's status, whether its review is RUNNING) so the gate classifies
+		// the drive clauses — dispatchable / delivered-awaiting-review / approved-awaiting-gate /
+		// gated-awaiting-merge — and every clause names the tickets it counts. A child in
+		// flight (implementer or running review) drives NOTHING: the 2026-11-25 livelock
+		// miscounted in-pipeline tickets as "startable" and re-injected one identical message
+		// per settle. A terminal entry (crashed/interrupted/blocked) still drives the dispatch
+		// clause, and a done entry with no RUNNING review drives the review clause (the #121/
+		// #124 shapes, now owned by the classification in stopgate.ts).
 		const storeOn = scenariosOn(cfg);
+		// Repeat-breaker state (ticket #147): persisted next to the bounded counter file (it
+		// survives session restarts; any change to the drive state resets the count).
+		const dpath = driveStatePath(ctx.cfg.root);
+		const dstate = readDriveState(dpath);
 		const decision = evaluateStopGate({
 			fastCheckPassed: fc.passed,
 			fastCheckTail: fc.tail,
@@ -983,11 +977,17 @@ export async function evaluateSettle(cwd: string): Promise<{ entries: { type: "c
 			requireCleanTree: cfg.stopGate.requireCleanTree,
 			maxBlocks: cfg.stopGate.maxBlocks,
 			currentBlocks: readCounter(counterPath(ctx.cfg.root)),
-			issues: issues.map((i) => ({
-				number: i.number,
-				blocked: i.labels.includes("dl/blocked"),
-				deps: [...i.body.matchAll(/Depends on #(\d+)/g)].map((m) => Number(m[1])),
-			})),
+			issues: issues.map((i) => {
+				const impl = state[String(i.number)];
+				return {
+					number: i.number,
+					blocked: i.labels.includes("dl/blocked"),
+					deps: [...i.body.matchAll(/Depends on #(\d+)/g)].map((m) => Number(m[1])),
+					labels: i.labels,
+					implementer: impl?.role === "implementer" ? impl.status : undefined,
+					reviewRunning: state[`review-${i.number}`]?.status === "running",
+				};
+			}),
 			closed,
 			inFlight: Object.entries(state)
 				.filter(([, e]) => e.status === "running" && e.role === "implementer")
@@ -995,17 +995,38 @@ export async function evaluateSettle(cwd: string): Promise<{ entries: { type: "c
 				.filter((n) => Number.isFinite(n)),
 			running,
 			cap: cfg.heavy.slots,
-			pendingReviews,
 			scenariosOn: storeOn,
 			covered: storeOn ? coveredTicketsFromScan(scanStore(ctx.paths.scenariosDir)) : [],
+			lastDriveFingerprint: dstate?.fp,
+			driveBlocks: dstate?.n ?? 0,
 		});
 		if (decision.action === "pass") {
-			if (decision.gaveUp) resetCounter(counterPath(ctx.cfg.root));
+			if (decision.gaveUp) {
+				// The exhausted red-fast-check/dirty clause gives up BEFORE classifying the
+				// drive: that settle never evaluated the drive state, so its repeat file
+				// survives — a green return under the identical fingerprint CONTINUES the
+				// K-cycle (n=K → release) instead of re-burning a full 3-block cycle (ticket
+				// #147 review round 2).
+				resetCounter(counterPath(ctx.cfg.root));
+			} else {
+				// A passed settle that DID evaluate the drive (the K-cycle release or a
+				// settle where no clause drives) ends the repeat state: a drive state that
+				// vanishes and later returns must restart the K-cycle from block 1, not
+				// inherit a stale (fingerprint, K) — the audit line's "any change re-blocks"
+				// promise (ticket #147 review follow-up). The non-gaveUp pass is the only
+				// path that clears the file.
+				resetDriveState(dpath);
+			}
+			// The K-repeat release audit rides the console — never the bounded-counter file.
+			if (decision.audit) console.error(decision.audit);
 			return undefined; // let the agent settle
 		}
 		if (decision.bumpCounter) {
 			const cp = counterPath(ctx.cfg.root);
 			writeCounter(cp, readCounter(cp) + 1);
+		} else if (decision.fingerprint) {
+			// A drive block: advance the repeat state (a fresh fingerprint restarts the count).
+			writeDriveState(dpath, decision.fingerprint, (dstate && dstate.fp === decision.fingerprint ? dstate.n : 0) + 1);
 		}
 		return {
 			entries: [{ type: "custom_message", customType: "devloop-stop-gate", content: decision.message, display: true }],

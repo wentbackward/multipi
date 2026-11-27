@@ -1372,16 +1372,16 @@ test("stop gate: a done implementer entry whose branch awaits the reviewer drive
 		assert.equal(d!.continue, true);
 		assert.match(d!.entries[0].content, /await the reviewer/);
 		assert.match(d!.entries[0].content, new RegExp(`#${n}`));
-		// The moment a reviewer is dispatched, the review clause retires (the startable
-		// clause stays: the ticket is still open and unblocked).
+		// The moment a reviewer is dispatched, the review clause retires — and the incident
+		// shape pins here (ticket #147): a delivered in-pipeline ticket with a RUNNING review
+		// drives NOTHING (no dispatch, no review claim). The old startable count was the
+		// 2026-11-25 livelock.
 		plantDispatch(ctx, {
 			[String(n)]: { pid: 1, role: "implementer", branch: `feat/${n}-delivered`, worktree: "/wt", startedAt: 1000, status: "done", report: "STATUS: DONE", endedAt: 2000 },
 			[`review-${n}`]: { pid: process.pid, role: "code-reviewer", branch: `feat/${n}-delivered`, worktree: "/wt", startedAt: 3000, status: "running" },
 		});
 		const d2 = await evaluateSettle(ctx.cwd);
-		assert.ok(d2, "the ticket is still startable — the gate keeps driving, on the dispatch clause");
-		assert.match(d2!.entries[0].content, /startable/i);
-		assert.ok(!d2!.entries[0].content.includes("await the reviewer"), "the review clause is gone once the reviewer exists");
+		assert.equal(d2, undefined, "delivered + running review drives nothing (the incident shape) — settle passes");
 	} finally { fx.cleanup(); }
 });
 
@@ -1412,20 +1412,18 @@ test("stop gate: a crashed or interrupted reviewer re-arms the review drive — 
 		assert.ok(di, "an interrupted reviewer is terminal too: the review clause must stand");
 		assert.match(di!.entries[0].content, /await the reviewer/);
 		assert.match(di!.entries[0].content, new RegExp(`#${n}`));
-		// Contrast pin: a LIVE running reviewer still suppresses the clause (the startable
-		// clause stays — the ticket is still open and unblocked).
+		// Contrast pin: a LIVE running reviewer suppresses the clause entirely (ticket #147
+		// incident shape): delivered + running review drives NOTHING — settle passes.
 		plantDispatch(ctx, {
 			[String(n)]: doneImpl,
 			[`review-${n}`]: { pid: process.pid, role: "code-reviewer", branch: `feat/${n}-delivered`, worktree: "/wt", startedAt: 3000, status: "running" },
 		});
 		const dr = await evaluateSettle(ctx.cwd);
-		assert.ok(dr, "the ticket is still startable — the gate keeps driving, on the dispatch clause");
-		assert.match(dr!.entries[0].content, /startable/i);
-		assert.ok(!dr!.entries[0].content.includes("await the reviewer"), "only a running review suppresses the clause");
+		assert.equal(dr, undefined, "a running review suppresses every clause — settle passes (the incident shape)");
 	} finally { fx.cleanup(); }
 });
 
-test("stop gate: a done entry on an UNLABELLED ticket (or a label-less tracker) does not claim a review", async () => {
+test("stop gate: a done entry on an UNLABELLED ticket (or a label-less tracker) still claims the review clause — a label anomaly must not re-dispatch the implementer (ticket #147)", async () => {
 	const fx = makeFixture(JSON.stringify({ base_branch: "main", fast_check: "true" }));
 	setupEnv(fx);
 	try {
@@ -1435,8 +1433,81 @@ test("stop gate: a done entry on an UNLABELLED ticket (or a label-less tracker) 
 			[String(n)]: { pid: 1, role: "implementer", branch: `feat/${n}-x`, worktree: "/wt", startedAt: 1000, status: "done", report: "STATUS: DONE", endedAt: 2000 },
 		});
 		const d = await evaluateSettle(ctx.cwd);
-		assert.ok(d, "the ticket is startable regardless");
-		assert.ok(!d!.entries[0].content.includes("await the reviewer"), "no review claim without the in-progress/in-review label");
+		assert.ok(d, "the delivered branch is work-to-do: the review clause claims it regardless of the label");
+		assert.match(d!.entries[0].content, /await the reviewer/);
+		assert.match(d!.entries[0].content, new RegExp(`#${n}`));
+		assert.ok(!d!.entries[0].content.toLowerCase().includes("startable"), "the dispatch clause must NOT claim a delivered ticket");
+	} finally { fx.cleanup(); }
+});
+
+test("stop gate: the K-cycle release clears the repeat state — a drive state that vanishes and returns re-blocks a FRESH 3-block cycle, not an inherited pass (ticket #147 review follow-up)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", fast_check: "true" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "Dispatchable, then orphaned");
+		// Phase 1 — three identical drive blocks, then the K-repeat release passes.
+		for (const settleNo of [1, 2, 3]) {
+			const d = await evaluateSettle(ctx.cwd);
+			assert.ok(d, `settle ${settleNo}: a dispatchable ticket must drive the block`);
+			assert.match(d!.entries[0].content, new RegExp(`#${n}`), `settle ${settleNo} names the ticket:`);
+			assert.match(d!.entries[0].content, /startable/i, `settle ${settleNo}: the dispatch clause stands`);
+		}
+		assert.equal(await evaluateSettle(ctx.cwd), undefined, "the 4th identical settle passes the K-repeat release");
+		// Phase 2 — the model acts: the implementer for the ticket is in flight, so no clause
+		// drives (a VANISHED drive state; the settle passes with no fingerprint).
+		plantDispatch(ctx, {
+			[String(n)]: { pid: process.pid, role: "implementer", branch: `feat/${n}-orphaned`, worktree: "/wt", startedAt: 1000, status: "running" },
+		});
+		assert.equal(await evaluateSettle(ctx.cwd), undefined, "a child in flight drives nothing — the drive state vanishes");
+		// Phase 3 — the child dies: reconcile flips the entry to crashed, the ticket is
+		// dispatchable again — the SAME drive state (same clause lists, running 0) returns.
+		plantDispatch(ctx, {
+			[String(n)]: { pid: await deadPid(), role: "implementer", branch: `feat/${n}-orphaned`, worktree: "/wt", startedAt: 1000, status: "running" },
+		});
+		const r1 = await evaluateSettle(ctx.cwd);
+		assert.ok(r1, "the RETURNED drive state re-blocks (a fresh K-cycle) — a released state that vanished and came back must not inherit the stale (fingerprint, 3) and pass immediately");
+		assert.match(r1!.entries[0].content, new RegExp(`#${n}`));
+		assert.match(r1!.entries[0].content, /startable/i, "the dispatch clause stands again for the returned state");
+		// Phase 4 — the fresh cycle is itself complete: two more blocks, then its own release.
+		assert.ok(await evaluateSettle(ctx.cwd), "fresh cycle, block 2");
+		assert.ok(await evaluateSettle(ctx.cwd), "fresh cycle, block 3");
+		assert.equal(await evaluateSettle(ctx.cwd), undefined, "the fresh cycle releases after its own 3 identical blocks");
+	} finally { fx.cleanup(); }
+});
+
+test("stop gate: an exhausted red-check pass (gaveUp) leaves the drive-repeat state INTACT — a returned identical fingerprint CONTINUES the K-cycle to release instead of re-burning 3 blocks (ticket #147 review round 2)", async () => {
+	const fx = makeFixture(JSON.stringify({ base_branch: "main", fast_check: "true" }));
+	setupEnv(fx);
+	try {
+		const ctx = ctxWithAgents(fx);
+		const n = createIssue(fx, "A red-check pass must not clear the drive-repeat state");
+		// Phase 1 — three identical dispatch blocks: the repeat state holds (fingerprint, 3).
+		for (const settleNo of [1, 2, 3]) {
+			const d = await evaluateSettle(ctx.cwd);
+			assert.ok(d, `settle ${settleNo}: a dispatchable ticket must drive the block`);
+			assert.match(d!.entries[0].content, new RegExp(`#${n}`), `settle ${settleNo} names the ticket`);
+		}
+		// Phase 2 — the fast check goes RED and exhausts the bounded counter: the next settle
+		// is a gaveUp pass, one the red clause produces WITHOUT ever classifying the drive (the
+		// red check precedes it). Flipping the config back restores the repo tree byte-identically,
+		// so the Phase-3 settle is green and clean exactly as in Phase 1.
+		writeFileSync(fx.config, JSON.stringify({ base_branch: "main", fast_check: "false" }));
+		for (let redNo = 1; ; redNo++) {
+			const d = await evaluateSettle(ctx.cwd);
+			if (d === undefined) {
+				assert.equal(redNo, 6, "the bounded counter exhausts after 5 red blocks (default maxBlocks 5) — the 6th settle is the gaveUp pass");
+				break;
+			}
+			assert.match(d!.entries[0].content, /fast check is RED/, `settle ${redNo}: the red clause stands`);
+			assert.ok(redNo <= 5, `settle ${redNo}: a red block before exhaustion is the bounded-counter contract, not the gaveUp pass`);
+		}
+		// Phase 3 — green again, the SAME dispatchable state (same clause lists, running 0/2,
+		// clean tree): the (fingerprint, 3) must have survived the gaveUp pass, so the gate
+		// CONTINUES the cycle straight into its release. The unfixed code clears the state on
+		// the gaveUp pass and re-blocks here (n=1 of a fresh, full 3-block cycle).
+		writeFileSync(fx.config, JSON.stringify({ base_branch: "main", fast_check: "true" }));
+		assert.equal(await evaluateSettle(ctx.cwd), undefined, "a returned identical fingerprint continues the cycle (n=3 → release) — a gaveUp pass must NOT clear the drive-repeat state");
 	} finally { fx.cleanup(); }
 });
 

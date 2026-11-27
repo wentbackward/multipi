@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { collectStream } from "./streamcap.ts";
 
@@ -8,6 +8,12 @@ export interface IssueInfo {
 	blocked: boolean;
 	/** Issue numbers the ticket depends on (`Depends on #n` in the body). */
 	deps: number[];
+	/** The ticket's phase labels (dl/in-progress, dl/in-review, dl/approved, dl/gated, …). */
+	labels?: string[];
+	/** Status of the ticket's implementer entry in the loop state; absent = no entry. */
+	implementer?: "running" | "done" | "crashed" | "interrupted" | "blocked";
+	/** True when the ticket's code-reviewer entry (review-<n>) is currently running. */
+	reviewRunning?: boolean;
 }
 
 export interface StopGateInputs {
@@ -34,13 +40,23 @@ export interface StopGateInputs {
 	scenariosOn?: boolean;
 	/** Ticket numbers covered by at least one valid `t<n>-` scenario (only effective when scenariosOn). */
 	covered?: number[];
-	/** Ticket numbers whose implementer child delivered a branch (entry `done`) but whose ticket
-	 * still sits at `dl/in-progress`/`dl/in-review` with no RUNNING review — the late-report
-	 * loop drive (ticket #121): a bounded dispatch can resolve with the child still running, and
-	 * the delivered branch must not settle silently. "Running" is the word that matters: a review
-	 * that WAS dispatched but died (crashed/interrupted) counts as no running review and the
-	 * ticket belongs here (ticket #124). Computed by the caller (open issues only). */
-	pendingReviews?: number[];
+	/** The fingerprint (driveFingerprint) of the drive state the gate last BLOCKED on, if any —
+	 * the repeat breaker's comparison key (ticket #147). Computed/persisted by the caller. */
+	lastDriveFingerprint?: string;
+	/** Blocks already emitted against that fingerprint (0 = first). */
+	driveBlocks?: number;
+}
+
+/** One open ticket's drive class (the loop-drive classification, ticket #147). */
+export interface DriveClasses {
+	/** Dispatchable: no pipeline phase in flight, no live/delivered implementer entry, deps satisfied, scenario-covered when the store is on. */
+	dispatchable: number[];
+	/** Delivered (implementer `done`) with no RUNNING review — owned by the review clause. */
+	pending: number[];
+	/** dl/approved not yet dl/gated — owned by the gate clause. */
+	approved: number[];
+	/** dl/gated — owned by the merge clause. */
+	gated: number[];
 }
 
 /** Store state for the startability rule (spec §4); omitted store means off. */
@@ -51,28 +67,97 @@ export interface StoreCoverage {
 }
 
 export type StopGateDecision =
-	| { action: "pass"; gaveUp?: boolean }
-	| { action: "block"; message: string; bumpCounter: boolean };
+	| { action: "pass"; gaveUp?: boolean; /** Audit line for the K-repeat release (console, not the counter file). */ audit?: string }
+	| { action: "block"; message: string; bumpCounter: boolean; /** Present on drive blocks: the fingerprint to persist for the repeat breaker. */ fingerprint?: string };
 
+/**
+ * Classify every open, non-blocked ticket into exactly one drive clause (ticket #147).
+ *
+ * The 2026-11-25 livelock: `countStartable` conflated *dispatchable now* with *open and
+ * unblocked*, so the drive clause counted in-pipeline tickets (#110 under review) and named
+ * nothing — an identical impossible instruction re-injected on every settle. The phases:
+ *   dl/gated                                  → merge clause
+ *   dl/approved (not dl/gated)                → gate clause
+ *   implementer entry running                 → none (child in flight)
+ *   running review                            → none (review in flight — the incident shape)
+ *   implementer entry done                    → review clause (any/absent label — a label
+ *                                               anomaly must not re-dispatch the implementer)
+ *   otherwise (no entry, or terminal entry)   → dispatch clause (re-dispatch/resume),
+ *                                               deps + scenario coverage gating stays HERE ONLY
+ */
+export function classifyDrive(
+	issues: IssueInfo[],
+	closed: number[],
+	inFlight: number[],
+	store: StoreCoverage = { on: false, covered: [] },
+): DriveClasses {
+	const done = new Set([...closed, ...inFlight]);
+	const covered = new Set(store.covered);
+	const cls: DriveClasses = { dispatchable: [], pending: [], approved: [], gated: [] };
+	for (const i of issues) {
+		if (i.blocked) continue;
+		const labels = i.labels ?? [];
+		if (labels.includes("dl/gated")) {
+			cls.gated.push(i.number);
+		} else if (labels.includes("dl/approved")) {
+			cls.approved.push(i.number);
+		} else if (i.implementer === "running") {
+			// The child in flight IS the work — nothing to drive.
+		} else if (i.reviewRunning) {
+			// The review in flight IS the work — nothing to drive (the incident shape).
+		} else if (i.implementer === "done") {
+			cls.pending.push(i.number);
+		} else if (i.deps.every((d) => done.has(d)) && (!store.on || covered.has(i.number))) {
+			cls.dispatchable.push(i.number);
+		}
+	}
+	return cls;
+}
+
+/** Backwards-compatible count of the dispatch class (spec §4 wording; the gate uses classifyDrive). */
 export function countStartable(
 	issues: IssueInfo[],
 	closed: number[],
 	inFlight: number[] = [],
 	store: StoreCoverage = { on: false, covered: [] },
 ): number {
-	const done = new Set([...closed, ...inFlight]);
-	const covered = new Set(store.covered);
-	// Startability rule (spec §4): with the store on, a ticket is startable only if a valid
-	// t<ticket>- scenario covers it; with the store off the rule is inert (today's semantics).
-	return issues.filter(
-		(i) => !i.blocked && i.deps.every((d) => done.has(d)) && (!store.on || covered.has(i.number)),
-	).length;
+	return classifyDrive(issues, closed, inFlight, store).dispatchable.length;
 }
 
 /**
- * Pure evaluation of the three-way stop gate.
- * Priority: (1) red fast check, (2) dirty tree, (3) loop drive.
- * (1) and (2) are bounded by maxBlocks (bump the counter); (3) is unbounded (harness invariant).
+ * K for the drive repeat breaker: consecutive settles against an UNCHANGED drive state block
+ * at most K times, then the gate passes with an audit line. K=3: three identical messages are
+ * enough for the instruction to be unmistakably understood, and they bound the context pollution
+ * to three injections instead of unbounded; K=1–2 would release before the model had a full
+ * turn to act on a merely confusing (not impossible) instruction, and any larger K buys nothing
+ * — after three identical blocks the state has demonstrably been acted on and cannot be.
+ */
+export const DRIVE_REPEAT_LIMIT = 3;
+
+/** Stable fingerprint over the drive clause inputs (ticket #147): a change in any of them is a
+ * new drive state and resets the repeat count. */
+export function driveFingerprint(i: StopGateInputs, cls: DriveClasses): string {
+	const nums = (xs: number[]): string => xs.slice().sort((a, b) => a - b).map(String).join("/");
+	return [
+		nums(cls.dispatchable),
+		nums(cls.pending),
+		nums(cls.approved),
+		nums(cls.gated),
+		i.running,
+		i.cap,
+		i.fastCheckPassed ? "green" : "red",
+		i.dirty ? "dirty" : "clean",
+	].join("|");
+}
+
+/**
+ * Pure evaluation of the stop gate.
+ * Priority: (1) red fast check, (2) dirty tree, (3) phased loop drive (ticket #147):
+ * dispatchable / delivered-awaiting-review / approved-awaiting-gate / gated-awaiting-merge.
+ * (1) and (2) are bounded by maxBlocks (bump the counter); the drive is unbounded (harness
+ * invariant) and never bumps the bounded counter, EXCEPT the K-repeat release: an unchanged
+ * drive state blocked K times consecutively passes with an audit line (console, not the
+ * bounded-counter file) — an identical repeated message must not livelock the session.
  */
 export function evaluateStopGate(i: StopGateInputs): StopGateDecision {
 	if (!i.fastCheckPassed) {
@@ -94,23 +179,44 @@ export function evaluateStopGate(i: StopGateInputs): StopGateDecision {
 				"The main-branch working tree has UNCOMMITTED CHANGES. Stage, commit (or discard), then settle.",
 		};
 	}
-	const startable = countStartable(i.issues, i.closed, i.inFlight, {
+	const cls = classifyDrive(i.issues, i.closed, i.inFlight, {
 		on: i.scenariosOn === true,
 		covered: i.covered ?? [],
 	});
-	// The loop drive: work that is startable or already delivered-but-unreviewed. Both clauses are
-	// unbounded (the harness invariant) and never bump the bounded counter; with a single clause
-	// the message is byte-identical to its pre-#121 shape.
+	// The loop drive: work that is dispatchable, delivered-but-unreviewed, approved-but-
+	// ungated, or gated-but-unmerged. Every clause is unbounded (the harness invariant) and
+	// names the tickets it counts — an unnamed count is the 2026-11-25 livelock shape.
+	const name = (xs: number[]): string => xs.map((n) => `#${n}`).join(", ");
 	const drive: string[] = [];
-	if (startable > 0 && i.running < i.cap) {
-		drive.push(`${startable} ticket(s) are startable (unblocked, dependencies closed) and a dispatch slot is free (running ${i.running}/${i.cap}). Keep going: dispatch them with devloop_dispatch, gate and merge what is dl/gated.`);
+	if (cls.dispatchable.length > 0 && i.running < i.cap) {
+		drive.push(
+			`${cls.dispatchable.length} ticket(s) are startable (unblocked, dependencies closed) and a dispatch slot is free (running ${i.running}/${i.cap}): ${name(cls.dispatchable)}. Keep going: dispatch them with devloop_dispatch, gate and merge what is dl/gated.`,
+		);
 	}
-	const pending = i.pendingReviews ?? [];
-	if (pending.length > 0) {
-		drive.push(`${pending.length} delivered branch(es) await the reviewer (the implementer child finished, but no review has been dispatched): ${pending.map((n) => `#${n}`).join(", ")}. Keep going: dispatch the code-reviewer for each (devloop_dispatch), then gate and merge what is dl/gated.`);
+	if (cls.pending.length > 0) {
+		drive.push(
+			`${cls.pending.length} delivered branch(es) await the reviewer (the implementer child finished, but no review has been dispatched): ${name(cls.pending)}. Keep going: dispatch the code-reviewer for each (devloop_dispatch), then gate and merge what is dl/gated.`,
+		);
+	}
+	if (cls.approved.length > 0) {
+		drive.push(
+			`${cls.approved.length} ticket(s) are dl/approved and await the gate: ${name(cls.approved)}. Keep going: run the batch gate for them (devloop_gate), then merge what is dl/gated.`,
+		);
+	}
+	if (cls.gated.length > 0) {
+		drive.push(
+			`${cls.gated.length} ticket(s) are dl/gated and await the merge: ${name(cls.gated)}. Keep going: merge them in gate order (devloop_merge).`,
+		);
 	}
 	if (drive.length > 0) {
-		return { action: "block", bumpCounter: false, message: drive.join("\n") };
+		const fp = driveFingerprint(i, cls);
+		if (i.lastDriveFingerprint === fp && (i.driveBlocks ?? 0) >= DRIVE_REPEAT_LIMIT) {
+			return {
+				action: "pass",
+				audit: `devloop stop-gate AUDIT: the drive state has been identical for ${DRIVE_REPEAT_LIMIT + 1} consecutive settles (startable ${name(cls.dispatchable) || "—"}; awaiting review ${name(cls.pending) || "—"}; awaiting gate ${name(cls.approved) || "—"}; awaiting merge ${name(cls.gated) || "—"}; running ${i.running}/${i.cap}) — releasing after ${DRIVE_REPEAT_LIMIT} identical blocks. Any change to the drive state re-blocks.`,
+			};
+		}
+		return { action: "block", bumpCounter: false, message: drive.join("\n"), fingerprint: fp };
 	}
 	return { action: "pass" };
 }
@@ -145,6 +251,53 @@ export function writeCounter(p: string, n: number): void {
 export function resetCounter(p: string): void {
 	try {
 		writeFileSync(p, "0");
+	} catch {
+		/* best effort */
+	}
+}
+
+/** Per-repo drive-repeat state, stored next to the counter (never committed): line 1 = the
+ * fingerprint of the last BLOCKED drive state, line 2 = blocks emitted against it. */
+export function driveStatePath(repoRoot: string): string {
+	const common = execFileSync("git", ["rev-parse", "--git-common-dir"], { cwd: repoRoot, stdio: "pipe" })
+		.toString()
+		.trim();
+	return path.isAbsolute(common) ? path.join(common, "devloop-stop-drive") : path.join(repoRoot, common, "devloop-stop-drive");
+}
+
+export interface DriveRepeat {
+	fp: string;
+	n: number;
+}
+
+export function readDriveState(p: string): DriveRepeat | null {
+	try {
+		const lines = readFileSync(p, "utf8").trim().split("\n");
+		const n = Number.parseInt(lines[1] ?? "", 10);
+		if ((lines[0] ?? "").length > 0 && Number.isFinite(n) && n > 0) return { fp: lines[0], n };
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+export function writeDriveState(p: string, fp: string, n: number): void {
+	mkdirSync(path.dirname(p), { recursive: true });
+	writeFileSync(p, `${fp}\n${n}\n`);
+}
+
+/** Clears the drive-repeat state (best effort; no-op when the file is absent). The gate calls
+ * it only on the passed settles that evaluated the drive — the K-cycle release and the settle
+ * where no clause drives: a drive state that vanishes and later RETURNS under the same
+ * fingerprint must restart the K-cycle from block 1 — the stale (fingerprint, K) must not ride
+ * a passed settle (ticket #147 review follow-up). A gaveUp pass (exhausted red-fast-check or
+ * dirty clause) gave up BEFORE the drive classification and therefore LEAVES THE STATE INTACT:
+ * the identical fingerprint that returns continues the cycle (n=K → release), it does not
+ * re-burn the full 3-block cycle (ticket #147 review round 2). A zero count has no file
+ * representation (readDriveState requires n > 0), so the clear is an unlink, not a write. */
+export function resetDriveState(p: string): void {
+	try {
+		unlinkSync(p);
 	} catch {
 		/* best effort */
 	}
